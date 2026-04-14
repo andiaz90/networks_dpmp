@@ -49,7 +49,8 @@ SCRIPT_DIR = @__DIR__    # directory of this file
 include(joinpath(SCRIPT_DIR, "steady_ntwsoe_system.jl"))
 include(joinpath(SCRIPT_DIR, "steady_ntwsoe.jl"))
 include(joinpath(SCRIPT_DIR, "utils.jl"))
-include(joinpath(SCRIPT_DIR, "figs_SOE_gap.jl"))   # defines generate_figures at top level
+include(joinpath(SCRIPT_DIR, "figs_SOE_gap.jl"))    # generate_figures()
+include(joinpath(SCRIPT_DIR, "plot_scripts.jl"))    # run_all_plots() — all MATLAB plot scripts
 
 
 # =========================================================================== #
@@ -1001,22 +1002,43 @@ sec_results_for_figs = DataFrame(
     std_Y   = std_Y_m, std_PH = std_PH_m, std_L = std_L_m,
 )
 
-# generate_figures is defined at the top level (include at script load time)
-# so no world-age issue — direct call works fine.
+# ---- figs_SOE_gap.jl: IRF overview table + basic sectoral plots ----
 generate_figures(
     MOD_DIR        = MOD_DIR,
-    FIGURES_DIR    = FIGURES_DIR,    # julia_dynare/figures/
-    TABLES_DIR     = TABLES_DIR,     # julia_dynare/tables/
+    FIGURES_DIR    = FIGURES_DIR,
+    TABLES_DIR     = TABLES_DIR,
     SCRIPT_DIR     = SCRIPT_DIR,
     EXERCISE       = EXERCISE,
     nsec           = nsec,
     names_vec      = names_vec,
     ss_results     = (GDP_ss=GDP_ss, TB_ss=TB_ss, Q_ss=Q_ss,
-                      C_ss=C_ss, N_ss=N_ss, Bstar_ss=Bstar_ss,
-                      w_ss=w_ss),
+                      C_ss=C_ss, N_ss=N_ss, Bstar_ss=Bstar_ss, w_ss=w_ss),
     sec_results    = sec_results_for_figs,
     exercise_label = exercise_labels[EXERCISE+1],
 )
+
+# ---- plot_scripts.jl: all remaining MATLAB plot scripts ----------------
+# Translates: figs_SOE_gap.m, plot_manufacturing_shock.m,
+#             plot_figure7_manufacturing_shock.m, plot_shock_effects.m,
+#             steady_state_table.m
+irf_path = joinpath(MOD_DIR, "dynare_irfs.csv")
+if isfile(irf_path) && filesize(irf_path) > 10
+    df_irf_plots = CSV.read(irf_path, DataFrame)
+    if nrow(df_irf_plots) > 0
+        run_all_plots(
+            df_irf      = df_irf_plots,
+            EXERCISE    = EXERCISE,
+            names_vec   = names_vec,
+            ss_results  = (GDP_ss=GDP_ss, TB_ss=TB_ss, Q_ss=Q_ss,
+                           C_ss=C_ss, N_ss=N_ss, Bstar_ss=Bstar_ss, w_ss=w_ss),
+            sec_results = sec_results_for_figs,
+            FIGURES_DIR = FIGURES_DIR,
+            TABLES_DIR  = TABLES_DIR,
+            tag         = tag,
+            ombar       = ombar_val,
+        )
+    end
+end
 
 
 # =========================================================================== #
