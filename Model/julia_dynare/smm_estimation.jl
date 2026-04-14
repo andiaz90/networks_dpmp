@@ -1,0 +1,521 @@
+"""
+smm_estimation.jl
+=================
+Simulated Method of Moments (SMM) estimation for the NK-IOSOE Chile model.
+
+STRATEGY
+  The model is solved at first order by Dynare.jl (NK_SOE_lev_gap2.mod).
+  For each candidate θ, smm_model_moments() re-solves the linearised system
+  (via Dynare.compute_first_order_solution!) WITHOUT recompiling the model.
+  Theoretical unconditional second moments are derived analytically from the
+  state-space representation via the discrete Lyapunov equation.
+
+PREREQUISITES
+  1. Run compute_data_moments.jl at least ONCE to produce data_moments_chile.mat.
+  2. main_SOE_gap.jl handles the initial Dynare compile; we import the context.
+
+ESTIMATED PARAMETERS  θ (23-element vector)
+  [1]     ilabcosts          aggregate labour adjustment cost (inverse)
+  [2]     epsY               elast. of subst. in production
+  [3]     epsM               elast. of subst. between materials
+  [4]     log(kappaV)        log of import price adj. cost
+  [5]     rho_om             AR persistence, goods-services shock
+  [6]     sigma_om           std dev, goods-services shock
+  [7]     rho_A              AR persistence, sectoral TFP shocks (common)
+  [8-19]  isigma_tfp_1,...12 std dev of each sector's TFP shock
+  [20]    rho_pvstar         AR persistence, import price shock
+  [21]    sigma_pvstar       std dev of import price shock
+  [22]    rho_xi             AR persistence, preference shock
+  [23]    sigma_xi           std dev of preference shock
+
+Usage:
+  julia --project=. smm_estimation.jl
+or from REPL:
+  include("smm_estimation.jl")
+  # Then call:  smm_run(context)   where context comes from main_SOE_gap.jl
+"""
+
+using LinearAlgebra, Statistics, StatsBase, Printf
+using NLsolve, MAT, Dynare
+using CMAEvolutionStrategy
+
+SCRIPT_DIR  = @__DIR__
+REPO_ROOT   = abspath(joinpath(SCRIPT_DIR, "..", ".."))
+MODELO_DIR  = abspath(joinpath(SCRIPT_DIR, "..", "modelo_chile"))
+
+include("steady_ntwsoe_system.jl")
+include("steady_ntwsoe.jl")
+include("utils.jl")
+include("smm_model_moments.jl")
+
+@printf "\n%s\n  SMM ESTIMATION: NK-IOSOE Chile Model\n%s\n\n" repeat("=",60) repeat("=",60)
+
+
+# =========================================================================== #
+#  1.  LOAD DATA MOMENTS                                                       #
+# =========================================================================== #
+
+const NSEC     = 12
+const GOODS    = [1,2,3,4,5]
+const SERVICES = [6,7,8,9,10,11,12]
+
+@printf "--- Loading data moments ---\n"
+
+dm_file = joinpath(MODELO_DIR, "data_moments_chile.mat")
+
+if isfile(dm_file)
+    tmp = matread(dm_file)
+    dm  = tmp["dm_chile"]
+    y_d           = vec(Float64.(dm["y_d"]))
+    p_d           = vec(Float64.(dm["p_d"]))
+    l_d           = vec(Float64.(dm["l_d"]))
+    d_std_GDP     = Float64(dm["d_std_GDP"])
+    d_std_pi      = Float64(dm["d_std_pi"])
+    d_corr_GDPpi  = Float64(dm["d_corr_GDPpi"])
+    d_omG         = Float64(dm["d_omG"])
+    d_std_Q       = Float64(dm["d_std_Q"])
+    d_autocorr_Q  = Float64(dm["d_autocorr_Q"])
+    d_corr_GDPQ   = Float64(dm["d_corr_GDPQ"])
+    d_TBGDP       = Float64(dm["d_TBGDP"])
+    ss = dm["sample_start"]; se = dm["sample_end"]
+    @printf "  Loaded from data_moments_chile.mat  (sample %dQ%d – %dQ%d)\n\n" Int(ss[1]) Int(ss[2]) Int(se[1]) Int(se[2])
+else
+    @printf "  data_moments_chile.mat not found — using literature defaults.\n"
+    @printf "  Run compute_data_moments.jl first for data-based moments.\n\n"
+    y_d          = fill(0.04, NSEC)
+    p_d          = fill(0.02, NSEC)
+    l_d          = fill(0.03, NSEC)
+    d_std_GDP    = 0.0215
+    d_std_pi     = 0.0041
+    d_corr_GDPpi = -0.15
+    d_omG        = 0.57
+    d_std_Q      = 0.0520
+    d_autocorr_Q = 0.75
+    d_corr_GDPQ  = -0.15
+    d_TBGDP      = -0.02
+end
+
+# Full 46-element data moment vector
+data_moments = [
+    y_d;           # 1-12   std(Y_i)
+    p_d;           # 13-24  std(PH_i)
+    l_d;           # 25-36  std(L_i)
+    d_std_GDP;     # 37
+    d_std_pi;      # 38
+    d_corr_GDPpi;  # 39
+    d_omG;         # 40   SS target (passive)
+    d_std_Q;       # 41
+    d_autocorr_Q;  # 42   identifies rho_pvstar
+    d_corr_GDPQ;   # 43   over-identifies pvstar shock
+    1.0;           # 44   rank corr output: perfect match target
+    1.0;           # 45   rank corr prices
+    1.0;           # 46   rank corr labor
+]
+@assert length(data_moments) == 46 "Expected 46 data moments, got $(length(data_moments))"
+
+
+# =========================================================================== #
+#  2.  LOAD INITIAL MODEL CONTEXT AND BUILD BASELINE                          #
+# =========================================================================== #
+
+"""
+    build_baseline(context, endo_names, data_moments) -> NamedTuple
+
+Assemble the fixed calibration objects passed into smm_model_moments on
+every iteration.  Mirrors the `baseline` struct in MATLAB smm_estimation.m.
+"""
+function build_baseline(context::Dynare.Context,
+                         endo_names::Vector{String},
+                         d_std_Y, d_std_PH, d_std_L,
+                         d_TBGDP, d_omG)
+    # Load calibration vectors from context.models[1].params
+    function pvec(nm)
+        idx = param_idx(context, nm)
+        idx === nothing && return NaN
+        context.models[1].params[idx]
+    end
+
+    nsec  = NSEC
+    # Read sectoral parameter vectors from Dynare context
+    modalpha   = [pvec("alpha_$(i)")   for i in 1:nsec]
+    modalphaV  = [pvec("alphaV_$(i)")  for i in 1:nsec]
+    modvarrho  = [pvec("varrho_$(i)")  for i in 1:nsec]
+    modgammag  = [pvec("gammag_$(i)")  for i in 1:nsec]
+    modgammas  = [pvec("gammas_$(i)")  for i in 1:nsec]
+    modchiX    = [pvec("chiX_$(i)")    for i in 1:nsec]
+    modkappa   = [pvec("kappa_$(i)")   for i in 1:nsec]
+    modbeta    = [pvec("beta_$(i)_$(j)") for i in 1:nsec, j in 1:nsec]
+
+    ss_vec = context.results.model_results[1].trends.endogenous_steady_state
+    get_ss(nm) = let idx = endo_dr_idx(endo_names, nm)
+                     idx === nothing ? 1.0 : ss_vec[idx]
+                 end
+
+    Y_ss_vec = [get_ss("Y_$(i)") for i in 1:nsec]
+
+    return (
+        nsec        = nsec,
+        goods       = GOODS,
+        services    = SERVICES,
+        Y_ss        = Y_ss_vec,
+        GDP_ss      = get_ss("GDP"),
+        ombar_val   = pvec("ombar"),
+        tb_target   = d_TBGDP,
+        modalpha    = modalpha,
+        modalphaV   = modalphaV,
+        modbeta     = modbeta,
+        modgammag   = modgammag,
+        modgammas   = modgammas,
+        modvarrho   = modvarrho,
+        modchiX     = modchiX,
+        modkappa    = modkappa,
+        gamma_val   = pvec("gamma"),
+        psi_val     = pvec("psi"),
+        chi_val     = 1.0,
+        epsilon_val = pvec("epsilon"),
+        beta_val    = pvec("beta"),
+        PVstar_ss   = pvec("PVstar_ss"),
+        sigmaH_val  = pvec("sigmaH"),
+        etastar_val = pvec("etastar"),
+        omegaX_val  = pvec("omegaX"),
+        ystar_ss_val= pvec("ystar_ss"),
+        data_std_Y  = d_std_Y,
+        data_std_PH = d_std_PH,
+        data_std_L  = d_std_L,
+    )
+end
+
+
+# =========================================================================== #
+#  3.  WEIGHTING MATRIX                                                        #
+#                                                                              #
+#  Diagonal relative-scale: W[i,i] = 1 / max(|d_i|, floor)^2                #
+#  Makes every moment contribute equally in percentage terms.                 #
+#  Downweights structurally-mismatched moments (corr(GDP,pi)) and             #
+#  near-zero moments that would otherwise dominate mechanically.              #
+# =========================================================================== #
+
+function build_weighting_matrix(data_moments::Vector{<:Real})
+    floor_w = 0.01
+    w_diag  = 1.0 ./ max.(abs.(data_moments), floor_w).^2
+    W = Diagonal(w_diag)   # use Diagonal for efficiency; convert to Matrix below
+
+    # Cap weights for small-magnitude moments to prevent mechanical dominance
+    # (equivalent to MATLAB Fix 3: |d_i| < 0.02 → 0.25× natural weight)
+    W_mat = collect(Matrix(W))
+    for i in eachindex(data_moments)
+        if abs(data_moments[i]) < 0.02
+            W_mat[i, i] *= 0.25
+        end
+    end
+
+    # Fix 1: corr(GDP,pi) [39] — structurally cannot match with supply shocks only
+    W_mat[39, 39] *= 0.02
+    # Fix passive moments
+    W_mat[40, 40] *= 0.10   # mean omG: imposed by SS calibration
+    W_mat[43, 43] *= 0.50   # corr(GDP,Q): over-identified
+    W_mat[44, 44] *= 0.50   # rank corr output
+    W_mat[45, 45] *= 0.50   # rank corr prices
+    W_mat[46, 46] *= 0.50   # rank corr labor
+
+    return W_mat
+end
+
+
+# =========================================================================== #
+#  4.  PARAMETER BOUNDS AND INITIAL VALUES                                     #
+# =========================================================================== #
+
+const PARAM_LABELS = vcat(
+    ["ilabcosts", "epsY", "epsM", "log(kappaV)", "rho_om", "sigma_om", "rho_A"],
+    ["isigma_tfp_$(i)" for i in 1:12],
+    ["rho_pvstar", "sigma_pvstar", "rho_xi", "sigma_xi"],
+)
+const N_THETA = length(PARAM_LABELS)  # 23
+
+const LB = [1e-3; 0.10; 0.01; log(1e3);  -0.99; 1e-5; -0.99;
+            fill(1e-5, 12); 0.50;  0.005; 0.00;  0.0  ]
+const UB = [100.0; 3.00; 1.50; log(1e16); 0.99;  0.50; 0.99;
+            fill(0.50, 12); 0.99;  0.50;  0.99;  0.20 ]
+
+
+"""
+    default_theta0(context) -> Vector{Float64}
+
+Build the initial parameter vector from the current Dynare context.
+"""
+function default_theta0(context::Dynare.Context)
+    pv(nm) = let idx = param_idx(context, nm); idx === nothing ? 0.0 : context.models[1].params[idx]; end
+    [
+        pv("ilabcosts");
+        pv("epsY_1");
+        pv("epsM_1");
+        log(pv("kappaV"));
+        pv("rho_om1");
+        pv("sigma_om");
+        pv("rho_tfp1");
+        [pv("isigma_tfp_$(i)") for i in 1:12];
+        pv("rho_pvstar");
+        pv("sigma_pvstar");
+        pv("rho_xi");
+        pv("sigma_xi");
+    ]
+end
+
+
+# =========================================================================== #
+#  5.  SMM OBJECTIVE FUNCTION                                                  #
+# =========================================================================== #
+
+"""
+    smm_objective(θ, data_moments, W, context, baseline, endo_names)
+      -> (obj::Float64, moments::Vector{Float64})
+
+Compute the SMM loss (θ - data_moments)' W (θ - data_moments).
+Returns 1e8 if the model fails to solve.
+"""
+function smm_objective(θ::AbstractVector{<:Real},
+                        data_moments::Vector{<:Real},
+                        W::Matrix{<:Real},
+                        context::Dynare.Context,
+                        baseline::NamedTuple,
+                        endo_names::Vector{String})
+    moments, ok = smm_model_moments(θ, context, baseline, endo_names)
+    if !ok || any(isnan, moments)
+        return 1e8, fill(NaN, 46)
+    end
+    ψ   = data_moments .- moments
+    obj = dot(ψ, W * ψ)
+    return obj, moments
+end
+
+
+# =========================================================================== #
+#  6.  WARM START                                                              #
+# =========================================================================== #
+
+function load_warm_start(n_theta::Int)
+    ckpt_file    = joinpath(MODELO_DIR, "smm_best_so_far.mat")
+    results_file = joinpath(MODELO_DIR, "smm_results.mat")
+
+    if isfile(ckpt_file)
+        try
+            tmp = matread(ckpt_file)
+            θ_prev = vec(Float64.(tmp["smm_best_so_far"]["theta_best"]))
+            if length(θ_prev) == n_theta && all(θ_prev .>= LB) && all(θ_prev .<= UB)
+                obj_prev = Float64(tmp["smm_best_so_far"]["obj_best"])
+                @printf "  Warm start: smm_best_so_far.mat  (obj=%.6f)\n\n" obj_prev
+                return θ_prev
+            end
+        catch
+        end
+    end
+
+    if isfile(results_file)
+        try
+            tmp = matread(results_file)
+            θ_prev = vec(Float64.(tmp["smm_results"]["theta_hat"]))
+            if length(θ_prev) == n_theta && all(θ_prev .>= LB) && all(θ_prev .<= UB)
+                obj_prev = Float64(tmp["smm_results"]["obj_hat"])
+                @printf "  Warm start: smm_results.mat  (obj=%.6f)\n\n" obj_prev
+                return θ_prev
+            end
+        catch
+        end
+    end
+
+    @printf "  No valid checkpoint found — using default θ₀.\n\n"
+    return nothing
+end
+
+
+# =========================================================================== #
+#  7.  MAIN ESTIMATION FUNCTION                                                #
+# =========================================================================== #
+
+"""
+    smm_run(context) -> (theta_hat, obj_hat, moments_hat)
+
+Run the full SMM estimation.  Pass the Dynare.jl `context` returned by
+`@dynare "NK_SOE_lev_gap2"` (from main_SOE_gap.jl or equivalent).
+
+Example:
+    include("main_SOE_gap.jl")          # solves model, returns context
+    include("smm_estimation.jl")
+    theta_hat, obj, moments = smm_run(context)
+"""
+function smm_run(context::Dynare.Context)
+
+    endo_names = Dynare.get_endogenous(context.symboltable)
+
+    # --- Build baseline calibration struct ---
+    baseline = build_baseline(context, endo_names,
+                               y_d, p_d, l_d, d_TBGDP, d_omG)
+
+    # --- Weighting matrix ---
+    W = build_weighting_matrix(data_moments)
+    @printf "  Weighting matrix built (%dx%d diagonal).\n\n" size(W,1) size(W,2)
+
+    # --- Initial θ ---
+    θ0 = default_theta0(context)
+    # Try warm start
+    θ_warm = load_warm_start(N_THETA)
+    θ0     = something(θ_warm, θ0)
+    θ0     = clamp.(θ0, LB, UB)
+
+    # --- Pre-flight check at θ₀ ---
+    @printf "=== PRE-FLIGHT CHECK ===\n"
+    m_test, ok_test = smm_model_moments(θ0, context, baseline, endo_names)
+    if !ok_test || any(isnan, m_test)
+        @printf "  PRE-FLIGHT FAILED — model did not solve at θ₀.\n"
+        @printf "  NaN moments: %s\n" string(findall(isnan, m_test))
+        @printf "  → Check that main_SOE_gap.jl ran EXERCISE=0 (Baseline) first.\n"
+        error("SMM pre-flight failed. Fix model setup before estimation.")
+    end
+    obj_test = smm_objective(θ0, data_moments, W, context, baseline, endo_names)[1]
+
+    @printf "  %-34s  %9s  %9s\n" "Moment" "Data" "Model"
+    @printf "  %s\n" repeat("-", 56)
+    for (i, nm) in enumerate(MOMENT_NAMES)
+        @printf "  %-34s  %9.5f  %9.5f\n" nm data_moments[i] m_test[i]
+    end
+    @printf "\n  obj(θ₀) = %.6f\n" obj_test
+    @printf "=== PRE-FLIGHT PASSED — launching optimizer ===\n\n"
+
+    # --- CMA-ES optimisation ---
+    # CMAEvolutionStrategy.jl: minimise f(θ) subject to LB ≤ θ ≤ UB.
+    # insigma = (UB - LB)/6 so ±3σ spans the full feasible range.
+    @printf "--- CMA-ES (blackbox, derivative-free) ---\n"
+    @printf "  %d parameters, %d moments, max %d evaluations\n\n" N_THETA 46 (5000*N_THETA)
+
+    fail_count = Ref(0)
+    obj_fn = θ -> begin
+        obj, _ = smm_objective(θ, data_moments, W, context, baseline, endo_names)
+        obj >= 1e7 && (fail_count[] += 1)
+        obj
+    end
+
+    insigma = (UB .- LB) ./ 6
+
+    result = CMAEvolutionStrategy.minimize(
+        obj_fn,
+        clamp.(θ0, LB, UB),
+        insigma;
+        lower    = LB,
+        upper    = UB,
+        maxiter  = 5000 * N_THETA,
+        ftol     = 1e-6,
+        xtol     = 1e-6,
+        seed     = 42,
+        verbosity = 1,
+    )
+
+    θ_hat = clamp.(minimizer(result), LB, UB)
+    @printf "\nCMA-ES done.  obj = %.6f  (BK/NaN failures: %d)\n\n" minimum(result) fail_count[]
+
+    # --- Final evaluation ---
+    obj_hat, moments_hat = smm_objective(θ_hat, data_moments, W, context, baseline, endo_names)
+    ψ_hat = data_moments .- moments_hat
+
+    # =========================================================================== #
+    #  8.  RESULTS TABLE                                                           #
+    # =========================================================================== #
+
+    @printf "\n%s\n  SMM RESULTS\n%s\n\n" repeat("=",60) repeat("=",60)
+    @printf "  Objective at θ̂: %.6f\n\n" obj_hat
+
+    @printf "  %-6s  %-18s  %10s  %10s\n" "Idx" "Parameter" "Initial" "Estimate"
+    @printf "  %s\n" repeat("-", 50)
+    for k in 1:N_THETA
+        if k == 4
+            @printf "  %3d  %-18s  %10.4f  %10.4f  [log]\n" k PARAM_LABELS[k] θ0[k] θ_hat[k]
+            @printf "  %3s  %-18s  %10.2e  %10.2e  [level]\n" "--" "kappaV" exp(θ0[k]) exp(θ_hat[k])
+        else
+            @printf "  %3d  %-18s  %10.4f  %10.4f\n" k PARAM_LABELS[k] θ0[k] θ_hat[k]
+        end
+    end
+
+    @printf "\n  Moment fit:\n"
+    @printf "  %-36s  %9s  %9s  %9s\n" "Moment" "Data" "Model" "Diff"
+    @printf "  %s\n" repeat("-", 68)
+    for (i, nm) in enumerate(MOMENT_NAMES)
+        @printf "  %-36s  %9.5f  %9.5f  %+9.5f\n" nm data_moments[i] moments_hat[i] ψ_hat[i]
+    end
+
+    # =========================================================================== #
+    #  9.  SAVE RESULTS                                                            #
+    # =========================================================================== #
+
+    # smm_results.mat — full results (compatible with MATLAB smm_estimation.m format)
+    smm_results_dict = Dict{String,Any}(
+        "theta_hat"     => θ_hat,
+        "obj_hat"       => obj_hat,
+        "psi_hat"       => ψ_hat,
+        "moments_hat"   => moments_hat,
+        "data_moments"  => data_moments,
+        "param_labels"  => PARAM_LABELS,
+        "moment_names"  => MOMENT_NAMES,
+        "W"             => W,
+    )
+    results_path = joinpath(MODELO_DIR, "smm_results.mat")
+    matwrite(results_path, Dict("smm_results" => smm_results_dict))
+    @printf "\nResults saved to:\n  %s\n" results_path
+
+    # smm_estimates.mat — parameter estimates only (read by main_SOE_gap.jl)
+    estimates_dict = Dict{String,Any}(
+        "ilabcosts_val"    => θ_hat[1],
+        "modepsY"          => fill(θ_hat[2], NSEC),
+        "modepsM"          => fill(θ_hat[3], NSEC),
+        "kappaV_val"       => exp(θ_hat[4]),
+        "rho_om1_val"      => θ_hat[5],
+        "sigma_om_val"     => θ_hat[6],
+        "rho_tfp1_val"     => θ_hat[7],
+        "isigma_tfp_val"   => θ_hat[8:19],
+        "rho_pvstar_val"   => θ_hat[20],
+        "sigma_pvstar_val" => θ_hat[21],
+        "rho_xi_val"       => θ_hat[22],
+        "sigma_xi_val"     => θ_hat[23],
+    )
+    estimates_path = joinpath(MODELO_DIR, "smm_estimates.mat")
+    matwrite(estimates_path, estimates_dict)
+    @printf "  Estimates saved to:\n  %s\n" estimates_path
+    @printf "\n  Re-run main_SOE_gap.jl (EXERCISE=0) to apply estimates.\n\n"
+
+    return θ_hat, obj_hat, moments_hat
+end
+
+
+# =========================================================================== #
+#  ENTRY POINT                                                                 #
+#                                                                              #
+#  When run as a script, this tries to load the Dynare context from the       #
+#  compiled model output (written by main_SOE_gap.jl).  If not found, it      #
+#  tells the user to run main_SOE_gap.jl first.                               #
+# =========================================================================== #
+
+if abspath(PROGRAM_FILE) == @__FILE__
+    context_file = joinpath(SCRIPT_DIR, "mod", "NK_SOE_lev_gap2",
+                             "output", "NK_SOE_lev_gap2.jls")
+    if isfile(context_file)
+        using Serialization
+        @printf "Loading compiled Dynare context from:\n  %s\n\n" context_file
+        context = deserialize(context_file)
+        smm_run(context)
+    else
+        @printf """
+        Dynare context not found at:
+          %s
+
+        Run main_SOE_gap.jl first (EXERCISE=0) to compile the model:
+          julia --project=. main_SOE_gap.jl
+
+        Then re-run SMM estimation:
+          julia --project=. smm_estimation.jl
+
+        Or from a Julia REPL:
+          include("main_SOE_gap.jl")   # returns `context`
+          include("smm_estimation.jl")
+          smm_run(context)
+        """ context_file
+    end
+end
