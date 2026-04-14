@@ -97,6 +97,10 @@ end
 
 @assert EXERCISE in 0:3 "Invalid EXERCISE value. Must be 0, 1, 2, or 3."
 
+# Short tag for filenames — defined early so all sections can use it
+const OUTPUT_TAGS = ["baseline", "ex1_pref", "ex2_mfg", "ex3_mp"]
+tag = OUTPUT_TAGS[EXERCISE + 1]
+
 
 # =========================================================================== #
 #  PATHS                                                                       #
@@ -965,9 +969,6 @@ rank_corr = (rho_output=rho_y, rho_price=rho_p, rho_labor=rho_l)
 # =========================================================================== #
 #  SAVE RESULTS                                                                #
 # =========================================================================== #
-
-output_tags = ["baseline", "ex1_pref", "ex2_mfg", "ex3_mp"]
-tag = output_tags[EXERCISE+1]
 
 # All tables go to julia_dynare/tables/
 output_path = joinpath(TABLES_DIR, "model_output_$(tag).csv")
