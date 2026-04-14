@@ -526,6 +526,8 @@
 {"statementName": "param_init", "name": "C_s_ss", "value": "0.425509734585031"},
 {"statementName": "param_init", "name": "C_g_ss", "value": "0.314010480518968"},
 {"statementName": "param_init", "name": "Bstar_ss", "value": "1.85839447390738"},
+{"statementName": "param_init", "name": "Q_ss", "value": "0.629845763012334"},
+{"statementName": "param_init", "name": "TB_ss", "value": "0.0166197022267195"},
 {"statementName": "param_init", "name": "IMP_ss", "value": "0.748862851124352"},
 {"statementName": "param_init", "name": "Ctot_ss", "value": "0.747840540312933"},
 {"statementName": "param_init", "name": "Ctotg_ss", "value": "0.319517604513492"},

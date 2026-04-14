@@ -548,6 +548,11 @@ Ctots_ss_val  = sum(gammas_vec .* (p_s_ss ./ P_ss) .* C_s_ss)
 Ctot_ss_val   = Ctotg_ss_val + Ctots_ss_val
 IMP_ss_val    = IMP_tot_ss
 
+# Aggregates used in initval block (must be declared as Dynare parameters)
+CFg_total_ss  = sum(CFg_ss)   # total goods consumer imports
+CFs_total_ss  = sum(CFs_ss)   # total services consumer imports
+# PX_ss, V_ss, CF_ss already computed above
+
 Pistar_ss_val  = Pistar_ss
 Rworld_ss_val  = Rworld_ss
 PVstar_ss_val  = PVstar_ss
@@ -614,6 +619,11 @@ params_nt = (
     Bstar_ss       = Bstar_ss,
     Q_ss           = Q_ss,
     TB_ss          = TB_ss,
+    PX_ss          = PX_ss,
+    V_ss           = V_ss,
+    CF_ss          = CF_ss,
+    CFg_total_ss   = CFg_total_ss,
+    CFs_total_ss   = CFs_total_ss,
     IMP_ss_val     = IMP_ss_val,
     Ctot_ss_val    = Ctot_ss_val,
     Ctotg_ss_val   = Ctotg_ss_val,

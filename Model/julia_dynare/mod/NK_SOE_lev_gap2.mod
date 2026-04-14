@@ -101,7 +101,8 @@ Ctot_ss Ctotg_ss Ctots_ss VA_ss M_tot_ss Y_ss IMP_ss
 // Shock activation parameters (set by params_jl.mod; 0=off, 1=on)
 shock_eps_om shock_eps_i shock_eps_pvstar shock_eps_xi
 // Scalar SS values used in initval block (set by params_jl.mod)
-pi_ss r_ss w_ss N_ss GDP_ss C_ss C_g_ss C_s_ss p_g_ss p_s_ss Bstar_ss Q_ss TB_ss
+pi_ss r_ss w_ss N_ss GDP_ss C_ss C_g_ss C_s_ss p_g_ss p_s_ss
+Bstar_ss Q_ss TB_ss PX_ss V_ss CF_ss CFg_total_ss CFs_total_ss
 
     @#for i in 1:nsec
         gammag_@{i}
