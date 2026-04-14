@@ -110,6 +110,12 @@ REPO_ROOT = abspath(joinpath(SCRIPT_DIR, "..", ".."))
 # SMM estimates live in the sibling modelo_chile/ folder
 MODELO_DIR = abspath(joinpath(SCRIPT_DIR, "..", "modelo_chile"))
 
+# Output directories inside julia_dynare/ (created automatically)
+FIGURES_DIR = joinpath(SCRIPT_DIR, "figures")
+TABLES_DIR  = joinpath(SCRIPT_DIR, "tables")
+mkpath(FIGURES_DIR)
+mkpath(TABLES_DIR)
+
 # ---- Data file search ----
 DATA_DIR = joinpath(REPO_ROOT, "Data")
 
@@ -910,15 +916,39 @@ moment_labels = vcat(
 @printf "%s\n" repeat("-", 82)
 
 total_loss = 0.0
-for k in 1:46
-    d = data_vec[k]; m = model_vec[k]
-    diff = isfinite(d) && isfinite(m) ? d - m : NaN
-    wdiff2 = isfinite(diff) ? W_diag[k] * diff^2 : NaN
-    isfinite(wdiff2) && (total_loss += wdiff2)
-    @printf "%-38s  %9.5f  %9.5f  %+9.5f  %11.6f\n" moment_labels[k] d m (isfinite(diff) ? diff : 0.0) (isfinite(wdiff2) ? wdiff2 : 0.0)
+# Also write to tables/moment_fit_<tag>.txt
+mom_table_path = joinpath(TABLES_DIR, "moment_fit_$(tag).txt")
+open(mom_table_path, "w") do f_mom
+    write(f_mom, "NK-SOE Chile — Moment fit (Exercise: $(exercise_labels[EXERCISE+1]))\n")
+    write(f_mom, repeat("=", 82) * "\n")
+    @printf(f_mom, "%-38s  %9s  %9s  %9s  %11s\n", "Moment", "Data", "Model", "Diff", "W*Diff^2")
+    write(f_mom, repeat("-", 82) * "\n")
+    for k in 1:46
+        d = data_vec[k]; m = model_vec[k]
+        diff = isfinite(d) && isfinite(m) ? d - m : NaN
+        wdiff2 = isfinite(diff) ? W_diag[k] * diff^2 : NaN
+        isfinite(wdiff2) && (total_loss += wdiff2)
+        line = @sprintf "%-38s  %9.5f  %9.5f  %+9.5f  %11.6f\n" moment_labels[k] d m (isfinite(diff) ? diff : 0.0) (isfinite(wdiff2) ? wdiff2 : 0.0)
+        print(line)
+        write(f_mom, line)
+    end
+    sep = repeat("-", 82) * "\n"
+    tot = @sprintf "%-38s  %9s  %9s  %9s  %11.6f\n" "TOTAL LOSS" "" "" "" total_loss
+    print(sep); print(tot)
+    write(f_mom, sep); write(f_mom, tot)
 end
-@printf "%s\n" repeat("-", 82)
-@printf "%-38s  %9s  %9s  %9s  %11.6f\n" "TOTAL LOSS" "" "" "" total_loss
+@printf "  → saved to: %s\n" mom_table_path
+
+# Also save moment fit as CSV for easy analysis
+df_mom = DataFrame(
+    moment   = moment_labels,
+    data     = data_vec,
+    model    = model_vec,
+    diff     = data_vec .- model_vec,
+    W_diag   = W_diag,
+    wdiff2   = W_diag .* (data_vec .- model_vec) .^ 2,
+)
+CSV.write(joinpath(TABLES_DIR, "moment_fit_$(tag).csv"), df_mom)
 
 @printf "\n--- Dynare results ---\n"
 @printf "  Steady state  : %s\n" (ss_ok ? "OK" : "FAILED")
@@ -936,7 +966,11 @@ rank_corr = (rho_output=rho_y, rho_price=rho_p, rho_labor=rho_l)
 # =========================================================================== #
 
 output_tags = ["baseline", "ex1_pref", "ex2_mfg", "ex3_mp"]
-output_path = joinpath(DATA_DIR, "model_output_$(output_tags[EXERCISE+1]).csv")
+tag = output_tags[EXERCISE+1]
+
+# All tables go to julia_dynare/tables/
+output_path = joinpath(TABLES_DIR, "model_output_$(tag).csv")
+sec_path    = joinpath(TABLES_DIR, "model_output_$(tag)_sectoral.csv")
 
 # Steady-state scalars
 df_ss = DataFrame(
@@ -947,23 +981,14 @@ df_ss = DataFrame(
 CSV.write(output_path, df_ss)
 
 # Sectoral results
-sec_path = replace(output_path, ".csv" => "_sectoral.csv")
 df_sec_out = DataFrame(
     sector  = 1:nsec,
-    pH_ss   = pH_ss,
-    Yi_ss   = Yi_ss,
-    L_ss    = L_ss,
-    M_ss    = M_ss,
-    Vi_ss   = Vi_ss,
-    std_Y_m  = std_Y_m,
-    std_PH_m = std_PH_m,
-    std_L_m  = std_L_m,
-    y_d     = y_d,
-    p_d     = p_d,
-    l_d     = l_d,
+    pH_ss   = pH_ss,  Yi_ss = Yi_ss, L_ss = L_ss, M_ss = M_ss, Vi_ss = Vi_ss,
+    std_Y_m = std_Y_m, std_PH_m = std_PH_m, std_L_m = std_L_m,
+    y_d = y_d, p_d = p_d, l_d = l_d,
 )
 CSV.write(sec_path, df_sec_out)
-@printf "--- Results saved to:\n    %s\n    %s ---\n\n" output_path sec_path
+@printf "--- Tables saved to: %s\n\n" TABLES_DIR
 
 
 # =========================================================================== #
@@ -980,7 +1005,8 @@ sec_results_for_figs = DataFrame(
 # so no world-age issue — direct call works fine.
 generate_figures(
     MOD_DIR        = MOD_DIR,
-    DATA_DIR       = DATA_DIR,
+    FIGURES_DIR    = FIGURES_DIR,    # julia_dynare/figures/
+    TABLES_DIR     = TABLES_DIR,     # julia_dynare/tables/
     SCRIPT_DIR     = SCRIPT_DIR,
     EXERCISE       = EXERCISE,
     nsec           = nsec,

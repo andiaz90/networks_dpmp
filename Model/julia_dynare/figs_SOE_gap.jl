@@ -53,7 +53,8 @@ end
 
 function generate_figures(;
     MOD_DIR::String,
-    DATA_DIR::String,
+    FIGURES_DIR::String,   # julia_dynare/figures/
+    TABLES_DIR::String,    # julia_dynare/tables/
     SCRIPT_DIR::String,
     EXERCISE::Int,
     nsec::Int,
@@ -180,7 +181,7 @@ function generate_figures(;
             Plots.hline!(p, [0.0], subplot=k,
                         color=:black, lw=0.8, ls=:dash, label="")
         end
-        fname = joinpath(DATA_DIR, "irf_aggregate_$(tag)_$(shock).pdf")
+        fname = joinpath(FIGURES_DIR, "irf_aggregate_$(tag)_$(shock).pdf")
         _savefig_safe(p, fname)
     end
 
@@ -195,7 +196,7 @@ function generate_figures(;
         Plots.hline!(p_Y, [0.0], subplot=i,
                     color=:black, lw=0.5, ls=:dash, label="")
     end
-    _savefig_safe(p_Y, joinpath(DATA_DIR, "irf_sectoral_Y_$(tag).pdf"))
+    _savefig_safe(p_Y, joinpath(FIGURES_DIR, "irf_sectoral_Y_$(tag).pdf"))
 
     # 4c. Sectoral prices
     p_PH = Plots.plot(layout=(4,3), size=(1200,900), titlefontsize=8,
@@ -208,7 +209,7 @@ function generate_figures(;
         Plots.hline!(p_PH, [0.0], subplot=i,
                     color=:black, lw=0.5, ls=:dash, label="")
     end
-    _savefig_safe(p_PH, joinpath(DATA_DIR, "irf_sectoral_PH_$(tag).pdf"))
+    _savefig_safe(p_PH, joinpath(FIGURES_DIR, "irf_sectoral_PH_$(tag).pdf"))
 
     # 4d. Sectoral employment
     p_L = Plots.plot(layout=(4,3), size=(1200,900), titlefontsize=8,
@@ -221,7 +222,7 @@ function generate_figures(;
         Plots.hline!(p_L, [0.0], subplot=i,
                     color=:black, lw=0.5, ls=:dash, label="")
     end
-    _savefig_safe(p_L, joinpath(DATA_DIR, "irf_sectoral_L_$(tag).pdf"))
+    _savefig_safe(p_L, joinpath(FIGURES_DIR, "irf_sectoral_L_$(tag).pdf"))
 
     # 4e. Output gap (Ygap variables — deviation of NK from flex-price)
     gap_vars_exist = any(r -> String(r.variable) == "Ygap_1", eachrow(df_irf))
@@ -236,9 +237,10 @@ function generate_figures(;
             Plots.hline!(p_gap, [0.0], subplot=i,
                         color=:black, lw=0.5, ls=:dash, label="")
         end
-        _savefig_safe(p_gap, joinpath(DATA_DIR, "irf_output_gap_$(tag).pdf"))
+        _savefig_safe(p_gap, joinpath(FIGURES_DIR, "irf_output_gap_$(tag).pdf"))
     end
 
     @printf "\n--- Figures complete ---\n"
-    @printf "  PDFs saved to: %s\n" DATA_DIR
+    @printf "  PDFs  → %s\n" FIGURES_DIR
+    @printf "  Tables→ %s\n" TABLES_DIR
 end

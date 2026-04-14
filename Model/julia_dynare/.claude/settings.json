@@ -12,7 +12,8 @@
       "Bash(git reflog:*)",
       "Bash(git gc:*)",
       "Bash(git checkout:*)",
-      "Bash(xargs -r git update-ref -d)"
+      "Bash(xargs -r git update-ref -d)",
+      "Bash(git config:*)"
     ],
     "additionalDirectories": [
       "/Users/agustindiaz/Library/CloudStorage/Dropbox/Proyectos/Networks-DPMP"
