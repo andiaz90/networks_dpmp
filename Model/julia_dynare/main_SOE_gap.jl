@@ -676,62 +676,74 @@ params_mod_path = write_params_mod(MOD_DIR, params_nt)
 # Strategy: include() a small helper file from inside this function.
 # include() called at runtime (inside a function) re-compiles and runs
 # the included file at call time — so the preprocessor sees CWD = MOD_DIR.
-_orig_dir = pwd()
-cd(MOD_DIR)           # preprocessor will look for .mod files here
-include(joinpath(MOD_DIR, "run_dynare_model.jl"))  # sets Main.context in latest world
-cd(_orig_dir)
-# Main.context is defined in a newer world than _main() runs in (Julia 1.12
-# strict world-age).  Core.eval(Main, :context) fetches the binding from
-# the LATEST world — equivalent to invokelatest but for global access.
-context = Core.eval(Main, :context)
-
-@printf "\n--- Dynare.jl completed ---\n\n"
-
-
 # =========================================================================== #
-#  EXTRACT RESULTS FROM DYNARE.jl CONTEXT                                     #
-#                                                                              #
-#  Dynare.jl stores everything in the `context` object:                       #
-#    Steady state    : context.results.model_results[1].trends                #
-#                      .endogenous_steady_state                                #
-#    Decision rule   : context.results.model_results[1].linearrationalexpectations #
-#                      .g1_1  (state feedback ≈ ghx)                          #
-#                      .g1_2  (shock impact  ≈ ghu)                           #
-#    Simulations     : context.results.model_results[1].simulations[1].data   #
-#    Variable names  : get_endogenous(context.symboltable)                     #
-#    Shock cov matrix: context.models[1].Sigma_e                               #
+#  RUN DYNARE IN A SUBPROCESS                                                  #
+#  @dynare inside a function triggers Julia 1.12 world-age crashes.           #
+#  Solution: call a standalone script in a fresh Julia process.               #
+#  The subprocess writes CSV files; we read them back here.                   #
 # =========================================================================== #
 
-mr        = context.results.model_results[1]
-endo_names = Dynare.get_endogenous(context.symboltable)
+dynare_script = joinpath(SCRIPT_DIR, "run_dynare_subprocess.jl")
+julia_exe     = joinpath(Sys.BINDIR, "julia")
+project_dir   = SCRIPT_DIR   # Project.toml is in julia_dynare/
 
-# Steady state vector (one value per endogenous variable, declaration order)
-ss_vec    = mr.trends.endogenous_steady_state
+@printf "--- Running Dynare.jl (subprocess) ---\n"
+@printf "  Script : %s\n" dynare_script
+@printf "  Mod dir: %s\n\n" MOD_DIR
 
-# Decision rule (first-order approximation)
-# g1_1 : n_endo × n_states  (≈ oo_.dr.ghx in MATLAB)
-# g1_2 : n_endo × n_shocks  (≈ oo_.dr.ghu in MATLAB)
-lre = mr.linearrationalexpectations
-ghx_jl = lre.g1_1
-ghu_jl = lre.g1_2
-Σe_jl  = context.models[1].Sigma_e
+# Capture stdout to check for DYNARE_SUCCESS sentinel
+dynare_out = IOBuffer()
+proc = run(pipeline(
+    `$julia_exe --project=$project_dir $dynare_script $MOD_DIR`,
+    stdout=dynare_out, stderr=stderr), wait=true)
+
+dynare_stdout = String(take!(dynare_out))
+print(dynare_stdout)   # echo subprocess output
+
+if !occursin("DYNARE_SUCCESS", dynare_stdout)
+    error("""
+    Dynare subprocess did not complete successfully.
+    Check the output above for errors.
+    Common fixes:
+      - Open pib_sectorial_bc.xlsx in Excel and File→Save As .xlsx
+      - Make sure params_jl.mod was written to: $MOD_DIR
+    """)
+end
+@printf "\n--- Dynare subprocess completed ---\n\n"
+
+# =========================================================================== #
+#  READ DYNARE RESULTS FROM CSV                                                #
+# =========================================================================== #
+
+@printf "--- Loading Dynare results ---\n"
+
+df_names   = CSV.read(joinpath(MOD_DIR, "dynare_endo_names.csv"),  DataFrame)
+df_ss      = CSV.read(joinpath(MOD_DIR, "dynare_ss.csv"),          DataFrame)
+df_g1_1    = CSV.read(joinpath(MOD_DIR, "dynare_g1_1.csv"),        DataFrame)
+df_g1_2    = CSV.read(joinpath(MOD_DIR, "dynare_g1_2.csv"),        DataFrame)
+df_sigma_e = CSV.read(joinpath(MOD_DIR, "dynare_sigma_e.csv"),     DataFrame)
+df_states  = CSV.read(joinpath(MOD_DIR, "dynare_state_rows.csv"),  DataFrame)
+
+endo_names = String.(df_names.variable)
+ss_vec     = Float64.(df_ss.ss_value)
+ghx_jl     = Matrix{Float64}(df_g1_1)    # n_endo × n_states
+ghu_jl     = Matrix{Float64}(df_g1_2)    # n_endo × n_shocks
+Σe_jl      = Matrix{Float64}(df_sigma_e)
+state_rows = Int.(df_states.state_row)
+
+# Simulated paths (periods × variables)
+sim_file   = joinpath(MOD_DIR, "dynare_sim.csv")
+sim_matrix = isfile(sim_file) ? Matrix{Float64}(CSV.read(sim_file, DataFrame)) :
+                                 fill(NaN, 0, length(endo_names))
 
 ss_ok  = !any(isnan, ss_vec) && !any(isinf, ss_vec)
-sim_ok = !isempty(mr.simulations)
+sim_ok = !isempty(sim_matrix)
 
-@printf "--- Dynare.jl results ---\n"
-@printf "  Steady state : %s\n" (ss_ok  ? "OK" : "FAILED")
-@printf "  Simulation   : %s\n\n" (sim_ok ? "OK" : "FAILED")
-
-(!ss_ok || !sim_ok) && (@printf "Model failed – aborting.\n"; exit(1))
+@printf "  Steady state : %s  (%d variables)\n" (ss_ok ? "OK" : "FAILED") length(ss_vec)
+@printf "  Simulation   : %s  (%d periods)\n\n" (sim_ok ? "OK" : "no data") size(sim_matrix,1)
 
 # Build variable-name → index map
 endo_idx = Dict(nm => i for (i, nm) in enumerate(endo_names))
-
-# Simulation time series (AxisArrayTable → named-column table)
-sim_data  = mr.simulations[1].data   # AxisArrayTable, rows=periods, cols=variables
-# Access as a matrix: columns correspond to endo_names order
-sim_matrix = Matrix(sim_data)        # periods × n_endo
 
 
 # =========================================================================== #
@@ -750,8 +762,7 @@ try
     # g1_2 : n_endo × n_shocks
     #
     # Identify which ROWS of g1_1 correspond to state (backward-looking) variables.
-    # In Dynare.jl the backward variable indices are stored in context.models[1].i_bkwrd_b
-    state_rows = context.models[1].i_bkwrd_b   # Vector{Int} — 1-based row indices
+    # state_rows was read from dynare_state_rows.csv (written by the subprocess)
 
     ghx_s = ghx_jl[state_rows, :]   # n_states × n_states  (transition matrix)
     ghu_s = ghu_jl[state_rows, :]   # n_states × n_shocks  (impact matrix)
