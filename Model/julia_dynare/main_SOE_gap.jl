@@ -49,6 +49,7 @@ SCRIPT_DIR = @__DIR__    # directory of this file
 include(joinpath(SCRIPT_DIR, "steady_ntwsoe_system.jl"))
 include(joinpath(SCRIPT_DIR, "steady_ntwsoe.jl"))
 include(joinpath(SCRIPT_DIR, "utils.jl"))
+include(joinpath(SCRIPT_DIR, "figs_SOE_gap.jl"))   # defines generate_figures at top level
 
 
 # =========================================================================== #
@@ -874,17 +875,15 @@ CSV.write(sec_path, df_sec_out)
 #  FIGURES AND TABLES (equivalent to figs_SOE_gap.m + plot_*.m)              #
 # =========================================================================== #
 
-include(joinpath(SCRIPT_DIR, "figs_SOE_gap.jl"))
-
 sec_results_for_figs = DataFrame(
     sector  = 1:nsec,
     pH_ss   = pH_ss,  Yi_ss = Yi_ss, L_ss = L_ss,
     std_Y   = std_Y_m, std_PH = std_PH_m, std_L = std_L_m,
 )
 
-# include() inside _main() defines generate_figures in a newer world —
-# invokelatest bridges the world-age gap.
-Base.invokelatest(generate_figures;
+# generate_figures is defined at the top level (include at script load time)
+# so no world-age issue — direct call works fine.
+generate_figures(
     MOD_DIR        = MOD_DIR,
     DATA_DIR       = DATA_DIR,
     SCRIPT_DIR     = SCRIPT_DIR,
