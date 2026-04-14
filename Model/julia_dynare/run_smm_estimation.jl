@@ -8,7 +8,7 @@ HOW TO RUN:
 
 WHAT IT DOES:
   Step 1 — Verifies data moments exist (run bootstrap_csv.jl first if missing)
-  Step 2 — Loads the compiled Dynare context from mod/nk_iosoe_context.jls
+  Step 2 — Loads the compiled Dynare context from mod/nk_iosoe_smm_context.jls
             (created automatically when main_SOE_gap.jl runs)
   Step 3 — Runs SMM estimation (CMA-ES optimizer, ~100k model evaluations)
   Step 4 — Saves Data/smm_estimates.csv for main_SOE_gap.jl to load
@@ -81,22 +81,37 @@ function _main()
     @printf "  %s\n" joinpath(DATA_DIR, "sectoral_moments.csv")
     @printf "  %s\n\n" joinpath(DATA_DIR, "aggregate_moments.csv")
 
-    # ---- Step 2: Load compiled Dynare context ------------------------------
-    context_file = joinpath(SCRIPT_DIR, "mod", "nk_iosoe_context.jls")
-    # Fallback: Dynare.jl's own cache
-    context_alt  = joinpath(SCRIPT_DIR, "mod", "NK_SOE_lev_gap2",
-                             "output", "NK_SOE_lev_gap2.jls")
-    ctx_path = isfile(context_file) ? context_file :
-               isfile(context_alt)  ? context_alt  : ""
+    # ---- Step 2: Load / generate the SMM Dynare context -------------------
+    # We use NK_SOE_lev_gap2_smm.mod (same model but WITHOUT stoch_simul).
+    # On ARM, stoch_simul's gees failure corrupts the context to 6 variables.
+    # By skipping stoch_simul, we always get the correct 491-variable context.
+    context_file = joinpath(SCRIPT_DIR, "mod", "nk_iosoe_smm_context.jls")
 
-    if isempty(ctx_path)
-        error("""
-        Compiled Dynare context not found.
-        Run main_SOE_gap.jl first (EXERCISE=0) to compile the model:
-          julia --project=. main_SOE_gap.jl
-        Then re-run this script.
-        """)
+    if !isfile(context_file)
+        @printf "--- Step 2: Generating SMM context (first run) ---\n"
+        @printf "  Running NK_SOE_lev_gap2_smm.mod (no stoch_simul → no gees issue)\n\n"
+
+        # Check that params_jl.mod exists (written by main_SOE_gap.jl)
+        params_mod = joinpath(SCRIPT_DIR, "mod", "params_jl.mod")
+        isfile(params_mod) || error("""
+            params_jl.mod not found. Run main_SOE_gap.jl first:
+              julia --project=. main_SOE_gap.jl
+            This writes params_jl.mod and then run_smm_estimation.jl can proceed.
+            """)
+
+        julia_exe  = joinpath(Sys.BINDIR, "julia")
+        project    = dirname(Base.active_project())
+        smm_sub    = joinpath(SCRIPT_DIR, "run_dynare_smm_subprocess.jl")
+        MOD_DIR_   = joinpath(SCRIPT_DIR, "mod")
+        run(`$julia_exe --project=$project $smm_sub $MOD_DIR_`)
+
+        isfile(context_file) || error("""
+            SMM context was not created by the subprocess.
+            Check output above for errors from run_dynare_smm_subprocess.jl.
+            """)
     end
+
+    ctx_path = context_file
 
     @printf "--- Step 2: Loading context ---\n"
     @printf "  %s\n\n" ctx_path
