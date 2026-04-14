@@ -294,124 +294,156 @@ GDP_data   = Float64[]
 yr_y       = Int[]
 qt_y       = Int[]
 
+pib_error_msg = ""   # captured here so the validation error always shows it
+
 if isfile(fname_pib)
     try
-        wb  = XLSX.readxlsx(fname_pib)
-
-        # Try sheet name "Cuadro" first; fall back to first sheet.
-        # Print available sheet names to help debug if "Cuadro" is wrong.
+        # ------------------------------------------------------------------ #
+        # Read the whole sheet as a Matrix{Any} in ONE call.                 #
+        # This avoids ALL cell-by-cell iteration issues and the BCCh blank-  #
+        # date-row quirk (col A only has the year every 4th row).            #
+        # ------------------------------------------------------------------ #
+        wb          = XLSX.readxlsx(fname_pib)
         sheet_names = XLSX.sheetnames(wb)
+        pib_error_msg *= "  Sheets in file: $(join(sheet_names, \", \"))\n"
         @printf "  Sheets in file: %s\n" join(sheet_names, ", ")
-        ws = "Cuadro" in sheet_names ? wb["Cuadro"] : wb[1]
+
+        ws      = "Cuadro" in sheet_names ? wb["Cuadro"] : wb[1]
         ws_name = "Cuadro" in sheet_names ? "Cuadro" : sheet_names[1]
+        pib_error_msg *= "  Using sheet: $ws_name\n"
         @printf "  Using sheet: %s\n" ws_name
 
-        # Row 3 = headers, rows 4+ = data
+        # Get the worksheet dimension to know exactly how many rows/cols exist
+        dim      = XLSX.get_dimension(ws)
+        max_row  = dim.stop.row_number
+        max_col  = min(dim.stop.column_number, 33)  # caps at col AG (33rd col)
+
+        pib_error_msg *= "  Sheet dimension: rows 1–$max_row, cols 1–$max_col\n"
+        @printf "  Sheet dimension: rows 1–%d, cols 1–%d\n" max_row max_col
+
+        # Data rows start at row 4 (row 3 = headers in BCCh format)
         data_start = 4
-
-        # ------------------------------------------------------------------ #
-        # KEY BCCh QUIRK: the date column (col A) only has the year in the   #
-        # FIRST row of each quarter group (rows 4, 8, 12, …); the other 3   #
-        # rows in each group are BLANK.  Using col A to find the last row    #
-        # would stop at row 5 (the first blank), giving n_pib=1.            #
-        # Fix: use a DATA column (col B) to count rows; use row-position     #
-        # arithmetic to assign years and quarters.                           #
-        # ------------------------------------------------------------------ #
-
-        # Last row: scan col 2 (first data column) which is always populated
-        last_row = data_start
-        while last_row < 400
-            v = ws[last_row + 1, 2]   # col B: always has data in every quarter row
-            (v === nothing || v === missing) && break
-            # Stop on clearly empty numeric cell
-            (v isa AbstractString && strip(v) == "") && break
-            last_row += 1
+        if max_row < data_start
+            error("Sheet has only $max_row rows; expected data from row $data_start onward.")
         end
-        n_pib = last_row - data_start + 1
-        @printf "  readxlsx OK: %d data rows (col-B scan)\n" n_pib
 
-        # --- Detect start year from column A of first data row ------------ #
-        cell0 = ws[data_start, 1]
-        @printf "  Date cell [row %d, col 1] → type=%-16s  value=%s\n" data_start string(typeof(cell0)) string(cell0)
+        # Read entire data range as Matrix{Any}: rows 4..max_row × cols 1..33
+        # Each element is a number, Date, String, or missing — whatever XLSX.jl gives
+        raw = ws[data_start:max_row, 1:max_col]   # (max_row-3) × max_col Matrix{Any}
+        n_pib_raw = size(raw, 1)
+        pib_error_msg *= "  Raw matrix: $n_pib_raw rows × $(size(raw,2)) cols\n"
+        @printf "  Raw matrix: %d rows × %d cols\n" n_pib_raw size(raw, 2)
 
-        function detect_pib_year(v)
+        # Diagnose the first few cells of col A (the BCCh date column)
+        @printf "  Col-A sample (rows %d–%d): " data_start (data_start+3)
+        for t in 1:min(4, n_pib_raw)
+            v = raw[t, 1]
+            @printf "type=%s val=%s  |  " string(typeof(v)) string(v)
+        end
+        @printf "\n"
+
+        # --- Detect start year from col A, row 1 of raw (= xlsx row 4) --- #
+        function _year_from_cell(v)
             v === nothing || v === missing && return 0
             if v isa Date || v isa DateTime
                 d   = v isa DateTime ? Date(v) : v
                 ser = Dates.value(d - Date(1899, 12, 30))
                 return (1980 <= ser <= 2060) ? ser : (1980 <= year(d) <= 2060 ? year(d) : 0)
-            elseif v isa Integer
-                return (1980 <= v <= 2060) ? v :
-                       (v > 0 ? let yr = year(Date(1899,12,30) + Dates.Day(v)); 1980<=yr<=2060 ? yr : 0 end : 0)
-            elseif v isa AbstractFloat && isfinite(v)
-                vi = round(Int, v)
+            elseif v isa Number && isfinite(Float64(v))
+                vi = round(Int, Float64(v))
                 return (1980 <= vi <= 2060) ? vi :
-                       (vi > 0 ? let yr = year(Date(1899,12,30) + Dates.Day(vi)); 1980<=yr<=2060 ? yr : 0 end : 0)
+                    (vi > 0 ? let yr = year(Date(1899,12,30) + Dates.Day(vi))
+                                  1980 <= yr <= 2060 ? yr : 0 end : 0)
             elseif v isa AbstractString && length(v) >= 4
-                p = tryparse(Int, v[1:4]); return (p !== nothing && 1980<=p<=2060) ? p : 0
+                p = tryparse(Int, v[1:4])
+                return (p !== nothing && 1980 <= p <= 2060) ? p : 0
             end
             return 0
         end
 
-        start_year = detect_pib_year(cell0)
-        if start_year == 0
-            @printf "  WARNING: could not detect start year from col A. Defaulting to 2009.\n"
-            start_year = 2009   # BCCh PIB data documented start year
+        # Try each of the first 4 rows of col A (one of them should have the year)
+        start_year = 0
+        for t in 1:min(4, n_pib_raw)
+            start_year = _year_from_cell(raw[t, 1])
+            start_year > 0 && break
         end
-        @printf "  Start year detected: %d\n" start_year
+        if start_year == 0
+            start_year = 2009
+            pib_error_msg *= "  WARNING: start year not found in col A → defaulting to 2009\n"
+            @printf "  WARNING: start year not found in col A — defaulting to 2009.\n"
+        end
+        @printf "  Start year: %d\n" start_year
 
-        # --- Assign years and quarters by row position (robust) ----------- #
-        # BCCh PIB always has exactly 4 consecutive rows per year (Q1→Q4).
-        # This is far more reliable than parsing partially-blank date cells.
+        # --- Trim trailing empty rows (where all data cols are missing) --- #
+        # Work backwards from the last row to find the true last data row
+        n_pib = n_pib_raw
+        while n_pib > 1
+            row_vals = raw[n_pib, 2:end]
+            all(v -> v === missing || v === nothing, row_vals) ? (n_pib -= 1) : break
+        end
+        @printf "  Data rows after trim: %d (%.1f years × 4 quarters)\n" n_pib (n_pib/4)
+
+        # --- Year/quarter by row position (immune to blank date cells) ---- #
         yr_y_pib = [start_year + (t - 1) ÷ 4 for t in 1:n_pib]
         qt_y_pib = [(t - 1) % 4 + 1            for t in 1:n_pib]
+        @printf "  Date range: %dQ%d – %dQ%d\n" yr_y_pib[1] qt_y_pib[1] yr_y_pib[end] qt_y_pib[end]
 
-        @printf "  Date range (row-position): %dQ%d – %dQ%d  (%d rows = %.1f years)\n" yr_y_pib[1] qt_y_pib[1] yr_y_pib[end] qt_y_pib[end] n_pib (n_pib/4)
-
-        n_valid    = n_pib
-        valid_rows = 1:n_pib
-
-        # --- Parse numeric cells for 32 data columns (xlsx cols 2–33) ----- #
-        pib_num = fill(NaN, n_valid, 32)
-        for t in 1:n_valid
-            for c in 1:32
-                v = ws[data_start + t - 1, c + 1]
-                if v isa Number && !ismissing(v) && !isnan(Float64(v))
+        # --- Parse numeric data columns (cols 2–33 of raw = xlsx B–AG) ---- #
+        n_data_cols = min(32, size(raw, 2) - 1)
+        pib_num = fill(NaN, n_pib, n_data_cols)
+        for t in 1:n_pib
+            for c in 1:n_data_cols
+                v = raw[t, c + 1]    # col 1 = date, cols 2+ = data
+                v === missing || v === nothing && continue
+                if v isa Number && isfinite(Float64(v))
                     pib_num[t, c] = Float64(v)
                 elseif v isa AbstractString
-                    p = tryparse(Float64, strip(v))
-                    p !== nothing && (pib_num[t, c] = p)
+                    p = tryparse(Float64, strip(v)); p !== nothing && (pib_num[t, c] = p)
                 end
             end
         end
-        n_valid_cells = sum(!isnan, pib_num)
-        @printf "  Numeric parse: %d / %d cells valid (%.0f%%)\n" n_valid_cells length(pib_num) (100*n_valid_cells/length(pib_num))
+        n_ok = sum(!isnan, pib_num)
+        pib_error_msg *= "  Numeric parse: $n_ok / $(length(pib_num)) cells valid\n"
+        @printf "  Numeric parse: %d / %d cells valid (%.0f%%)\n" n_ok length(pib_num) (100*n_ok/length(pib_num))
 
-        # Aggregate to 12 model sectors (column mapping mirrors MATLAB original)
-        Y_sec_raw  = fill(NaN, n_pib, NSEC)
-        Y_sec_raw[:, 1]  = pib_num[:, 1]  .+ pib_num[:, 2]   # Agro + Pesca
-        Y_sec_raw[:, 2]  = pib_num[:, 3]                       # Mining
-        Y_sec_raw[:, 3]  = pib_num[:, 6]                       # Manufacturing
-        Y_sec_raw[:, 4]  = pib_num[:, 16]                      # Utilities
-        Y_sec_raw[:, 5]  = pib_num[:, 17]                      # Construction
-        Y_sec_raw[:, 6]  = pib_num[:, 18]                      # Trade+Hotels
-        Y_sec_raw[:, 7]  = pib_num[:, 21] .+ pib_num[:, 22]   # Transport + Comm
-        Y_sec_raw[:, 8]  = pib_num[:, 24]                      # Finance
-        Y_sec_raw[:, 9]  = pib_num[:, 26]                      # Real Estate
-        Y_sec_raw[:, 10] = pib_num[:, 25]                      # Business services
-        Y_sec_raw[:, 11] = pib_num[:, 27]                      # Personal services
-        Y_sec_raw[:, 12] = pib_num[:, 28]                      # Public admin
-        GDP_data         = pib_num[:, 31]                       # PIB total
+        if n_ok == 0
+            error("All $(length(pib_num)) numeric cells parsed as NaN — check sheet structure.")
+        end
 
-        yr_y = yr_y_pib   # all rows used (no valid-mask needed with row-position approach)
+        # --- Aggregate to 12 model sectors -------------------------------- #
+        # Column mapping (pib_num col k = xlsx col k+1):
+        #  1=Agropecuario, 2=Pesca, 3=Minería total, 6=Manufactura,
+        # 16=EGA, 17=Construcción, 18=Comercio+Restaurantes,
+        # 21=Transporte, 22=Comunicaciones, 24=Financiero, 25=Empresarial,
+        # 26=Vivienda, 27=Personales, 28=Admin pública, 31=PIB total
+        Y_sec_raw = fill(NaN, n_pib, NSEC)
+        nc = n_data_cols
+        nc >= 2  && (Y_sec_raw[:, 1]  = pib_num[:, 1] .+ pib_num[:, 2])  # Agro+Pesca
+        nc >= 3  && (Y_sec_raw[:, 2]  = pib_num[:, 3])                     # Mining
+        nc >= 6  && (Y_sec_raw[:, 3]  = pib_num[:, 6])                     # Manufactura
+        nc >= 16 && (Y_sec_raw[:, 4]  = pib_num[:, 16])                    # Utilities
+        nc >= 17 && (Y_sec_raw[:, 5]  = pib_num[:, 17])                    # Construction
+        nc >= 18 && (Y_sec_raw[:, 6]  = pib_num[:, 18])                    # Trade+Hotels
+        nc >= 22 && (Y_sec_raw[:, 7]  = pib_num[:, 21] .+ pib_num[:, 22]) # Transport+Comm
+        nc >= 24 && (Y_sec_raw[:, 8]  = pib_num[:, 24])                    # Finance
+        nc >= 26 && (Y_sec_raw[:, 9]  = pib_num[:, 26])                    # Real Estate
+        nc >= 25 && (Y_sec_raw[:, 10] = pib_num[:, 25])                    # Business Serv
+        nc >= 27 && (Y_sec_raw[:, 11] = pib_num[:, 27])                    # Personal Serv
+        nc >= 28 && (Y_sec_raw[:, 12] = pib_num[:, 28])                    # Public Admin
+        nc >= 31 && (GDP_data         = pib_num[:, 31])                     # PIB total
+
+        yr_y = yr_y_pib
         qt_y = qt_y_pib
 
     catch e
-        @printf "  ERROR reading pib_sectorial_bc.xlsx: %s\n" string(e)
-        @printf "  Output moments (y_d) will be NaN.\n"
+        pib_error_msg *= "  EXCEPTION: $(sprint(showerror, e))\n"
+        @printf "  EXCEPTION in pib_sectorial_bc.xlsx loading:\n  %s\n" sprint(showerror, e)
+        @printf "  → y_d will be NaN. Stack:\n"
+        showerror(stdout, e, catch_backtrace()); println()
     end
 else
-    @printf "  File not found: %s\n  Output moments (y_d) will be NaN.\n" fname_pib
+    pib_error_msg = "  File not found: $fname_pib\n"
+    @printf "  File not found: %s\n" fname_pib
 end
 
 
@@ -823,7 +855,7 @@ if !isempty(nan_idx)
 
     # Likely cause diagnostics
     causes = String[]
-    any(isnan, y_d)  && push!(causes, "→ std(Y_i) NaN: pib_sectorial_bc.xlsx not found, wrong sheet name, or date-parsing failure. Run with VERBOSE_PIB=true for cell-level debug.")
+    any(isnan, y_d)  && push!(causes, "→ std(Y_i) NaN: pib_sectorial_bc.xlsx loading diagnostic:\n$(pib_error_msg)")
     any(isnan, p_d)  && push!(causes, "→ std(PH_i) NaN: deflactor_pib.csv columns didn't parse. Check file path and column count.")
     any(isnan, l_d)  && push!(causes, "→ std(L_i) NaN: count_workers_by_sector.csv missing or sector alignment wrong.")
     isnan(d_std_Q)   && push!(causes, "→ std(Q) NaN: reer_chile_bis.xlsx not found or RBCL column missing.")
