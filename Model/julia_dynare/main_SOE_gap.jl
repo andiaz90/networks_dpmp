@@ -671,9 +671,16 @@ params_mod_path = write_params_mod(MOD_DIR, params_nt)
 
 # @dynare must be called with the path to the .mod file (without extension).
 # It reads params_jl.mod via @#include before solving the model.
-context = cd(MOD_DIR) do
-    @dynare "NK_SOE_lev_gap2"
-end
+# @dynare sets Main.context as a global side-effect; its return value
+# is NOT the context (it may be an Array or log output).
+# Change directory, run @dynare, then grab the global it set.
+_orig_dir = pwd()
+cd(MOD_DIR)
+@dynare "NK_SOE_lev_gap2"
+cd(_orig_dir)
+
+# context is now the global set by @dynare in Main
+context = Main.context
 
 @printf "\n--- Dynare.jl completed ---\n\n"
 
