@@ -147,17 +147,44 @@ Returns (true, g1_1, g1_2, Sigma_e) on success, (false, ...) on failure.
 """
 function resolve_first_order!(context::Dynare.Context)
     try
-        # Dynare.jl API: recompute the first-order solution in-place.
-        # This is the Julia equivalent of MATLAB's resol(0, M_, options_, ...).
-        Dynare.compute_first_order_solution!(context)
+        # Dynare.jl 0.10.x: find the correct re-solve function.
+        # Try several possible API names in priority order.
+        solved = false
+        for fn_name in [:compute_first_order_solution!,
+                        :first_order_solution!,
+                        :stoch_simul!]
+            if isdefined(Dynare, fn_name)
+                try
+                    getfield(Dynare, fn_name)(context)
+                    solved = true
+                    break
+                catch inner_e
+                    # gees failure on ARM: log once then continue
+                    if occursin("gees", string(inner_e))
+                        @warn "resolve_first_order!: $fn_name failed (gees/ARM): $(string(inner_e)[1:min(120,length(string(inner_e)))])"
+                    end
+                end
+            end
+        end
+        if !solved
+            # List available Dynare functions for debugging
+            dynare_fns = filter(s -> !startswith(string(s),"#"),
+                                names(Dynare, all=true))
+            solve_fns  = filter(s -> occursin("solut", lowercase(string(s))) ||
+                                     occursin("first", lowercase(string(s))),
+                                dynare_fns)
+            @warn "No Dynare re-solve function worked. Candidates: $solve_fns"
+            return false, zeros(0,0), zeros(0,0), zeros(0,0)
+        end
 
         mr   = context.results.model_results[1]
         lre  = mr.linearrationalexpectations
-        g1_1 = lre.g1_1   # n_endo × n_states  (≈ ghx)
-        g1_2 = lre.g1_2   # n_endo × n_shocks  (≈ ghu)
+        g1_1 = Matrix{Float64}(lre.g1_1)
+        g1_2 = Matrix{Float64}(lre.g1_2)
         Σe   = context.models[1].Sigma_e
         return true, g1_1, g1_2, Σe
     catch e
+        @warn "resolve_first_order! unexpected error: $(string(e)[1:min(200,length(string(e)))])"
         return false, zeros(0,0), zeros(0,0), zeros(0,0)
     end
 end

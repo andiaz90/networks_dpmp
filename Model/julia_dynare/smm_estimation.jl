@@ -347,13 +347,38 @@ function smm_run(context::Dynare.Context)
     θ0     = something(θ_warm, θ0)
     θ0     = clamp.(θ0, LB, UB)
 
-    # --- Pre-flight check at θ₀ ---
+    # --- Diagnostics: check param_idx and resolve_first_order! work --------
+    @printf "=== PRE-FLIGHT DIAGNOSTICS ===\n"
+
+    # 1. Check param_idx for a known parameter
+    test_params = ["ilabcosts", "kappaV", "rho_om1", "sigma_om",
+                   "rho_tfp1", "epsY_1", "epsM_1"]
+    @printf "  param_idx results:\n"
+    all_idx_ok = true
+    for nm in test_params
+        idx = param_idx(context, nm)
+        @printf "    %-20s → %s\n" nm (idx === nothing ? "MISSING — param update will skip" : string(idx))
+        idx === nothing && (all_idx_ok = false)
+    end
+    all_idx_ok || @printf "  WARNING: some params not found → set_param! will skip them.\n"
+    @printf "\n"
+
+    # 2. Check resolve_first_order! works
+    @printf "  resolve_first_order! test:\n"
+    ok_resolve, g_test, _, _ = resolve_first_order!(context)
+    @printf "    success=%s  g1_1 size=%s\n\n" ok_resolve (ok_resolve ? string(size(g_test)) : "N/A")
+
+    # 3. Full pre-flight
     @printf "=== PRE-FLIGHT CHECK ===\n"
     m_test, ok_test = smm_model_moments(θ0, context, baseline, endo_names)
     if !ok_test || any(isnan, m_test)
         @printf "  PRE-FLIGHT FAILED — model did not solve at θ₀.\n"
         @printf "  NaN moments: %s\n" string(findall(isnan, m_test))
-        @printf "  → Check that main_SOE_gap.jl ran EXERCISE=0 (Baseline) first.\n"
+        if !ok_resolve
+            @printf "  CAUSE: resolve_first_order!() failed (see warnings above).\n"
+            @printf "  On Apple Silicon (ARM), Dynare.jl's Schur solver (gees) is broken.\n"
+            @printf "  The estimation must be run on an Intel machine (or Windows via MATLAB).\n"
+        end
         error("SMM pre-flight failed. Fix model setup before estimation.")
     end
     obj_test = smm_objective(θ0, data_moments, W, context, baseline, endo_names)[1]
