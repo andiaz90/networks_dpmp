@@ -98,8 +98,7 @@ end
 @assert EXERCISE in 0:3 "Invalid EXERCISE value. Must be 0, 1, 2, or 3."
 
 # Short tag for filenames — defined early so all sections can use it
-const OUTPUT_TAGS = ["baseline", "ex1_pref", "ex2_mfg", "ex3_mp"]
-tag = OUTPUT_TAGS[EXERCISE + 1]
+tag = ["baseline", "ex1_pref", "ex2_mfg", "ex3_mp"][EXERCISE + 1]
 
 
 # =========================================================================== #
