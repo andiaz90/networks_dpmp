@@ -671,12 +671,16 @@ params_mod_path = write_params_mod(MOD_DIR, params_nt)
 
 # @dynare must be called with the path to the .mod file (without extension).
 # It reads params_jl.mod via @#include before solving the model.
-# @dynare macro requires a string LITERAL — variables are not accepted.
-# Instead call Dynare.dynare() directly (the function @dynare wraps).
-# This lets us pass a computed absolute path so the preprocessor finds
-# both NK_SOE_lev_gap2.mod and @#include "params_jl.mod" correctly.
-_mod_path = joinpath(MOD_DIR, "NK_SOE_lev_gap2")   # full path, no extension
-context   = Dynare.dynare(_mod_path)
+# @dynare macro requires a string LITERAL (not a variable) and the
+# Dynare C++ preprocessor runs with the CWD at the time @dynare expands.
+# Strategy: include() a small helper file from inside this function.
+# include() called at runtime (inside a function) re-compiles and runs
+# the included file at call time — so the preprocessor sees CWD = MOD_DIR.
+_orig_dir = pwd()
+cd(MOD_DIR)           # preprocessor will look for .mod files here
+include(joinpath(MOD_DIR, "run_dynare_model.jl"))  # sets Main.context
+cd(_orig_dir)
+context = Main.context  # @dynare in run_dynare_model.jl stores result here
 
 @printf "\n--- Dynare.jl completed ---\n\n"
 
