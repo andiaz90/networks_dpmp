@@ -640,10 +640,11 @@ if isfile(fname_ccnn)
         n_cols_tb = 15
         i_x = i_m = i_g = nothing
         for c in 1:n_cols_tb
-            hdr = string(get(ws_tb[3, c], ""))
-            if occursin(r"[Ee]xport|x6_"i, hdr),  i_x = c; end
-            if occursin(r"[Ii]mport|x7_"i, hdr),  i_m = c; end
-            if occursin(r"PIB|x8_"i,        hdr),  i_g = c; end
+            cell_val = ws_tb[3, c]
+            hdr = cell_val === missing ? "" : string(cell_val)
+            occursin(r"[Ee]xport|x6_"i, hdr) && (i_x = c)
+            occursin(r"[Ii]mport|x7_"i, hdr) && (i_m = c)
+            occursin(r"PIB|x8_"i,        hdr) && (i_g = c)
         end
         i_x === nothing && (i_x = 9)
         i_m === nothing && (i_m = 10)
