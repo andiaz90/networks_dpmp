@@ -60,10 +60,16 @@ if isfile(OUT_SECTORAL) && isfile(OUT_AGGREGATE)
     sec = CSV.read(OUT_SECTORAL,  DataFrame)
     agg = CSV.read(OUT_AGGREGATE, DataFrame)
 
+    # 'name' column may not exist if CSV was written by bootstrap_csv.jl
+    _names = hasproperty(sec, :name) ? sec.name :
+             ["Agriculture","Mining","Manufacturing","Utilities","Construction",
+              "Trade/Hotels","Transport/Comm","Finance","Real Estate",
+              "Business Serv.","Personal Serv.","Public Admin."]
+
     @printf "  %-20s  %8s  %8s  %8s\n" "Sector" "std(Y)" "std(PH)" "std(L)"
     @printf "  %s\n" repeat("-", 50)
-    for r in eachrow(sec)
-        @printf "  %-20s  %8.4f  %8.4f  %8.4f\n" r.name r.std_Y r.std_PH r.std_L
+    for (i, r) in enumerate(eachrow(sec))
+        @printf "  %-20s  %8.4f  %8.4f  %8.4f\n" _names[i] r.std_Y r.std_PH r.std_L
     end
     agg_d = Dict(String(r.moment) => Float64(r.value) for r in eachrow(agg))
     @printf "\n  std(GDP)=%.4f  std(pi)=%.4f  corr(GDP,pi)=%.4f\n" agg_d["std_GDP"] agg_d["std_pi"] agg_d["corr_GDPpi"]
