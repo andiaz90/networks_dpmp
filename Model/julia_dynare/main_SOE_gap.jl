@@ -671,13 +671,13 @@ params_mod_path = write_params_mod(MOD_DIR, params_nt)
 
 # @dynare must be called with the path to the .mod file (without extension).
 # It reads params_jl.mod via @#include before solving the model.
-# @dynare "name" returns the context object directly.
-# We change directory first so that @#include "params_jl.mod" resolves,
-# then restore the original directory after the model is compiled.
-_orig_dir = pwd()
-cd(MOD_DIR)
-context = @dynare "NK_SOE_lev_gap2"
-cd(_orig_dir)
+# Pass the full absolute path to the .mod file.
+# @dynare "name" passes only the bare filename to the Dynare preprocessor,
+# which then searches relative to its own CWD — unreliable inside functions.
+# Passing the full path (without .mod extension) fixes the "Could not open
+# file" error regardless of where Julia's CWD is.
+_mod_path = joinpath(MOD_DIR, "NK_SOE_lev_gap2")
+context   = @dynare _mod_path
 
 @printf "\n--- Dynare.jl completed ---\n\n"
 
