@@ -1,35 +1,30 @@
 """
 main_SOE_gap.jl
 ===============
-NK-IOSOE 12-sector model for Chile — Julia translation of main_SOE_gap.m
+NK-IOSOE 12-sector model for Chile — Julia/Dynare.jl translation of main_SOE_gap.m
+No MATLAB. No Octave. No licenses.
 
 Workflow:
   1.  Select exercise (0–3)
-  2.  Load sector-level data (Excel + CSV)
+  2.  Load sector-level data (Excel + CSV from Data/)
   3.  Set structural parameters
   4.  Configure shocks for the selected exercise
-  5.  (Optional) load SMM estimates from smm_estimates.mat
+  5.  (Optional) load SMM estimates from modelo_chile/smm_estimates.mat
   6.  Solve outer steady-state system (NLsolve)
   7.  Evaluate full steady-state quantities
-  8.  Save params_val_ul.mat for Dynare to read
-  9.  Run Dynare (via Octave — free MATLAB alternative)
-  10. Load Dynare results; check BK conditions
+  8.  Write mod/params_jl.mod (read by NK_SOE_lev_gap2.mod via @#include)
+  9.  Run Dynare.jl: context = @dynare "NK_SOE_lev_gap2"
+  10. Extract results from context object
   11. Compute rank correlations (Lyapunov-based std devs)
-  12. Save results to <exercise_label>_results.mat
-  13. Print moment-fit table
+  12. Save results to julia_dynare/<exercise>_results.mat
 
 Usage:
   julia --project=. main_SOE_gap.jl
 
-or from a Julia REPL:
-  include("main_SOE_gap.jl")
-
 REQUIREMENTS (all free):
   - Julia ≥ 1.9  (https://julialang.org/downloads/)
-  - Julia packages in Project.toml  (] instantiate)
-  - Octave ≥ 8   (https://octave.org/download)
-  - Dynare ≥ 6   (https://dynare.org/download) — installed for Octave use
-  - Data files: see DATA PATHS section below
+  - Julia packages: run  julia --project=. -e "import Pkg; Pkg.instantiate()"
+  - Data files in Data/ folder (see DATA PATHS section below)
 """
 
 # =========================================================================== #
@@ -95,24 +90,26 @@ end
 
 
 # =========================================================================== #
-#  DATA PATHS                                                                  #
-#  Adjust DYNARE_MATLAB_PATH and DATA_DIR to match your installation.          #
+#  PATHS                                                                       #
 # =========================================================================== #
 
-# Directory with .mod files (relative to this script)
+# Directory with .mod files — always next to this script
 MOD_DIR = joinpath(SCRIPT_DIR, "mod")
 
+# Repo root is two levels up:  julia_dynare/ → Model/ → Networks-DPMP/
+REPO_ROOT = abspath(joinpath(SCRIPT_DIR, "..", ".."))
+
+# SMM estimates live in the sibling modelo_chile/ folder
+MODELO_DIR = abspath(joinpath(SCRIPT_DIR, "..", "modelo_chile"))
+
 # ---- Data file search ----
-# Use abspath to resolve ".." correctly across all operating systems.
-# The Data/ folder is two levels up from julia_dynare/ (repo_root/Data/).
-REPO_ROOT      = abspath(joinpath(SCRIPT_DIR, "..", ".."))
-DATA_DIR       = joinpath(REPO_ROOT, "Data")
+DATA_DIR = joinpath(REPO_ROOT, "Data")
 
 DATA_CANDIDATES = filter!(!isempty, [
-    DATA_DIR,                                          # repo_root/Data/   ← primary
-    SCRIPT_DIR,                                        # same folder as script
-    abspath(joinpath(SCRIPT_DIR, "..", "modelo_chile")), # sibling modelo_chile/
-    get(ENV, "NKIOSOE_DATA_DIR", ""),                  # user override
+    DATA_DIR,              # Networks-DPMP/Data/     ← primary
+    MODELO_DIR,            # Model/modelo_chile/      (some files live here too)
+    SCRIPT_DIR,            # same folder as this script
+    get(ENV, "NKIOSOE_DATA_DIR", ""),   # user override
 ])
 
 # find_file: accepts multiple alternative basenames (for .xls / .xlsx variants)
@@ -337,8 +334,8 @@ shock_epsA_val       = ones(nsec)
 #  LOAD SMM ESTIMATES (override defaults when available)                       #
 # =========================================================================== #
 
-smm_est_file  = joinpath(SCRIPT_DIR, "..", "modelo_chile", "smm_estimates.mat")
-smm_ckpt_file = joinpath(SCRIPT_DIR, "..", "modelo_chile", "smm_best_so_far.mat")
+smm_est_file  = joinpath(MODELO_DIR, "smm_estimates.mat")
+smm_ckpt_file = joinpath(MODELO_DIR, "smm_best_so_far.mat")
 
 param_names = ["ilabcosts", "epsY", "epsM", "kappaV", "rho_om1", "sigma_om",
                "rho_tfp1", "isigma_tfp(1)", "rho_pvstar", "sigma_pvstar"]
@@ -423,7 +420,7 @@ A_vec      = modA
 
 # Load trade-balance target from data_moments_chile.mat if available
 tb_target = 0.02
-dm_file_tb = joinpath(SCRIPT_DIR, "..", "modelo_chile", "data_moments_chile.mat")
+dm_file_tb = joinpath(MODELO_DIR, "data_moments_chile.mat")
 if isfile(dm_file_tb)
     try
         tmp_dm = matread(dm_file_tb)
@@ -743,17 +740,22 @@ std_L_m  = fill(NaN, nsec)
 
 rc_lyap_ok = false
 try
-    # State-variable indices in the DR ordering
-    n_state = size(ghx_jl, 2)
-    n_endo  = length(endo_names)
+    # g1_1 : n_endo × n_states  (all endogenous variables, columns = state vars)
+    # g1_2 : n_endo × n_shocks
+    #
+    # Identify which ROWS of g1_1 correspond to state (backward-looking) variables.
+    # In Dynare.jl the backward variable indices are stored in context.models[1].i_bkwrd_b
+    state_rows = context.models[1].i_bkwrd_b   # Vector{Int} — 1-based row indices
 
-    # Lyapunov: unconditional variance of all endogenous variables
-    # P_state = ghx * P_state * ghx' + ghu * Σe * ghu'
-    ghx_s = ghx_jl[1:n_state, :]   # state rows of ghx
-    ghu_s = ghu_jl[1:n_state, :]   # state rows of ghu
-    P_st  = local_dlyap(ghx_s, ghu_s * Σe_jl * ghu_s')
-    Γ_rc  = ghx_jl * P_st * ghx_jl' + ghu_jl * Σe_jl * ghu_jl'
-    Γ_rc  = (Γ_rc + Γ_rc') / 2
+    ghx_s = ghx_jl[state_rows, :]   # n_states × n_states  (transition matrix)
+    ghu_s = ghu_jl[state_rows, :]   # n_states × n_shocks  (impact matrix)
+
+    # Solve  P = ghx_s * P * ghx_s' + ghu_s * Σe * ghu_s'
+    P_st = local_dlyap(ghx_s, ghu_s * Σe_jl * ghu_s')
+
+    # Unconditional variance of all endogenous variables
+    Γ_rc = ghx_jl * P_st * ghx_jl' + ghu_jl * Σe_jl * ghu_jl'
+    Γ_rc = (Γ_rc + Γ_rc') / 2
 
     for i in 1:nsec
         for (kv, vn) in enumerate(["Y_$(i)", "PH_$(i)", "L_$(i)"])
@@ -816,7 +818,8 @@ rank_corr = (rho_output=rho_y, rho_price=rho_p, rho_labor=rho_l)
 
 output_files = ["model_output_IOSOE", "model_output_IOSOE_ex1",
                 "model_output_IOSOE_ex2", "model_output_IOSOE_ex3"]
-output_path  = joinpath(MOD_DIR, "$(output_files[EXERCISE+1]).mat")
+# Save results next to the script, not inside mod/ subfolder
+output_path  = joinpath(SCRIPT_DIR, "$(output_files[EXERCISE+1]).mat")
 
 results_out = Dict{String, Any}(
     "EXERCISE"     => EXERCISE,
