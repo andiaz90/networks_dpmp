@@ -115,9 +115,12 @@ REPO_ROOT = abspath(joinpath(SCRIPT_DIR, "..", ".."))
 MODELO_DIR = abspath(joinpath(SCRIPT_DIR, "..", "modelo_chile"))
 
 # Output directories inside julia_dynare/ (created automatically)
-FIGURES_DIR = joinpath(SCRIPT_DIR, "figures")
-TABLES_DIR  = joinpath(SCRIPT_DIR, "tables")
-mkpath(FIGURES_DIR)
+FIGURES_DIR      = joinpath(SCRIPT_DIR, "figures")          # parent
+FIGURES_IRF_DIR  = joinpath(FIGURES_DIR, "irfs")           # Dynare-style IRF plots
+FIGURES_EX_DIR   = joinpath(FIGURES_DIR, "exercises")      # exercise analysis plots
+TABLES_DIR       = joinpath(SCRIPT_DIR,  "tables")
+mkpath(FIGURES_IRF_DIR)
+mkpath(FIGURES_EX_DIR)
 mkpath(TABLES_DIR)
 
 # ---- Data file search ----
@@ -1002,10 +1005,13 @@ sec_results_for_figs = DataFrame(
     std_Y   = std_Y_m, std_PH = std_PH_m, std_L = std_L_m,
 )
 
-# ---- figs_SOE_gap.jl: IRF overview table + basic sectoral plots ----
+# ---- figs_SOE_gap.jl: Dynare-style IRF plots → figures/irfs/ -----------
+# These mirror what MATLAB Dynare would auto-generate:
+#   irf_aggregate_<tag>_<shock>.pdf  — GDP, π, Q, TB per shock
+#   irf_sectoral_Y/PH/L_<tag>.pdf   — 12-sector IRF panels
 generate_figures(
     MOD_DIR        = MOD_DIR,
-    FIGURES_DIR    = FIGURES_DIR,
+    FIGURES_DIR    = FIGURES_IRF_DIR,   # → figures/irfs/
     TABLES_DIR     = TABLES_DIR,
     SCRIPT_DIR     = SCRIPT_DIR,
     EXERCISE       = EXERCISE,
@@ -1017,7 +1023,7 @@ generate_figures(
     exercise_label = exercise_labels[EXERCISE+1],
 )
 
-# ---- plot_scripts.jl: all remaining MATLAB plot scripts ----------------
+# ---- plot_scripts.jl: exercise analysis plots → figures/exercises/ -----
 # Translates: figs_SOE_gap.m, plot_manufacturing_shock.m,
 #             plot_figure7_manufacturing_shock.m, plot_shock_effects.m,
 #             steady_state_table.m
@@ -1032,7 +1038,7 @@ if isfile(irf_path) && filesize(irf_path) > 10
             ss_results  = (GDP_ss=GDP_ss, TB_ss=TB_ss, Q_ss=Q_ss,
                            C_ss=C_ss, N_ss=N_ss, Bstar_ss=Bstar_ss, w_ss=w_ss),
             sec_results = sec_results_for_figs,
-            FIGURES_DIR = FIGURES_DIR,
+            FIGURES_DIR = FIGURES_EX_DIR,   # → figures/exercises/
             TABLES_DIR  = TABLES_DIR,
             tag         = tag,
             ombar       = ombar_val,
