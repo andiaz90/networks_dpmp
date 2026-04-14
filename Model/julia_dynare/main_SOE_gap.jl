@@ -61,6 +61,13 @@ include(joinpath(SCRIPT_DIR, "utils.jl"))
 
 EXERCISE = 2    # <<< CHANGE THIS (0=Baseline matches SMM calibration)
 
+# Wrap in _main() so that:
+#   1. Julia 1.12 world-age issues (strict binding semantics for included
+#      functions used in closures) are avoided inside a function scope.
+#   2. Soft-scope ambiguities for variables like tb_target go away.
+#   3. We can use `return` for early exit.
+function _main()
+
 exercise_labels = [
     "Baseline (all shocks)",
     "Exercise 1: Preference shock",
@@ -193,7 +200,7 @@ betaio    = Matrix{Float64}(betaio_df[1:nsec, 1:nsec])
 
 col_sums  = sum(betaio, dims=1)
 betax     = betaio ./ col_sums
-modbeta   = betax'   # modbeta[i,j] = share of inputs sector i gets from sector j
+modbeta   = Matrix(betax')   # modbeta[i,j] = share of inputs sector i gets from sector j
 
 # ---- Price adjustment frequency (Rotemberg κ) ----
 fpa_df    = CSV.read(path_fpa, DataFrame, header=false)
@@ -406,15 +413,19 @@ epsM_vec   = modepsM
 A_vec      = modA
 
 # Load trade-balance target from aggregate_moments.csv if available
-tb_target  = 0.02
-agg_mom_tb = joinpath(DATA_DIR, "aggregate_moments.csv")
-if isfile(agg_mom_tb)
-    try
-        agg_tb = CSV.read(agg_mom_tb, DataFrame)
-        row    = filter(r -> String(r.moment) == "TBGDP", agg_tb)
-        !isempty(row) && isfinite(row[1, :value]) && (tb_target = Float64(row[1, :value]))
-    catch
+# Use assignment-expression form to avoid soft-scope ambiguity (Julia 1.12)
+tb_target = let
+    _tb = 0.02
+    agg_mom_tb = joinpath(DATA_DIR, "aggregate_moments.csv")
+    if isfile(agg_mom_tb)
+        try
+            agg_tb = CSV.read(agg_mom_tb, DataFrame)
+            row    = filter(r -> String(r.moment) == "TBGDP", agg_tb)
+            !isempty(row) && isfinite(row[1, :value]) && (_tb = Float64(row[1, :value]))
+        catch
+        end
     end
+    _tb
 end
 
 ss_result = nlsolve(
@@ -837,3 +848,7 @@ CSV.write(sec_path, df_sec_out)
 @printf "%s\n" repeat("=", 60)
 @printf "  Done: %s\n" exercise_labels[EXERCISE+1]
 @printf "%s\n\n" repeat("=", 60)
+
+end  # function _main()
+
+Base.invokelatest(_main)  # Julia 1.12: world-age fix
