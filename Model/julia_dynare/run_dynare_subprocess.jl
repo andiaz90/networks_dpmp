@@ -144,30 +144,66 @@ else
 end
 
 # ---- IRFs (impulse response functions) ----
-# mr.irfs is a Dict: shock_name => Dict(var_name => Vector{Float64})
-# Flatten to a DataFrame with columns: variable, shock, period, value
+# Diagnose mr.irfs type first so we can handle any Dynare.jl 0.10.x structure
+@info "mr.irfs type: $(typeof(mr.irfs))  isempty: $(isempty(mr.irfs))"
+
 irf_rows = NamedTuple{(:variable, :shock, :period, :value), Tuple{String,String,Int,Float64}}[]
+
 if !isempty(mr.irfs)
-    for (shock_name, var_dict) in mr.irfs
-        for (var_name, irf_vec) in var_dict
-            for (t, v) in enumerate(irf_vec)
-                push!(irf_rows, (variable=string(var_name),
-                                 shock=string(shock_name),
-                                 period=t,
-                                 value=Float64(v)))
+    # Determine structure: Dict or AxisArray?
+    first_val = first(values(mr.irfs))
+    @info "  first shock value type: $(typeof(first_val))"
+
+    try
+        for (shock_name, var_data) in mr.irfs
+            if var_data isa AbstractDict
+                # Dict{varname => Vector}
+                for (var_name, irf_vec) in var_data
+                    for (t, v) in enumerate(irf_vec)
+                        push!(irf_rows, (variable=string(var_name), shock=string(shock_name),
+                                         period=t, value=Float64(v)))
+                    end
+                end
+            else
+                # AxisArrayTable or Matrix: rows=periods, cols=variables
+                mat = Matrix{Float64}(var_data)
+                vnames = string.(names(var_data))   # column names = variable names
+                for (ci, vn) in enumerate(vnames)
+                    for t in 1:size(mat, 1)
+                        push!(irf_rows, (variable=vn, shock=string(shock_name),
+                                         period=t, value=mat[t, ci]))
+                    end
+                end
             end
         end
+    catch e
+        @warn "IRF extraction failed: $e"
     end
-    df_irfs = DataFrame(irf_rows)
-    CSV.write(joinpath(MOD_DIR, "dynare_irfs.csv"), df_irfs)
-    n_shocks = length(mr.irfs)
-    n_vars   = isempty(irf_rows) ? 0 : length(unique(df_irfs.variable))
-    @info "IRFs saved: $n_shocks shock(s), $n_vars variable(s)"
+
+    if !isempty(irf_rows)
+        df_irfs = DataFrame(irf_rows)
+        CSV.write(joinpath(MOD_DIR, "dynare_irfs.csv"), df_irfs)
+        @info "IRFs saved: $(length(mr.irfs)) shock(s), $(length(unique(df_irfs.variable))) variable(s)"
+    else
+        @warn "IRF extraction produced no rows despite non-empty mr.irfs"
+        CSV.write(joinpath(MOD_DIR, "dynare_irfs.csv"),
+                  DataFrame(variable=String[], shock=String[], period=Int[], value=Float64[]))
+    end
 else
-    @info "No IRF data in mr.irfs"
-    # Write empty placeholder
+    @info "No IRF data in mr.irfs — stoch_simul may not have completed"
     CSV.write(joinpath(MOD_DIR, "dynare_irfs.csv"),
               DataFrame(variable=String[], shock=String[], period=Int[], value=Float64[]))
+end
+
+# Also save endogenous_variance if available (unconditional variance matrix)
+if isdefined(mr.linearrationalexpectations, :endogenous_variance)
+    ev = mr.linearrationalexpectations.endogenous_variance
+    if !isnothing(ev) && !isempty(ev)
+        ev_mat = Matrix{Float64}(ev)
+        @info "endogenous_variance size: $(size(ev_mat))"
+        CSV.write(joinpath(MOD_DIR, "dynare_endogenous_variance.csv"),
+                  DataFrame(ev_mat, [Symbol("c$i") for i in 1:size(ev_mat,2)]))
+    end
 end
 
 @info "Results written to $(MOD_DIR)"
