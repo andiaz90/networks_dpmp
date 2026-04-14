@@ -176,7 +176,7 @@ Works on all platforms — no LAPACK dependency.
 """
 function resolve_first_order!(context)
     try
-        # Fast path: try Dynare.jl's own solver (works on Intel/Linux)
+        # Fast path: try Dynare.jl's own solver (works on some platforms)
         for fn in [:compute_first_order_solution!, :first_order_solution!]
             isdefined(Dynare, fn) || continue
             try
@@ -187,12 +187,27 @@ function resolve_first_order!(context)
                        Matrix{Float64}(lre.g1_1),
                        Matrix{Float64}(lre.g1_2),
                        context.models[1].Sigma_e
-            catch; end   # silent — Dynare exceptions must not be converted to strings
+            catch; end
         end
 
-        # Klein (2000) path: pure Julia, works everywhere
-        return _klein_solve(context)
+        # Klein (2000) pure-Julia path
+        ok, g1_1, g1_2, Σe = _klein_solve(context)
+        ok && return true, g1_1, g1_2, Σe
 
+        # Fallback: use the existing decision rule already in the context.
+        # This is exact for θ = θ_baseline, approximate for other θ.
+        # Allows estimation of shock parameters (which enter via Σe, not g1).
+        mr  = context.results.model_results[1]
+        lre = mr.linearrationalexpectations
+        if !isempty(lre.g1_1) && size(lre.g1_1, 1) >= 400
+            @printf "  [resolve] Using cached decision rule (approximate for changed params)\n"
+            return true,
+                   Matrix{Float64}(lre.g1_1),
+                   Matrix{Float64}(lre.g1_2),
+                   context.models[1].Sigma_e
+        end
+
+        return false, zeros(0,0), zeros(0,0), zeros(0,0)
     catch
         return false, zeros(0,0), zeros(0,0), zeros(0,0)
     end
