@@ -109,6 +109,15 @@ function _main()
     theta_hat, obj_hat, moments_hat = smm_run(context)
 
     # ---- Step 4: Summary ---------------------------------------------------
+    if isnan(obj_hat)
+        # Estimation was skipped (ARM/gees limitation or other failure)
+        # smm_run already printed the reason above — nothing more to do here.
+        @printf "\n  Estimation did not complete — see messages above.\n"
+        @printf "  main_SOE_gap.jl will use hard-coded defaults until\n"
+        @printf "  Data/smm_estimates.csv is provided from an Intel/x86 run.\n\n"
+        return
+    end
+
     @printf "\n%s\n  ESTIMATION COMPLETE\n%s\n\n" repeat("=",60) repeat("=",60)
     @printf "  Objective at θ̂:  %.6f\n" obj_hat
     @printf "  Estimates:  %s\n" joinpath(DATA_DIR, "smm_estimates.csv")
