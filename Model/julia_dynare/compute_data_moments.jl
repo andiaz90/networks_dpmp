@@ -26,7 +26,7 @@ or from REPL:
   include("compute_data_moments.jl")
 """
 
-using CSV, DataFrames, XLSX, MAT
+using CSV, DataFrames, XLSX
 using Statistics, LinearAlgebra, SparseArrays
 using Dates, Printf
 
@@ -37,50 +37,17 @@ using Dates, Printf
 SCRIPT_DIR  = @__DIR__
 REPO_ROOT   = abspath(joinpath(SCRIPT_DIR, "..", ".."))
 DATA_DIR    = joinpath(REPO_ROOT, "Data")
-MODELO_DIR  = abspath(joinpath(SCRIPT_DIR, "..", "modelo_chile"))
-OUTPUT_FILE = joinpath(MODELO_DIR, "data_moments_chile.mat")
+
+# Output: plain CSV files in Data/ folder (no .mat, no MATLAB dependency)
+OUT_SECTORAL  = joinpath(DATA_DIR, "sectoral_moments.csv")
+OUT_AGGREGATE = joinpath(DATA_DIR, "aggregate_moments.csv")
 
 @printf "\n%s\n" repeat("=", 61)
 @printf "  Computing data moments for SMM estimation (Chile)\n"
+@printf "  Output: %s\n          %s\n" OUT_SECTORAL OUT_AGGREGATE
 @printf "%s\n\n" repeat("=", 61)
 
-
-# =========================================================================== #
-#  FAST PATH: load from existing data_moments_chile.mat                       #
-#                                                                              #
-#  If data_moments_chile.mat already exists (e.g. computed by the MATLAB      #
-#  team via compute_data_moments.m), load it directly and skip all the raw    #
-#  Excel/CSV processing.  This avoids XLSX.jl compatibility issues entirely.  #
-#                                                                              #
-#  To force a full recomputation from raw files, delete or rename the .mat    #
-#  file and re-run this script.                                               #
-# =========================================================================== #
-
 function _main()   # wrapped in function so we can use `return` for early exit
-
-if isfile(OUTPUT_FILE)
-    @printf "\n%s\n  data_moments_chile.mat already exists — loading directly.\n" repeat("=",61)
-    @printf "  (Delete the file and re-run to recompute from raw Excel/CSV sources.)\n"
-    @printf "%s\n\n" repeat("=",61)
-
-    tmp = matread(OUTPUT_FILE)
-    dm  = tmp["dm_chile"]
-    y_d = vec(Float64.(dm["y_d"]))
-    p_d = vec(Float64.(dm["p_d"]))
-    l_d = vec(Float64.(dm["l_d"]))
-
-    @printf "  %-20s  %8s  %8s  %8s\n" "Sector" "std(Y)" "std(PH)" "std(L)"
-    @printf "  %s\n" repeat("-", 50)
-    _snames = ["Agriculture","Mining","Manufacturing","Utilities","Construction",
-               "Trade/Hotels","Transport/Comm","Finance","Real Estate",
-               "Business Serv.","Personal Serv.","Public Admin."]
-    for i in 1:12
-        @printf "  %-20s  %8.4f  %8.4f  %8.4f\n" _snames[i] y_d[i] p_d[i] l_d[i]
-    end
-    @printf "\n  Loaded from: %s\n" OUTPUT_FILE
-    @printf "  Re-run main_SOE_gap.jl or smm_estimation.jl to use these moments.\n\n"
-    return   # early exit — no raw-file processing needed
-end
 
 @printf "\n%s\n  Computing data moments from raw files (Chile)\n%s\n\n" repeat("=",61) repeat("=",61)
 @printf "  (Tip: if pib_sectorial_bc.xlsx fails to load, open it in Excel\n"
@@ -946,39 +913,41 @@ end
 
 
 # =========================================================================== #
-#  SAVE TO data_moments_chile.mat                                              #
+#  SAVE — plain CSV (no .mat, no MATLAB dependency)                           #
 # =========================================================================== #
 
-dm_chile = Dict{String,Any}(
-    "y_d"          => y_d,
-    "p_d"          => p_d,
-    "l_d"          => l_d,
-    "d_std_Yg"     => d_std_Yg,
-    "d_std_PHg"    => d_std_PHg,
-    "d_std_Lg"     => d_std_Lg,
-    "d_std_Ys"     => d_std_Ys,
-    "d_std_PHs"    => d_std_PHs,
-    "d_std_Ls"     => d_std_Ls,
-    "d_std_GDP"    => d_std_GDP,
-    "d_std_pi"     => d_std_pi,
-    "d_corr_GDPpi" => d_corr_GDPpi,
-    "d_omG"        => d_omG,
-    "d_std_Q"      => d_std_Q,
-    "d_autocorr_Q" => d_autocorr_Q,
-    "d_corr_GDPQ"  => d_corr_GDPQ,
-    "d_TBGDP"      => d_TBGDP,
-    "sample_start" => [SAMPLE_START.year, SAMPLE_START.q],
-    "sample_end"   => [SAMPLE_END.year,   SAMPLE_END.q],
-    "sector_names" => SECTOR_NAMES,
-    "L_qrt"        => L_qrt,
-    "P_sec_qrt"    => P_sample,
-    "Pa_qrt"       => Pa_sample,
-    "Y_sec_qrt"    => isempty(Y_qrt) ? fill(NaN, 0, NSEC) : Y_qrt,
-    "GDP_qrt"      => GDP_sample,
+# --- 1. Sectoral moments (one row per sector) ----------------------------
+df_sec = DataFrame(
+    sector  = 1:NSEC,
+    name    = SECTOR_NAMES,
+    std_Y   = y_d,
+    std_PH  = p_d,
+    std_L   = l_d,
+    std_Yg  = [i in GOODS    ? d_std_Yg  : NaN for i in 1:NSEC],
+    std_PHg = [i in GOODS    ? d_std_PHg : NaN for i in 1:NSEC],
+    std_Lg  = [i in GOODS    ? d_std_Lg  : NaN for i in 1:NSEC],
+    std_Ys  = [i in SERVICES ? d_std_Ys  : NaN for i in 1:NSEC],
+    std_PHs = [i in SERVICES ? d_std_PHs : NaN for i in 1:NSEC],
+    std_Ls  = [i in SERVICES ? d_std_Ls  : NaN for i in 1:NSEC],
 )
+CSV.write(OUT_SECTORAL, df_sec)
 
-matwrite(OUTPUT_FILE, Dict("dm_chile" => dm_chile))
-@printf "\nMoments saved to:\n  %s\n" OUTPUT_FILE
+# --- 2. Aggregate moments (key-value, easy to read in any language) ------
+df_agg = DataFrame(
+    moment = ["std_GDP",   "std_pi",   "corr_GDPpi",
+              "omG",       "std_Q",    "autocorr_Q",
+              "corr_GDPQ", "TBGDP",
+              "sample_start_year", "sample_start_q",
+              "sample_end_year",   "sample_end_q"],
+    value  = [d_std_GDP,   d_std_pi,   d_corr_GDPpi,
+              d_omG,       d_std_Q,    d_autocorr_Q,
+              d_corr_GDPQ, d_TBGDP,
+              Float64(SAMPLE_START.year), Float64(SAMPLE_START.q),
+              Float64(SAMPLE_END.year),   Float64(SAMPLE_END.q)],
+)
+CSV.write(OUT_AGGREGATE, df_agg)
+
+@printf "\nMoments saved to:\n  %s\n  %s\n" OUT_SECTORAL OUT_AGGREGATE
 @printf "\nAll moments computed from data. Ready to run smm_estimation.\n\n"
 
 end  # function _main()

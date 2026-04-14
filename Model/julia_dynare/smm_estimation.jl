@@ -36,12 +36,12 @@ or from REPL:
 """
 
 using LinearAlgebra, Statistics, StatsBase, Printf
-using NLsolve, MAT, Dynare
+using NLsolve, CSV, DataFrames, Dynare
 using CMAEvolutionStrategy
 
 SCRIPT_DIR  = @__DIR__
 REPO_ROOT   = abspath(joinpath(SCRIPT_DIR, "..", ".."))
-MODELO_DIR  = abspath(joinpath(SCRIPT_DIR, "..", "modelo_chile"))
+DATA_DIR    = joinpath(REPO_ROOT, "Data")
 
 include("steady_ntwsoe_system.jl")
 include("steady_ntwsoe.jl")
@@ -55,44 +55,41 @@ include("smm_model_moments.jl")
 #  1.  LOAD DATA MOMENTS                                                       #
 # =========================================================================== #
 
-const NSEC     = 12
-const GOODS    = [1,2,3,4,5]
-const SERVICES = [6,7,8,9,10,11,12]
+NSEC     = 12
+GOODS    = [1,2,3,4,5]
+SERVICES = [6,7,8,9,10,11,12]
 
-@printf "--- Loading data moments ---\n"
+@printf "--- Loading data moments (CSV) ---\n"
 
-dm_file = joinpath(MODELO_DIR, "data_moments_chile.mat")
+sec_mom_file = joinpath(DATA_DIR, "sectoral_moments.csv")
+agg_mom_file = joinpath(DATA_DIR, "aggregate_moments.csv")
 
-if isfile(dm_file)
-    tmp = matread(dm_file)
-    dm  = tmp["dm_chile"]
-    y_d           = vec(Float64.(dm["y_d"]))
-    p_d           = vec(Float64.(dm["p_d"]))
-    l_d           = vec(Float64.(dm["l_d"]))
-    d_std_GDP     = Float64(dm["d_std_GDP"])
-    d_std_pi      = Float64(dm["d_std_pi"])
-    d_corr_GDPpi  = Float64(dm["d_corr_GDPpi"])
-    d_omG         = Float64(dm["d_omG"])
-    d_std_Q       = Float64(dm["d_std_Q"])
-    d_autocorr_Q  = Float64(dm["d_autocorr_Q"])
-    d_corr_GDPQ   = Float64(dm["d_corr_GDPQ"])
-    d_TBGDP       = Float64(dm["d_TBGDP"])
-    ss = dm["sample_start"]; se = dm["sample_end"]
-    @printf "  Loaded from data_moments_chile.mat  (sample %dQ%d – %dQ%d)\n\n" Int(ss[1]) Int(ss[2]) Int(se[1]) Int(se[2])
+if isfile(sec_mom_file) && isfile(agg_mom_file)
+    sec = CSV.read(sec_mom_file, DataFrame)
+    agg = CSV.read(agg_mom_file, DataFrame)
+    agg_dict = Dict(String(r.moment) => Float64(r.value) for r in eachrow(agg))
+
+    y_d          = Float64.(sec.std_Y)
+    p_d          = Float64.(sec.std_PH)
+    l_d          = Float64.(sec.std_L)
+    d_std_GDP    = agg_dict["std_GDP"]
+    d_std_pi     = agg_dict["std_pi"]
+    d_corr_GDPpi = agg_dict["corr_GDPpi"]
+    d_omG        = agg_dict["omG"]
+    d_std_Q      = agg_dict["std_Q"]
+    d_autocorr_Q = agg_dict["autocorr_Q"]
+    d_corr_GDPQ  = agg_dict["corr_GDPQ"]
+    d_TBGDP      = agg_dict["TBGDP"]
+    @printf "  Loaded sectoral_moments.csv + aggregate_moments.csv\n\n"
 else
-    @printf "  data_moments_chile.mat not found — using literature defaults.\n"
-    @printf "  Run compute_data_moments.jl first for data-based moments.\n\n"
+    @printf "  CSV moment files not found in %s\n" DATA_DIR
+    @printf "  Run compute_data_moments.jl first to generate them.\n\n"
     y_d          = fill(0.04, NSEC)
     p_d          = fill(0.02, NSEC)
     l_d          = fill(0.03, NSEC)
-    d_std_GDP    = 0.0215
-    d_std_pi     = 0.0041
-    d_corr_GDPpi = -0.15
-    d_omG        = 0.57
-    d_std_Q      = 0.0520
-    d_autocorr_Q = 0.75
-    d_corr_GDPQ  = -0.15
-    d_TBGDP      = -0.02
+    d_std_GDP    = 0.0215; d_std_pi     = 0.0041;  d_corr_GDPpi = -0.15
+    d_omG        = 0.57;   d_std_Q      = 0.0520;  d_autocorr_Q = 0.75
+    d_corr_GDPQ  = -0.15;  d_TBGDP      = -0.02
 end
 
 # Full 46-element data moment vector
@@ -295,29 +292,16 @@ end
 # =========================================================================== #
 
 function load_warm_start(n_theta::Int)
-    ckpt_file    = joinpath(MODELO_DIR, "smm_best_so_far.mat")
-    results_file = joinpath(MODELO_DIR, "smm_results.mat")
+    # Warm-start from CSV checkpoint (written by previous SMM runs)
+    ckpt_file = joinpath(DATA_DIR, "smm_checkpoint.csv")
 
     if isfile(ckpt_file)
         try
-            tmp = matread(ckpt_file)
-            θ_prev = vec(Float64.(tmp["smm_best_so_far"]["theta_best"]))
+            df = CSV.read(ckpt_file, DataFrame)
+            θ_prev = Float64.(df.value)
             if length(θ_prev) == n_theta && all(θ_prev .>= LB) && all(θ_prev .<= UB)
-                obj_prev = Float64(tmp["smm_best_so_far"]["obj_best"])
-                @printf "  Warm start: smm_best_so_far.mat  (obj=%.6f)\n\n" obj_prev
-                return θ_prev
-            end
-        catch
-        end
-    end
-
-    if isfile(results_file)
-        try
-            tmp = matread(results_file)
-            θ_prev = vec(Float64.(tmp["smm_results"]["theta_hat"]))
-            if length(θ_prev) == n_theta && all(θ_prev .>= LB) && all(θ_prev .<= UB)
-                obj_prev = Float64(tmp["smm_results"]["obj_hat"])
-                @printf "  Warm start: smm_results.mat  (obj=%.6f)\n\n" obj_prev
+                obj_prev = parse(Float64, String(df[1, :obj_hat]))  # stored in first row
+                @printf "  Warm start: smm_checkpoint.csv  (obj=%.6f)\n\n" obj_prev
                 return θ_prev
             end
         catch
@@ -457,28 +441,36 @@ function smm_run(context::Dynare.Context)
         "moment_names"  => MOMENT_NAMES,
         "W"             => W,
     )
-    results_path = joinpath(MODELO_DIR, "smm_results.mat")
-    matwrite(results_path, Dict("smm_results" => smm_results_dict))
+    # ---- smm_results.csv — full results table --------------------------------
+    df_results = DataFrame(
+        param   = vcat(PARAM_LABELS, fill("", 46 - N_THETA)),
+        theta   = vcat(θ_hat,        fill(NaN, 46 - N_THETA)),
+        moment  = MOMENT_NAMES,
+        data    = data_moments,
+        model   = moments_hat,
+        diff    = ψ_hat,
+    )
+    results_path = joinpath(DATA_DIR, "smm_results.csv")
+    CSV.write(results_path, df_results)
     @printf "\nResults saved to:\n  %s\n" results_path
 
-    # smm_estimates.mat — parameter estimates only (read by main_SOE_gap.jl)
-    estimates_dict = Dict{String,Any}(
-        "ilabcosts_val"    => θ_hat[1],
-        "modepsY"          => fill(θ_hat[2], NSEC),
-        "modepsM"          => fill(θ_hat[3], NSEC),
-        "kappaV_val"       => exp(θ_hat[4]),
-        "rho_om1_val"      => θ_hat[5],
-        "sigma_om_val"     => θ_hat[6],
-        "rho_tfp1_val"     => θ_hat[7],
-        "isigma_tfp_val"   => θ_hat[8:19],
-        "rho_pvstar_val"   => θ_hat[20],
-        "sigma_pvstar_val" => θ_hat[21],
-        "rho_xi_val"       => θ_hat[22],
-        "sigma_xi_val"     => θ_hat[23],
+    # ---- smm_estimates.csv — parameter estimates (read by main_SOE_gap.jl) --
+    sector_labels = ["isigma_tfp_$(i)" for i in 1:NSEC]
+    df_est = DataFrame(
+        param = vcat(["ilabcosts","epsY","epsM","log_kappaV",
+                      "rho_om","sigma_om","rho_A"],
+                     sector_labels,
+                     ["rho_pvstar","sigma_pvstar","rho_xi","sigma_xi"]),
+        value = θ_hat,
+        obj_hat = vcat([obj_hat], fill(NaN, N_THETA-1)),
     )
-    estimates_path = joinpath(MODELO_DIR, "smm_estimates.mat")
-    matwrite(estimates_path, estimates_dict)
+    estimates_path = joinpath(DATA_DIR, "smm_estimates.csv")
+    CSV.write(estimates_path, df_est)
     @printf "  Estimates saved to:\n  %s\n" estimates_path
+
+    # ---- checkpoint for warm starts ----------------------------------------
+    CSV.write(joinpath(DATA_DIR, "smm_checkpoint.csv"), df_est)
+
     @printf "\n  Re-run main_SOE_gap.jl (EXERCISE=0) to apply estimates.\n\n"
 
     return θ_hat, obj_hat, moments_hat

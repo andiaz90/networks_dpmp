@@ -37,8 +37,6 @@ using Printf
 using NLsolve
 using CSV
 using DataFrames
-using XLSX
-using MAT          # for reading smm_estimates.mat / smm_best_so_far.mat
 using StatsBase
 using Dynare        # native Julia reimplementation — no MATLAB, no Octave needed
 
@@ -112,7 +110,7 @@ DATA_CANDIDATES = filter!(!isempty, [
     get(ENV, "NKIOSOE_DATA_DIR", ""),   # user override
 ])
 
-# find_file: accepts multiple alternative basenames (for .xls / .xlsx variants)
+# find_file: search candidates for any of the given filenames
 function find_file(candidates, fnames...)
     for d in candidates, fname in fnames
         p = joinpath(d, fname)
@@ -121,84 +119,89 @@ function find_file(candidates, fnames...)
     return ""
 end
 
-# Accept both .xls and .xlsx — XLSX.jl can read both formats
-path_industries = find_file(DATA_CANDIDATES,
-    "Stata_to_excel_few_industries_chile.xlsx",
-    "Stata_to_excel_few_industries_chile.xls")
+# ---- All data files are CSV (no XLS / no MAT) ----
+# Run bootstrap_csv.jl once if sector_calibration.csv or sectoral_moments.csv
+# are missing (they are generated from the MATLAB-produced .mat files).
+path_cal     = find_file(DATA_CANDIDATES, "sector_calibration.csv")
+path_io      = find_file(DATA_CANDIDATES, "IO_2021_chile.csv")
+path_fpa     = find_file(DATA_CANDIDATES, "fpa_vector_few_industries_chile.csv")
+path_sec_mom = find_file(DATA_CANDIDATES, "sectoral_moments.csv")
+path_agg_mom = find_file(DATA_CANDIDATES, "aggregate_moments.csv")
 
-path_io  = find_file(DATA_CANDIDATES, "IO_2021_chile.csv")
-path_fpa = find_file(DATA_CANDIDATES, "fpa_vector_few_industries_chile.csv")
-
-# Report which files were found
-@printf "  Data root   : %s\n" DATA_DIR
-for (p, label) in [(path_industries, "industries Excel"),
-                   (path_io,         "IO matrix CSV"),
-                   (path_fpa,        "FPA vector CSV")]
-    @printf "  %-20s : %s\n" label (isempty(p) ? "NOT FOUND" : basename(p))
+@printf "  Data root : %s\n" DATA_DIR
+for (p, label) in [
+    (path_cal,     "sector_calibration.csv"),
+    (path_io,      "IO_2021_chile.csv"),
+    (path_fpa,     "fpa_vector CSV"),
+    (path_sec_mom, "sectoral_moments.csv"),
+    (path_agg_mom, "aggregate_moments.csv"),
+]
+    @printf "  %-30s : %s\n" label (isempty(p) ? "NOT FOUND" : "OK")
 end
 println()
 
 missing_files = String[]
-isempty(path_industries) && push!(missing_files, "Stata_to_excel_few_industries_chile.xls[x]")
-isempty(path_io)  && push!(missing_files, "IO_2021_chile.csv")
-isempty(path_fpa) && push!(missing_files, "fpa_vector_few_industries_chile.csv")
+isempty(path_cal)     && push!(missing_files, "sector_calibration.csv")
+isempty(path_io)      && push!(missing_files, "IO_2021_chile.csv")
+isempty(path_fpa)     && push!(missing_files, "fpa_vector_few_industries_chile.csv")
 
 if !isempty(missing_files)
-    searched = join(DATA_CANDIDATES, "\n    ")
     error("""
-    Required data file(s) not found: $(join(missing_files, ", "))
-    Searched in:
-        $searched
-    Set NKIOSOE_DATA_DIR to override the search path:
-        export NKIOSOE_DATA_DIR="/path/to/Data"
+    Required CSV file(s) not found: $(join(missing_files, ", "))
+    Searched in: $(join(DATA_CANDIDATES, ", "))
+
+    If sector_calibration.csv is missing, run once from julia_dynare/:
+        julia --project=. bootstrap_csv.jl
+    This generates the CSV files from the existing MATLAB .mat outputs.
     """)
 end
 
 
 # =========================================================================== #
-#  READ DATA (12 sectors)                                                      #
+#  READ DATA (12 sectors, all from CSV)                                        #
 # =========================================================================== #
 
 nsec = 12
 
 @printf "--- Loading data ---\n"
 
-# ---- Sector-level Excel file ----
-# Columns (1-indexed):
-#   1=kk  2=BEAName  3=Nameshort  4=dp  5=dy  6=dl  7=dri
-#   8=share  9=industrytype  10=spend_good  11=spend_serv
-#   12=alpha  13=alpha_V  14=var_rho
-wb = XLSX.readxlsx(path_industries)
-ws = wb[1]   # first sheet; change index if needed
+# ---- Sector calibration CSV ----
+# Columns: sector, name, alpha, alpha_V, var_rho, spend_good, spend_serv,
+#          kappa, is_goods
+cal_df     = CSV.read(path_cal, DataFrame)
+names_vec  = cal_df.name
+alpha      = Float64.(cal_df.alpha)
+alpha_V    = Float64.(cal_df.alpha_V)
+var_rho    = Float64.(cal_df.var_rho)
+spend_good = Float64.(cal_df.spend_good)
+spend_serv = Float64.(cal_df.spend_serv)
 
-# Read rows 2:nsec+1 (skip header row 1)
-names_vec  = String[ws[i, 3] for i in 2:nsec+1]
-p_d        = Float64[ws[i, 4]  for i in 2:nsec+1]
-y_d        = Float64[ws[i, 5]  for i in 2:nsec+1]
-l_d        = Float64[ws[i, 6]  for i in 2:nsec+1]
-ri_d       = Float64[ws[i, 7]  for i in 2:nsec+1]
-spend_good = Float64[ws[i, 10] for i in 2:nsec+1]
-spend_serv = Float64[ws[i, 11] for i in 2:nsec+1]
-alpha      = Float64[ws[i, 12] for i in 2:nsec+1]
-alpha_V    = Float64[ws[i, 13] for i in 2:nsec+1]
-var_rho    = Float64[ws[i, 14] for i in 2:nsec+1]
+# ---- Data moments from CSV (y_d, p_d, l_d for rank correlations) ----
+if !isempty(path_sec_mom)
+    sec_mom = CSV.read(path_sec_mom, DataFrame)
+    y_d = Float64.(sec_mom.std_Y)
+    p_d = Float64.(sec_mom.std_PH)
+    l_d = Float64.(sec_mom.std_L)
+else
+    @printf "  WARNING: sectoral_moments.csv not found — rank correlations will use zeros.\n"
+    y_d = zeros(nsec); p_d = zeros(nsec); l_d = zeros(nsec)
+end
 
 # ---- IO matrix ----
 betaio_df = CSV.read(path_io, DataFrame, header=false)
 betaio    = Matrix{Float64}(betaio_df[1:nsec, 1:nsec])
 
-# Normalize columns (each column j sums to 1 over supplying sectors)
 col_sums  = sum(betaio, dims=1)
 betax     = betaio ./ col_sums
-modbeta   = betax'          # modbeta[i,j] = share of inputs sector i gets from sector j
+modbeta   = betax'   # modbeta[i,j] = share of inputs sector i gets from sector j
 
 # ---- Price adjustment frequency (Rotemberg κ) ----
 fpa_df    = CSV.read(path_fpa, DataFrame, header=false)
-theta_vec = vec(Matrix{Float64}(fpa_df))   # frequency of price adjustment
+theta_vec = vec(Matrix{Float64}(fpa_df))
 
 # Material / import shares
-modalpha   = alpha       # intermediate material share
-modalphaV  = alpha_V     # imported inputs share
+modalpha  = alpha
+modalphaV = alpha_V
 
 @printf "  Loaded %d sectors from data files.\n\n" nsec
 
@@ -334,8 +337,8 @@ shock_epsA_val       = ones(nsec)
 #  LOAD SMM ESTIMATES (override defaults when available)                       #
 # =========================================================================== #
 
-smm_est_file  = joinpath(MODELO_DIR, "smm_estimates.mat")
-smm_ckpt_file = joinpath(MODELO_DIR, "smm_best_so_far.mat")
+# SMM estimates are written as CSV by smm_estimation.jl
+smm_est_file = joinpath(DATA_DIR, "smm_estimates.csv")
 
 param_names = ["ilabcosts", "epsY", "epsM", "kappaV", "rho_om1", "sigma_om",
                "rho_tfp1", "isigma_tfp(1)", "rho_pvstar", "sigma_pvstar"]
@@ -343,38 +346,22 @@ param_names = ["ilabcosts", "epsY", "epsM", "kappaV", "rho_om1", "sigma_om",
 smm_param_source = "hard-coded defaults"
 
 if isfile(smm_est_file)
-    est = matread(smm_est_file)
-    ilabcosts_val    = est["ilabcosts_val"]
-    modepsY          = fill(est["modepsY"] isa AbstractArray ? est["modepsY"][1] : est["modepsY"], nsec)
-    modepsM          = fill(est["modepsM"] isa AbstractArray ? est["modepsM"][1] : est["modepsM"], nsec)
-    kappaV_val       = est["kappaV_val"]
-    rho_om1_val      = est["rho_om1_val"]
-    sigma_om_val     = est["sigma_om_val"]
-    rho_tfp1_val     = est["rho_tfp1_val"]
-    isigma_tfp_val   = vec(est["isigma_tfp_val"])
-    rho_pvstar_val   = est["rho_pvstar_val"]
-    sigma_pvstar_val = est["sigma_pvstar_val"]
-    haskey(est, "rho_xi_val")   && (rho_xi_val   = est["rho_xi_val"])
-    haskey(est, "sigma_xi_val") && (sigma_xi_val = est["sigma_xi_val"])
-    smm_param_source = "smm_estimates.mat"
+    est_df = CSV.read(smm_est_file, DataFrame)
+    est    = Dict(String(r.param) => Float64(r.value) for r in eachrow(est_df))
 
-elseif isfile(smm_ckpt_file)
-    ckpt  = matread(smm_ckpt_file)
-    tb    = ckpt["smm_best_so_far"]
-    θ_best = vec(tb["theta_best"])
-    ilabcosts_val    = θ_best[1]
-    modepsY          = fill(θ_best[2], nsec)
-    modepsM          = fill(θ_best[3], nsec)
-    kappaV_val       = exp(θ_best[4])
-    rho_om1_val      = θ_best[5]
-    sigma_om_val     = θ_best[6]
-    rho_tfp1_val     = θ_best[7]
-    isigma_tfp_val   = θ_best[8:19]
-    rho_pvstar_val   = θ_best[20]
-    sigma_pvstar_val = θ_best[21]
-    length(θ_best) >= 22 && (rho_xi_val   = θ_best[22])
-    length(θ_best) >= 23 && (sigma_xi_val = θ_best[23])
-    smm_param_source = @sprintf "smm_best_so_far.mat (obj=%.6f)" tb["obj_best"]
+    ilabcosts_val    = est["ilabcosts"]
+    modepsY          = fill(est["epsY"], nsec)
+    modepsM          = fill(est["epsM"], nsec)
+    kappaV_val       = exp(est["log_kappaV"])
+    rho_om1_val      = est["rho_om"]
+    sigma_om_val     = est["sigma_om"]
+    rho_tfp1_val     = est["rho_A"]
+    isigma_tfp_val   = [est["isigma_tfp_$(i)"] for i in 1:nsec]
+    rho_pvstar_val   = est["rho_pvstar"]
+    sigma_pvstar_val = est["sigma_pvstar"]
+    haskey(est, "rho_xi")   && (rho_xi_val   = est["rho_xi"])
+    haskey(est, "sigma_xi") && (sigma_xi_val = est["sigma_xi"])
+    smm_param_source = "smm_estimates.csv"
 end
 
 @printf "--- Parameters (%s) ---\n" smm_param_source
@@ -418,18 +405,14 @@ epsY_vec   = modepsY
 epsM_vec   = modepsM
 A_vec      = modA
 
-# Load trade-balance target from data_moments_chile.mat if available
-tb_target = 0.02
-dm_file_tb = joinpath(MODELO_DIR, "data_moments_chile.mat")
-if isfile(dm_file_tb)
+# Load trade-balance target from aggregate_moments.csv if available
+tb_target  = 0.02
+agg_mom_tb = joinpath(DATA_DIR, "aggregate_moments.csv")
+if isfile(agg_mom_tb)
     try
-        tmp_dm = matread(dm_file_tb)
-        if haskey(tmp_dm, "dm_chile")
-            dm_ch = tmp_dm["dm_chile"]
-            if haskey(dm_ch, "d_TBGDP") && isfinite(dm_ch["d_TBGDP"])
-                tb_target = dm_ch["d_TBGDP"]
-            end
-        end
+        agg_tb = CSV.read(agg_mom_tb, DataFrame)
+        row    = filter(r -> String(r.moment) == "TBGDP", agg_tb)
+        !isempty(row) && isfinite(row[1, :value]) && (tb_target = Float64(row[1, :value]))
     catch
     end
 end
@@ -816,37 +799,35 @@ rank_corr = (rho_output=rho_y, rho_price=rho_p, rho_labor=rho_l)
 #  SAVE RESULTS                                                                #
 # =========================================================================== #
 
-output_files = ["model_output_IOSOE", "model_output_IOSOE_ex1",
-                "model_output_IOSOE_ex2", "model_output_IOSOE_ex3"]
-# Save results next to the script, not inside mod/ subfolder
-output_path  = joinpath(SCRIPT_DIR, "$(output_files[EXERCISE+1]).mat")
+output_tags = ["baseline", "ex1_pref", "ex2_mfg", "ex3_mp"]
+output_path = joinpath(DATA_DIR, "model_output_$(output_tags[EXERCISE+1]).csv")
 
-results_out = Dict{String, Any}(
-    "EXERCISE"     => EXERCISE,
-    "nsec"         => nsec,
-    "pH_ss"        => pH_ss,
-    "w_ss"         => w_ss,
-    "Q_ss"         => Q_ss,
-    "C_ss"         => C_ss,
-    "Yi_ss"        => Yi_ss,
-    "L_ss"         => L_ss,
-    "M_ss"         => M_ss,
-    "Vi_ss"        => Vi_ss,
-    "GDP_ss"       => GDP_ss,
-    "TB_ss"        => TB_ss,
-    "Bstar_ss"     => Bstar_ss,
-    "rank_corr_Y"  => rho_y,
-    "rank_corr_P"  => rho_p,
-    "rank_corr_L"  => rho_l,
-    "std_Y_m"      => std_Y_m,
-    "std_PH_m"     => std_PH_m,
-    "std_L_m"      => std_L_m,
-    "y_d"          => y_d,
-    "p_d"          => p_d,
-    "l_d"          => l_d,
+# Steady-state scalars
+df_ss = DataFrame(
+    variable = ["GDP_ss","TB_ss","Bstar_ss","w_ss","Q_ss","C_ss",
+                "rank_corr_Y","rank_corr_P","rank_corr_L"],
+    value    = [GDP_ss, TB_ss, Bstar_ss, w_ss, Q_ss, C_ss, rho_y, rho_p, rho_l],
 )
-matwrite(output_path, results_out)
-@printf "--- Results saved to: %s ---\n\n" output_path
+CSV.write(output_path, df_ss)
+
+# Sectoral results
+sec_path = replace(output_path, ".csv" => "_sectoral.csv")
+df_sec_out = DataFrame(
+    sector  = 1:nsec,
+    pH_ss   = pH_ss,
+    Yi_ss   = Yi_ss,
+    L_ss    = L_ss,
+    M_ss    = M_ss,
+    Vi_ss   = Vi_ss,
+    std_Y_m  = std_Y_m,
+    std_PH_m = std_PH_m,
+    std_L_m  = std_L_m,
+    y_d     = y_d,
+    p_d     = p_d,
+    l_d     = l_d,
+)
+CSV.write(sec_path, df_sec_out)
+@printf "--- Results saved to:\n    %s\n    %s ---\n\n" output_path sec_path
 
 
 # =========================================================================== #
