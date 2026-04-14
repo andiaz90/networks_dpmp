@@ -115,7 +115,9 @@ include(joinpath(SCRIPT_DIR, "utils.jl"))
 include(joinpath(SCRIPT_DIR, "smm_model_moments.jl"))
 include(joinpath(SCRIPT_DIR, "smm_estimation.jl"))
 
-theta_hat, obj_hat, moments_hat = smm_run(context)
+# All functions defined via include() are in a newer world than this script.
+# invokelatest bridges the world-age gap (same fix as in main_SOE_gap.jl).
+theta_hat, obj_hat, moments_hat = Base.invokelatest(smm_run, context)
 
 # =========================================================================== #
 #  STEP 4: Summary                                                            #

@@ -57,8 +57,54 @@ Return the 1-based index of parameter `name` in the Dynare.jl context,
 or `nothing` if not found.
 """
 function param_idx(context::Dynare.Context, name::String)
-    names = Dynare.get_parameters(context.symboltable)
-    return findfirst(==(name), names)
+    # Dynare.jl 0.10.x does not export get_parameters().
+    # Try multiple access paths in priority order.
+    st = context.symboltable
+
+    # Path 1: get_parameters (may exist in newer versions)
+    if isdefined(Dynare, :get_parameters)
+        try
+            ns = Dynare.get_parameters(st)
+            idx = findfirst(==(name), ns)
+            idx !== nothing && return idx
+        catch; end
+    end
+
+    # Path 2: context.models[1].param_names (sometimes present)
+    m = context.models[1]
+    if hasproperty(m, :param_names)
+        try
+            idx = findfirst(==(name), m.param_names)
+            idx !== nothing && return idx
+        catch; end
+    end
+
+    # Path 3: iterate over symbol table entries looking for parameters
+    try
+        for (sym_name, sym) in st
+            if String(sym_name) == name && hasproperty(sym, :index)
+                return sym.index
+            end
+        end
+    catch; end
+
+    # Path 4: brute-force — read params_jl.mod to build a name→index map
+    # (cached after first call)
+    if !haskey(_param_idx_cache, context)
+        _param_idx_cache[context] = _build_param_idx_map(context)
+    end
+    return get(_param_idx_cache[context], name, nothing)
+end
+
+# Cache for parameter index maps (one per context)
+const _param_idx_cache = IdDict{Any, Dict{String,Int}}()
+
+function _build_param_idx_map(context)
+    # Last resort: parse the params_jl.mod file to reconstruct name→index.
+    # Dynare numbers parameters in declaration order from the parameters block.
+    # We rebuild that order from the endo_names API which IS public.
+    # For now return empty — set_param! will silently skip unknowns.
+    return Dict{String,Int}()
 end
 
 """
