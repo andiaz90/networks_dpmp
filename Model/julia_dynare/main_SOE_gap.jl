@@ -773,53 +773,71 @@ std_Y_m  = fill(NaN, nsec)
 std_PH_m = fill(NaN, nsec)
 std_L_m  = fill(NaN, nsec)
 
+# =========================================================================== #
+#  LYAPUNOV VARIANCE-COVARIANCE  (pure Julia, works on ARM/aarch64)          #
+# =========================================================================== #
+
+Γ_rc = fill(NaN, length(endo_names), length(endo_names))
+Γ_1  = fill(NaN, length(endo_names), length(endo_names))   # lag-1 cross-cov
+P_st = nothing
+
 rc_lyap_ok = false
 try
-    # Use our own doubling-algorithm Lyapunov solver (utils.jl local_dlyap).
-    # This is pure Julia — no LAPACK gees call — so it works on ARM (aarch64).
-    # (Dynare's stoch_simul fails on Apple Silicon due to gees, but local_dlyap
-    #  uses only matrix multiplications and is not affected.)
-    ghx_s = ghx_jl[state_rows, :]   # n_states × n_states
-    ghu_s = ghu_jl[state_rows, :]   # n_states × n_shocks
-    P_st  = local_dlyap(ghx_s, ghu_s * Σe_jl * ghu_s')
-    Γ_rc  = ghx_jl * P_st * ghx_jl' + ghu_jl * Σe_jl * ghu_jl'
-    Γ_rc  = (Γ_rc + Γ_rc') / 2
-
-    for i in 1:nsec
-        for (kv, vn) in enumerate(["Y_$(i)", "PH_$(i)", "L_$(i)"])
-            dr_idx = get(endo_idx, vn, nothing)
-            dr_idx === nothing && continue
-            ss_val = abs(ss_vec[dr_idx])
-            ss_val < 1e-12 && (ss_val = 1.0)
-            pstd = sqrt(max(Γ_rc[dr_idx, dr_idx], 0.0)) / ss_val
-            kv == 1 && (std_Y_m[i]  = pstd)
-            kv == 2 && (std_PH_m[i] = pstd)
-            kv == 3 && (std_L_m[i]  = pstd)
-        end
-    end
+    A_rc = ghx_jl[state_rows, :]   # n_states × n_states
+    B_rc = ghu_jl[state_rows, :]   # n_states × n_shocks
+    P_st = local_dlyap(A_rc, B_rc * Σe_jl * B_rc')
+    Γ_rc = ghx_jl * P_st * ghx_jl' + ghu_jl * Σe_jl * ghu_jl'
+    Γ_rc = (Γ_rc + Γ_rc') / 2
+    # Lag-1 cross-covariance: Γ_1(i,j) = Cov(y_t(i), y_{t-1}(j))
+    Γ_1  = ghx_jl * A_rc * (P_st * ghx_jl' + B_rc * Σe_jl * ghu_jl')
     rc_lyap_ok = true
 catch e
-    @printf "  [rank corr] Lyapunov failed (%s); using simulation std devs.\n" string(e)
+    @printf "  [Lyapunov] failed (%s)\n" string(e)
 end
 
-# Fallback: simulation std devs
-if !rc_lyap_ok
-    for i in 1:nsec
-        for (kv, vn) in enumerate(["Y_$(i)", "PH_$(i)", "L_$(i)"])
-            col = get(endo_idx, vn, nothing)
-            col === nothing && continue
-            ts     = sim_matrix[:, col]
-            ss_val = abs(ss_vec[col])
-            ss_val < 1e-12 && (ss_val = 1.0)
-            pstd   = std(ts) / ss_val
-            kv == 1 && (std_Y_m[i]  = pstd)
-            kv == 2 && (std_PH_m[i] = pstd)
-            kv == 3 && (std_L_m[i]  = pstd)
-        end
+# Helper: percentage std dev from Γ
+function _pstd(idx, Γ, ss)
+    (idx === nothing || !rc_lyap_ok) && return NaN
+    ss_val = abs(ss[idx]); ss_val < 1e-12 && (ss_val = 1.0)
+    return sqrt(max(Γ[idx, idx], 0.0)) / ss_val
+end
+# Helper: contemporaneous correlation
+function _corr_ab(ia, ib, Γ)
+    (ia === nothing || ib === nothing || !rc_lyap_ok) && return NaN
+    denom = sqrt(max(Γ[ia,ia], 0.0) * max(Γ[ib,ib], 0.0))
+    denom < 1e-15 && return NaN
+    return clamp(Γ[ia, ib] / denom, -1.0, 1.0)
+end
+
+for i in 1:nsec
+    for (kv, vn) in enumerate(["Y_$(i)", "PH_$(i)", "L_$(i)"])
+        idx = get(endo_idx, vn, nothing)
+        pstd = _pstd(idx, Γ_rc, ss_vec)
+        kv == 1 && (std_Y_m[i]  = pstd)
+        kv == 2 && (std_PH_m[i] = pstd)
+        kv == 3 && (std_L_m[i]  = pstd)
     end
 end
 
-# Compute Spearman rank correlations
+# Aggregate model moments
+i_GDP = get(endo_idx, "GDP", nothing)
+i_pi  = get(endo_idx, "pi",  nothing)
+i_Q   = get(endo_idx, "Q",   nothing)
+
+m_std_GDP    = _pstd(i_GDP, Γ_rc, ss_vec)
+m_std_pi     = _pstd(i_pi,  Γ_rc, ss_vec)
+m_std_Q      = _pstd(i_Q,   Γ_rc, ss_vec)
+m_corr_GDPpi = _corr_ab(i_GDP, i_pi, Γ_rc)
+m_corr_GDPQ  = _corr_ab(i_GDP, i_Q,  Γ_rc)
+m_omG        = ombar_val   # fixed by calibration
+
+m_autocorr_Q = if rc_lyap_ok && i_Q !== nothing && Γ_rc[i_Q, i_Q] > 1e-15
+    Γ_1[i_Q, i_Q] / Γ_rc[i_Q, i_Q]
+else
+    NaN
+end
+
+# Rank correlations
 valid_y = isfinite.(std_Y_m)  .& isfinite.(y_d)
 valid_p = isfinite.(std_PH_m) .& isfinite.(p_d)
 valid_l = isfinite.(std_L_m)  .& isfinite.(l_d)
@@ -828,11 +846,84 @@ rho_y = sum(valid_y) >= 3 ? safe_spearman(std_Y_m[valid_y],  y_d[valid_y])  : Na
 rho_p = sum(valid_p) >= 3 ? safe_spearman(std_PH_m[valid_p], p_d[valid_p])  : NaN
 rho_l = sum(valid_l) >= 3 ? safe_spearman(std_L_m[valid_l],  l_d[valid_l])  : NaN
 
-@printf "  %-30s  %8s\n" "Variable" "Spearman r"
-@printf "  %s\n" repeat("-", 42)
-@printf "  %-30s  %8.4f\n" "Sectoral output (Y)" rho_y
-@printf "  %-30s  %8.4f\n" "Prices (PH)"         rho_p
-@printf "  %-30s  %8.4f\n" "Labor (L)"           rho_l
+@printf "\n--- Rank correlations (Spearman) ---\n"
+@printf "  Output (Y) :   %7.4f\n" rho_y
+@printf "  Prices (PH):   %7.4f\n" rho_p
+@printf "  Labor (L)  :   %7.4f\n" rho_l
+
+# =========================================================================== #
+#  MOMENT FIT TABLE  (mirrors MATLAB run_log format)                          #
+# =========================================================================== #
+
+# Load data moments from aggregate_moments.csv + sectoral_moments.csv
+agg_mom_path = joinpath(DATA_DIR, "aggregate_moments.csv")
+sec_mom_path = joinpath(DATA_DIR, "sectoral_moments.csv")
+
+d_std_GDP = NaN; d_std_pi = NaN; d_corr_GDPpi = NaN; d_omG = 0.57
+d_std_Q = NaN; d_autocorr_Q = NaN; d_corr_GDPQ = NaN; d_TBGDP = NaN
+y_d_tab = y_d; p_d_tab = p_d; l_d_tab = l_d
+
+if isfile(agg_mom_path)
+    agg = CSV.read(agg_mom_path, DataFrame)
+    agg_d = Dict(String(r.moment) => Float64(r.value) for r in eachrow(agg))
+    d_std_GDP    = get(agg_d, "std_GDP",     NaN)
+    d_std_pi     = get(agg_d, "std_pi",      NaN)
+    d_corr_GDPpi = get(agg_d, "corr_GDPpi", NaN)
+    d_omG        = get(agg_d, "omG",         0.57)
+    d_std_Q      = get(agg_d, "std_Q",       NaN)
+    d_autocorr_Q = get(agg_d, "autocorr_Q", NaN)
+    d_corr_GDPQ  = get(agg_d, "corr_GDPQ",  NaN)
+    d_TBGDP      = get(agg_d, "TBGDP",      NaN)
+end
+
+# Build 46-element data and model vectors
+data_vec = [y_d_tab; p_d_tab; l_d_tab;
+            d_std_GDP; d_std_pi; d_corr_GDPpi; d_omG;
+            d_std_Q; d_autocorr_Q; d_corr_GDPQ;
+            1.0; 1.0; 1.0]   # rank corr targets = 1
+
+model_vec = [std_Y_m; std_PH_m; std_L_m;
+             m_std_GDP; m_std_pi; m_corr_GDPpi; m_omG;
+             m_std_Q; m_autocorr_Q; m_corr_GDPQ;
+             rho_y; rho_p; rho_l]
+
+# Weighting matrix (diagonal) — matches smm_estimation.jl build_weighting_matrix
+W_diag = 1.0 ./ max.(abs.(data_vec), 0.01) .^ 2
+W_diag[39] *= 0.02   # corr(GDP,pi): supply model can't match
+W_diag[40] *= 0.10   # omG: passive
+W_diag[43] *= 0.50   # corr(GDP,Q): over-identified
+W_diag[44] *= 0.50; W_diag[45] *= 0.50; W_diag[46] *= 0.50  # rank corrs
+
+moment_labels = vcat(
+    ["std(Y_$i)"  for i in 1:nsec],
+    ["std(PH_$i)" for i in 1:nsec],
+    ["std(L_$i)"  for i in 1:nsec],
+    ["std(GDP)", "std(pi)", "corr(GDP, pi)", "mean goods expenditure share",
+     "std(Q)", "autocorr(Q)", "corr(GDP, Q)",
+     "rank corr: output (model vs data)",
+     "rank corr: prices (model vs data)",
+     "rank corr: labor  (model vs data)"]
+)
+
+@printf "\n--- Moment fit (SMM) ---\n"
+@printf "%-38s  %9s  %9s  %9s  %11s\n" "Moment" "Data" "Model" "Diff" "W*Diff^2"
+@printf "%s\n" repeat("-", 82)
+
+total_loss = 0.0
+for k in 1:46
+    d = data_vec[k]; m = model_vec[k]
+    diff = isfinite(d) && isfinite(m) ? d - m : NaN
+    wdiff2 = isfinite(diff) ? W_diag[k] * diff^2 : NaN
+    isfinite(wdiff2) && (total_loss += wdiff2)
+    @printf "%-38s  %9.5f  %9.5f  %+9.5f  %11.6f\n" moment_labels[k] d m (isfinite(diff) ? diff : 0.0) (isfinite(wdiff2) ? wdiff2 : 0.0)
+end
+@printf "%s\n" repeat("-", 82)
+@printf "%-38s  %9s  %9s  %9s  %11.6f\n" "TOTAL LOSS" "" "" "" total_loss
+
+@printf "\n--- Dynare results ---\n"
+@printf "  Steady state  : %s\n" (ss_ok ? "OK" : "FAILED")
+@printf "  Blanchard-Kahn: %s\n" (rc_lyap_ok ? "OK" : "NOT CHECKED")
+@printf "  Simulation    : %s\n" (sim_ok ? "OK" : "no data (ARM gees workaround)")
 (rho_y == 0 || rho_p == 0 || rho_l == 0) &&
     @printf "  (0 = model std devs are uniform across sectors for this exercise)\n"
 @printf "\n"

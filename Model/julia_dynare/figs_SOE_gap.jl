@@ -26,8 +26,10 @@ end
 #  HELPERS                                                                     #
 # =========================================================================== #
 
-function get_irf(df::DataFrame, varname::String, shock::String; n_periods::Int=40)
-    sub = filter(r -> r.variable == varname && r.shock == shock, df)
+# Accept AbstractString so InlineString types (String15, String31, etc.)
+# from CSV.jl work without conversion — compare as strings
+function get_irf(df::DataFrame, varname::AbstractString, shock::AbstractString; n_periods::Int=40)
+    sub = filter(r -> String(r.variable) == String(varname) && String(r.shock) == String(shock), df)
     isempty(sub) && return zeros(n_periods)
     s = sort(sub, :period)
     n = min(n_periods, nrow(s))
@@ -77,7 +79,7 @@ function generate_figures(;
         return
     end
 
-    all_shocks = unique(df_irf.shock)
+    all_shocks = unique(String.(df_irf.shock))
     n_periods  = 40   # show first 40 quarters in plots
 
     @printf "  IRFs loaded: %d shock(s), %d variable-shock pairs\n" length(all_shocks) length(unique(df_irf.variable))
@@ -222,7 +224,7 @@ function generate_figures(;
     _savefig_safe(p_L, joinpath(DATA_DIR, "irf_sectoral_L_$(tag).pdf"))
 
     # 4e. Output gap (Ygap variables — deviation of NK from flex-price)
-    gap_vars_exist = any(r -> r.variable == "Ygap_1", eachrow(df_irf))
+    gap_vars_exist = any(r -> String(r.variable) == "Ygap_1", eachrow(df_irf))
     if gap_vars_exist
         p_gap = Plots.plot(layout=(4,3), size=(1200,900), titlefontsize=8,
                            plot_title="Output Gap — $main_shock")
