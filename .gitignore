@@ -20,3 +20,12 @@ __pycache__/
 
 # Julia artifacts
 julia_dynare/Manifest.toml
+
+# Figures and PDFs
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.eps
+*.svg
+figures/
