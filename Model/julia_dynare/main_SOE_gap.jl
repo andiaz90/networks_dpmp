@@ -611,6 +611,8 @@ params_nt = (
     C_s_ss         = C_s_ss,
     C_g_ss         = C_g_ss,
     Bstar_ss       = Bstar_ss,
+    Q_ss           = Q_ss,
+    TB_ss          = TB_ss,
     IMP_ss_val     = IMP_ss_val,
     Ctot_ss_val    = Ctot_ss_val,
     Ctotg_ss_val   = Ctotg_ss_val,
@@ -866,6 +868,33 @@ df_sec_out = DataFrame(
 )
 CSV.write(sec_path, df_sec_out)
 @printf "--- Results saved to:\n    %s\n    %s ---\n\n" output_path sec_path
+
+
+# =========================================================================== #
+#  FIGURES AND TABLES (equivalent to figs_SOE_gap.m + plot_*.m)              #
+# =========================================================================== #
+
+include(joinpath(SCRIPT_DIR, "figs_SOE_gap.jl"))
+
+sec_results_for_figs = DataFrame(
+    sector  = 1:nsec,
+    pH_ss   = pH_ss,  Yi_ss = Yi_ss, L_ss = L_ss,
+    std_Y   = std_Y_m, std_PH = std_PH_m, std_L = std_L_m,
+)
+
+generate_figures(
+    MOD_DIR        = MOD_DIR,
+    DATA_DIR       = DATA_DIR,
+    SCRIPT_DIR     = SCRIPT_DIR,
+    EXERCISE       = EXERCISE,
+    nsec           = nsec,
+    names_vec      = names_vec,
+    ss_results     = (GDP_ss=GDP_ss, TB_ss=TB_ss, Q_ss=Q_ss,
+                      C_ss=C_ss, N_ss=N_ss, Bstar_ss=Bstar_ss,
+                      w_ss=w_ss),
+    sec_results    = sec_results_for_figs,
+    exercise_label = exercise_labels[EXERCISE+1],
+)
 
 
 # =========================================================================== #

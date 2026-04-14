@@ -140,7 +140,34 @@ if !isempty(mr.simulations)
     CSV.write(joinpath(MOD_DIR, "dynare_sim.csv"), df_sim)
     @info "Simulation saved ($(size(sim_data,1)) periods × $(size(sim_data,2)) variables)"
 else
-    @info "No simulation data available"
+    @info "No simulation data"
+end
+
+# ---- IRFs (impulse response functions) ----
+# mr.irfs is a Dict: shock_name => Dict(var_name => Vector{Float64})
+# Flatten to a DataFrame with columns: variable, shock, period, value
+irf_rows = NamedTuple{(:variable, :shock, :period, :value), Tuple{String,String,Int,Float64}}[]
+if !isempty(mr.irfs)
+    for (shock_name, var_dict) in mr.irfs
+        for (var_name, irf_vec) in var_dict
+            for (t, v) in enumerate(irf_vec)
+                push!(irf_rows, (variable=string(var_name),
+                                 shock=string(shock_name),
+                                 period=t,
+                                 value=Float64(v)))
+            end
+        end
+    end
+    df_irfs = DataFrame(irf_rows)
+    CSV.write(joinpath(MOD_DIR, "dynare_irfs.csv"), df_irfs)
+    n_shocks = length(mr.irfs)
+    n_vars   = isempty(irf_rows) ? 0 : length(unique(df_irfs.variable))
+    @info "IRFs saved: $n_shocks shock(s), $n_vars variable(s)"
+else
+    @info "No IRF data in mr.irfs"
+    # Write empty placeholder
+    CSV.write(joinpath(MOD_DIR, "dynare_irfs.csv"),
+              DataFrame(variable=String[], shock=String[], period=Int[], value=Float64[]))
 end
 
 @info "Results written to $(MOD_DIR)"
