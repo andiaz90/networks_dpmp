@@ -232,3 +232,14 @@ end
 
 @info "Results written to $(MOD_DIR)"
 println("DYNARE_SUCCESS")   # sentinel read by parent to confirm success
+
+# ---- Save context for SMM estimation ------------------------------------
+# smm_estimation.jl loads from this path to avoid re-running @dynare
+using Serialization
+context_jls = joinpath(MOD_DIR, "nk_iosoe_context.jls")
+try
+    serialize(context_jls, context)
+    @info "Context saved for SMM estimation: $context_jls"
+catch e
+    @warn "Could not serialize context: $e"
+end

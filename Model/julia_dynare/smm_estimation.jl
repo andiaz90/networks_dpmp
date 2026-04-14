@@ -486,12 +486,18 @@ end
 # =========================================================================== #
 
 if abspath(PROGRAM_FILE) == @__FILE__
-    context_file = joinpath(SCRIPT_DIR, "mod", "NK_SOE_lev_gap2",
-                             "output", "NK_SOE_lev_gap2.jls")
-    if isfile(context_file)
+    # Primary: context saved by run_dynare_subprocess.jl
+    context_file = joinpath(SCRIPT_DIR, "mod", "nk_iosoe_context.jls")
+    # Fallback: Dynare.jl's own cache location
+    context_file_alt = joinpath(SCRIPT_DIR, "mod", "NK_SOE_lev_gap2",
+                                "output", "NK_SOE_lev_gap2.jls")
+    ctx_path = isfile(context_file) ? context_file :
+               isfile(context_file_alt) ? context_file_alt : ""
+
+    if !isempty(ctx_path)
         using Serialization
-        @printf "Loading compiled Dynare context from:\n  %s\n\n" context_file
-        context = deserialize(context_file)
+        @printf "Loading compiled Dynare context from:\n  %s\n\n" ctx_path
+        context = deserialize(ctx_path)
         smm_run(context)
     else
         @printf """
