@@ -116,27 +116,42 @@ function _main()
     @printf "--- Step 2: Loading context ---\n"
     @printf "  %s\n\n" ctx_path
     context = deserialize(ctx_path)
-    n_endo  = length(Dynare.get_endogenous(context.symboltable))
-    @printf "  Context loaded: %d endogenous variables\n" n_endo
 
-    # Validate — the NK-IOSOE model has 491 endogenous variables.
-    # A stale/wrong context file produces a mismatch here.
+    # On ARM, context.symboltable may have only 6 names (Dynare.jl bug:
+    # symboltable update fails when gees errors during check; even though
+    # context.results.model_results[1] correctly has 491 variables).
+    # Validate using the model results, not the symbol table.
+    ss_check = context.results.model_results[1].trends.endogenous_steady_state
+    n_endo   = length(ss_check)
+    @printf "  Context loaded: %d endogenous variables (from model results)\n" n_endo
+
     if n_endo < 400
         @printf "\n  ERROR: context has only %d variables (expected ~491).\n" n_endo
-        @printf "  The context file is stale or from a different model.\n"
-        @printf "  Fix:\n"
-        @printf "    1. Delete the stale file:\n"
-        @printf "       rm %s\n" ctx_path
-        @printf "    2. Re-run main_SOE_gap.jl to generate a fresh context:\n"
-        @printf "       julia --project=. main_SOE_gap.jl\n"
-        @printf "    3. Then re-run estimation.\n\n"
-        error("Stale context file — $(n_endo) variables, expected ≥400. Delete and re-run main_SOE_gap.jl.")
+        @printf "  Fix: delete context file and re-run:\n"
+        @printf "    rm %s\n" ctx_path
+        @printf "    julia --project=. main_SOE_gap.jl\n"
+        @printf "    julia --project=. run_smm_estimation.jl\n\n"
+        error("Context has $(n_endo) variables, expected ≥400.")
     end
-    @printf "\n"
+
+    # Read endo_names from the CSV written by the Dynare subprocess.
+    # We do NOT use Dynare.get_endogenous(context.symboltable) because on ARM
+    # the symboltable may be inconsistent (6 names vs 491 in the results).
+    MOD_DIR_smm = joinpath(SCRIPT_DIR, "mod")
+    endo_names_file = joinpath(MOD_DIR_smm, "dynare_endo_names.csv")
+    if isfile(endo_names_file)
+        endo_names_csv = CSV.read(endo_names_file, DataFrame)
+        endo_names_override = String.(endo_names_csv.variable)
+        @printf "  endo_names loaded from CSV: %d variables\n\n" length(endo_names_override)
+    else
+        endo_names_override = nothing
+        @printf "  endo_names CSV not found — will use symboltable\n\n"
+    end
 
     # ---- Step 3: Run SMM estimation ----------------------------------------
     @printf "--- Step 3: Running SMM estimation ---\n\n"
-    theta_hat, obj_hat, moments_hat = smm_run(context)
+    # Pass endo_names_override so smm_run uses CSV names instead of broken symboltable
+    theta_hat, obj_hat, moments_hat = smm_run(context; endo_names_override=endo_names_override)
 
     # ---- Step 4: Summary ---------------------------------------------------
     if isnan(obj_hat)

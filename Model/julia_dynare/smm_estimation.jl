@@ -328,9 +328,16 @@ Example:
     include("smm_estimation.jl")
     theta_hat, obj, moments = smm_run(context)
 """
-function smm_run(context::Dynare.Context)
+function smm_run(context::Dynare.Context; endo_names_override=nothing)
 
-    endo_names = Dynare.get_endogenous(context.symboltable)
+    # On ARM, context.symboltable may have inconsistent variable count.
+    # Use the override (from dynare_endo_names.csv) when provided.
+    endo_names = if endo_names_override !== nothing && length(endo_names_override) >= 400
+        endo_names_override
+    else
+        Dynare.get_endogenous(context.symboltable)
+    end
+    @printf "  endo_names: %d variables\n" length(endo_names)
 
     # --- Build baseline calibration struct ---
     baseline = build_baseline(context, endo_names,
