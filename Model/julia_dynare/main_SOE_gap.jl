@@ -59,14 +59,16 @@ include(joinpath(SCRIPT_DIR, "utils.jl"))
 #  3 = Monetary policy shock only                                             #
 # =========================================================================== #
 
-EXERCISE = 2    # <<< CHANGE THIS (0=Baseline matches SMM calibration)
-
 # Wrap in _main() so that:
-#   1. Julia 1.12 world-age issues (strict binding semantics for included
-#      functions used in closures) are avoided inside a function scope.
-#   2. Soft-scope ambiguities for variables like tb_target go away.
+#   1. Julia 1.12 world-age issues are avoided inside a function scope.
+#   2. Soft-scope ambiguities go away inside a function.
 #   3. We can use `return` for early exit.
 function _main()
+
+# <<<  CHANGE THIS to select exercise  >>>
+# 0 = Baseline (all shocks)          1 = Preference shock only
+# 2 = Manufacturing TFP shock only   3 = Monetary policy shock only
+EXERCISE = 2
 
 exercise_labels = [
     "Baseline (all shocks)",
