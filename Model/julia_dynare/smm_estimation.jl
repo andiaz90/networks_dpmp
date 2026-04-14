@@ -144,7 +144,7 @@ function build_baseline(context::Dynare.Context,
     modbeta    = [pvec("beta_$(i)_$(j)") for i in 1:nsec, j in 1:nsec]
 
     ss_vec = context.results.model_results[1].trends.endogenous_steady_state
-    get_ss(nm) = let idx = endo_dr_idx(endo_names, nm)
+    get_ss(nm) = let idx = findfirst(==(nm), endo_names)
                      idx === nothing ? 1.0 : ss_vec[idx]
                  end
 
