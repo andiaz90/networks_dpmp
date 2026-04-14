@@ -775,24 +775,15 @@ std_L_m  = fill(NaN, nsec)
 
 rc_lyap_ok = false
 try
-    # Primary: use endogenous_variance.csv from Dynare.jl (lre.endogenous_variance).
-    # This is the exact unconditional variance-covariance matrix Γ (491×491),
-    # computed by Dynare.jl's own solver. It's available even when stoch_simul
-    # fails on ARM (aarch64) due to the gees/Schur select issue.
-    ev_file = joinpath(MOD_DIR, "dynare_endogenous_variance.csv")
-    if isfile(ev_file)
-        ev_df = CSV.read(ev_file, DataFrame)
-        Γ_rc  = Matrix{Float64}(ev_df)
-        Γ_rc  = (Γ_rc + Γ_rc') / 2
-        @printf "  Using Dynare.jl endogenous_variance (%dx%d)\n" size(Γ_rc)...
-    else
-        # Fallback: solve Lyapunov ourselves (may fail on ARM with gees error)
-        ghx_s = ghx_jl[state_rows, :]
-        ghu_s = ghu_jl[state_rows, :]
-        P_st  = local_dlyap(ghx_s, ghu_s * Σe_jl * ghu_s')
-        Γ_rc  = ghx_jl * P_st * ghx_jl' + ghu_jl * Σe_jl * ghu_jl'
-        Γ_rc  = (Γ_rc + Γ_rc') / 2
-    end
+    # Use our own doubling-algorithm Lyapunov solver (utils.jl local_dlyap).
+    # This is pure Julia — no LAPACK gees call — so it works on ARM (aarch64).
+    # (Dynare's stoch_simul fails on Apple Silicon due to gees, but local_dlyap
+    #  uses only matrix multiplications and is not affected.)
+    ghx_s = ghx_jl[state_rows, :]   # n_states × n_states
+    ghu_s = ghu_jl[state_rows, :]   # n_states × n_shocks
+    P_st  = local_dlyap(ghx_s, ghu_s * Σe_jl * ghu_s')
+    Γ_rc  = ghx_jl * P_st * ghx_jl' + ghu_jl * Σe_jl * ghu_jl'
+    Γ_rc  = (Γ_rc + Γ_rc') / 2
 
     for i in 1:nsec
         for (kv, vn) in enumerate(["Y_$(i)", "PH_$(i)", "L_$(i)"])

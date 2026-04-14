@@ -1,23 +1,52 @@
 """
 figs_SOE_gap.jl
 ===============
-Julia translation of figs_SOE_gap.m — generates IRF figures and the
-steady-state summary table for the NK-IOSOE Chile model.
+Julia equivalent of figs_SOE_gap.m + plot_manufacturing_shock.m +
+plot_shock_effects.m — generates IRF figures and a steady-state table
+for the NK-IOSOE Chile model.
 
-Called from main_SOE_gap.jl after the Dynare subprocess completes.
-Reads from dynare_irfs.csv and the sectoral/SS CSVs in Data/.
+Called from main_SOE_gap.jl (included at top level, so no world-age issue).
+Reads dynare_irfs.csv (written by run_dynare_subprocess.jl).
 
-Outputs (PDF + PNG) written to DATA_DIR:
-  irf_aggregate_<exercise>.pdf  — GDP, pi, Q, TB aggregate IRFs
-  irf_sectoral_<exercise>.pdf   — Y, PH, L by sector (subplots)
-  irf_output_gap_<exercise>.pdf — Ygap by sector
-  ss_table_<exercise>.csv       — steady-state summary table
+PDF figures saved to DATA_DIR (requires Plots.jl: ] add Plots).
 """
 
-using CSV, DataFrames, Printf, LinearAlgebra, Statistics
+using CSV, DataFrames, Printf, Statistics
+
+# Load Plots.jl once at module level (graceful failure if not installed)
+const _PLOTS_OK = Ref(false)
+try
+    @eval Main using Plots
+    @eval Main gr()
+    _PLOTS_OK[] = true
+catch
+end
 
 # =========================================================================== #
-#  ENTRY POINT — called from main_SOE_gap.jl                                 #
+#  HELPERS                                                                     #
+# =========================================================================== #
+
+function get_irf(df::DataFrame, varname::String, shock::String; n_periods::Int=40)
+    sub = filter(r -> r.variable == varname && r.shock == shock, df)
+    isempty(sub) && return zeros(n_periods)
+    s = sort(sub, :period)
+    n = min(n_periods, nrow(s))
+    out = zeros(n_periods)
+    out[1:n] .= s.value[1:n]
+    return out
+end
+
+function _savefig_safe(p, path::String)
+    try
+        @eval Main savefig($p, $path)
+        @printf "  Saved: %s\n" path
+    catch e
+        @printf "  WARNING: could not save %s — %s\n" path string(e)
+    end
+end
+
+# =========================================================================== #
+#  MAIN ENTRY POINT                                                            #
 # =========================================================================== #
 
 function generate_figures(;
@@ -27,17 +56,17 @@ function generate_figures(;
     EXERCISE::Int,
     nsec::Int,
     names_vec,
-    ss_results::NamedTuple,        # from main_SOE_gap steady state
-    sec_results::DataFrame,        # sectoral model moments
+    ss_results::NamedTuple,
+    sec_results::DataFrame,
     exercise_label::String,
 )
     @printf "\n--- Generating figures (Exercise %d) ---\n" EXERCISE
 
-    # Load IRFs
+    # ---- Load IRF CSV ---------------------------------------------------- #
     irf_file = joinpath(MOD_DIR, "dynare_irfs.csv")
     if !isfile(irf_file) || filesize(irf_file) < 10
-        @printf "  No IRF file found — skipping figure generation.\n"
-        @printf "  (Run with EXERCISE=0 Baseline to generate all shocks)\n"
+        @printf "  No IRF file found at %s\n" irf_file
+        @printf "  (Run the model first to generate IRFs)\n"
         return
     end
 
@@ -48,139 +77,166 @@ function generate_figures(;
         return
     end
 
-    shocks   = unique(df_irf.shock)
-    @printf "  IRFs loaded: %d shock(s), %d variable-shock pairs\n" length(shocks) length(unique(df_irf.variable))
+    all_shocks = unique(df_irf.shock)
+    n_periods  = 40   # show first 40 quarters in plots
 
-    # ---- Try to load Plots.jl ------------------------------------------ #
-    plots_ok = false
-    try
-        @eval using Plots
-        @eval Plots.gr()   # GR backend — no display needed
-        plots_ok = true
-    catch
-        @printf "  WARNING: Plots.jl not available — printing IRF tables instead.\n"
-        @printf "  Install with: ] add Plots\n"
+    @printf "  IRFs loaded: %d shock(s), %d variable-shock pairs\n" length(all_shocks) length(unique(df_irf.variable))
+
+    # For EXERCISE 2 (manufacturing), focus on epsA_3
+    main_shock = if EXERCISE == 2
+        s = filter(x -> contains(x, "epsA_3"), all_shocks)
+        isempty(s) ? first(all_shocks) : first(s)
+    elseif EXERCISE == 1
+        s = filter(x -> contains(x, "eps_om") || contains(x, "eps_xi"), all_shocks)
+        isempty(s) ? first(all_shocks) : first(s)
+    elseif EXERCISE == 3
+        s = filter(x -> contains(x, "eps_i"), all_shocks)
+        isempty(s) ? first(all_shocks) : first(s)
+    else
+        # Baseline: use epsA_3 (manufacturing) for sectoral plots
+        s = filter(x -> contains(x, "epsA_3"), all_shocks)
+        isempty(s) ? first(all_shocks) : first(s)
     end
 
-    # ---- Helper: get IRF series ----------------------------------------- #
-    function get_irf(df, varname, shock)
-        sub = filter(r -> r.variable == varname && r.shock == shock, df)
-        isempty(sub) ? Float64[] : sort(sub, :period).value
-    end
+    @printf "  Main shock for sectoral plots: %s\n" main_shock
 
-    # ---- 1. Aggregate IRFs (GDP, pi, Q, TB) ----------------------------- #
-    agg_vars  = ["GDP", "pi", "Q", "TB"]
-    agg_labels = ["GDP", "Inflation (pi)", "Real exchange rate (Q)", "Trade balance (TB)"]
+    # ---- 1. AGGREGATE IRF TABLE ----------------------------------------- #
+    agg_vars   = ["GDP", "pi", "Q", "TB"]
+    agg_labels = ["GDP (%%)", "Inflation π (%%)", "Real XR Q (%%)", "Trade balance TB (%%)"]
 
-    @printf "\n  Aggregate IRFs (first 10 periods):\n"
+    @printf "\n  Aggregate IRFs — %s (period 1 impact, %% dev. from SS):\n" main_shock
     @printf "  %-8s" "Shock"
-    for vl in agg_labels; @printf "  %12s" vl; end
+    for lbl in agg_labels; @printf "  %16s" lbl; end
     println()
-    for shock in shocks
-        @printf "  %-8s" shock
-        for (vn, _) in zip(agg_vars, agg_labels)
-            irf = get_irf(df_irf, vn, shock)
-            v10 = isempty(irf) ? NaN : (length(irf) >= 1 ? irf[1] : NaN)
-            @printf "  %12.4f" v10
+    @printf "  %s\n" repeat("-", 72)
+
+    for shock in all_shocks
+        @printf "  %-8s" shock[1:min(8,length(shock))]
+        for vn in agg_vars
+            irf = get_irf(df_irf, vn, shock; n_periods=n_periods)
+            @printf "  %16.4f" irf[1]
         end
         println()
     end
 
-    if plots_ok
-        for shock in shocks
-            p = @eval Plots.plot(layout=(2,2), size=(900,600),
-                    title=["GDP" "Inflation" "Real XR" "Trade balance"],
-                    titlefontsize=9)
-            for (k, vn) in enumerate(agg_vars)
-                irf = get_irf(df_irf, vn, shock)
-                isempty(irf) && continue
-                @eval Plots.plot!($p, subplot=$k, $irf, label="", color=:steelblue,
-                    lw=2, xlabel="Quarters", ylabel="% dev. from SS")
-                @eval Plots.hline!($p, [0.0], subplot=$k, color=:black, lw=0.8, ls=:dash, label="")
-            end
-            fname = joinpath(DATA_DIR, "irf_aggregate_ex$(EXERCISE)_$(shock).pdf")
-            @eval Plots.savefig($p, $fname)
-            @printf "  Saved: %s\n" fname
-        end
-    end
-
-    # ---- 2. Sectoral output IRFs (Y_1 ... Y_12) ------------------------- #
-    @printf "\n  Sectoral output IRFs (period 1 impact):\n"
-    @printf "  %-6s  %-30s" "Sector" "Name"
-    for shock in shocks[1:min(3,length(shocks))]
-        @printf "  %10s" shock
-    end
-    println()
-
-    sec_Y_irfs = Dict{String, Vector{Float64}}()
+    # ---- 2. SECTORAL OUTPUT IMPACT TABLE --------------------------------- #
+    @printf "\n  Sectoral output IRFs (period 1 impact, %% dev. from SS) — shock: %s\n" main_shock
+    @printf "  %-6s  %-32s  %10s  %10s  %10s\n" "Sector" "Name" "ΔY" "ΔPH" "ΔL"
+    @printf "  %s\n" repeat("-", 74)
     for i in 1:nsec
-        vn = "Y_$(i)"
-        @printf "  %-6d  %-30s" i string(names_vec[i])[1:min(30,length(string(names_vec[i])))]
-        for shock in shocks[1:min(3,length(shocks))]
-            irf = get_irf(df_irf, vn, shock)
-            v1  = isempty(irf) ? NaN : irf[1]
-            @printf "  %10.4f" v1
-            shock == shocks[1] && (sec_Y_irfs[vn] = irf)
-        end
-        println()
+        nm  = string(names_vec[i])[1:min(30, length(string(names_vec[i])))]
+        dy  = get_irf(df_irf, "Y_$(i)",  main_shock; n_periods=n_periods)[1]
+        dph = get_irf(df_irf, "PH_$(i)", main_shock; n_periods=n_periods)[1]
+        dl  = get_irf(df_irf, "L_$(i)",  main_shock; n_periods=n_periods)[1]
+        @printf "  %-6d  %-32s  %10.4f  %10.4f  %10.4f\n" i nm dy dph dl
     end
 
-    if plots_ok && !isempty(shocks)
-        shock1 = shocks[1]
-        p2 = @eval Plots.plot(layout=(4,3), size=(1200,900),
-                suptitle="Sectoral Output IRF — shock: $shock1", titlefontsize=8)
-        for i in 1:nsec
-            irf = get_irf(df_irf, "Y_$(i)", shock1)
-            isempty(irf) && continue
-            nm = string(names_vec[i])[1:min(15,length(string(names_vec[i])))]
-            @eval Plots.plot!($p2, subplot=$i, $irf, title=$nm, label="",
-                color=:steelblue, lw=2)
-            @eval Plots.hline!($p2, [0.0], subplot=$i, color=:black, lw=0.5, ls=:dash, label="")
-        end
-        fname2 = joinpath(DATA_DIR, "irf_sectoral_Y_ex$(EXERCISE).pdf")
-        @eval Plots.savefig($p2, $fname2)
-        @printf "  Saved: %s\n" fname2
-
-        # Prices
-        p3 = @eval Plots.plot(layout=(4,3), size=(1200,900),
-                suptitle="Sectoral Price IRF — shock: $shock1", titlefontsize=8)
-        for i in 1:nsec
-            irf = get_irf(df_irf, "PH_$(i)", shock1)
-            isempty(irf) && continue
-            nm = string(names_vec[i])[1:min(15,length(string(names_vec[i])))]
-            @eval Plots.plot!($p3, subplot=$i, $irf, title=$nm, label="",
-                color=:firebrick, lw=2)
-            @eval Plots.hline!($p3, [0.0], subplot=$i, color=:black, lw=0.5, ls=:dash, label="")
-        end
-        fname3 = joinpath(DATA_DIR, "irf_sectoral_PH_ex$(EXERCISE).pdf")
-        @eval Plots.savefig($p3, $fname3)
-        @printf "  Saved: %s\n" fname3
-    end
-
-    # ---- 3. Steady-state summary table ---------------------------------- #
+    # ---- 3. STEADY-STATE SUMMARY TABLE ---------------------------------- #
     @printf "\n  STEADY-STATE SUMMARY\n"
-    @printf "  %-25s  %12s\n" "Variable" "Value"
-    @printf "  %s\n" repeat("-", 40)
-    ss_display = [
-        ("GDP",                    ss_results.GDP_ss),
-        ("TB/GDP",                 ss_results.TB_ss / ss_results.GDP_ss),
-        ("Real exchange rate (Q)", ss_results.Q_ss),
-        ("Consumption (C)",        ss_results.C_ss),
-        ("Labor (N)",              ss_results.N_ss),
-        ("Foreign debt/GDP",       ss_results.Q_ss * abs(ss_results.Bstar_ss) / ss_results.GDP_ss),
-        ("Gross output/GDP",       sum(sec_results.Yi_ss) / ss_results.GDP_ss),
+    @printf "  %-30s  %12s\n" "Variable" "Value"
+    @printf "  %s\n" repeat("-", 45)
+    ss_rows = [
+        ("GDP",                     ss_results.GDP_ss),
+        ("TB/GDP",                  ss_results.TB_ss / max(ss_results.GDP_ss, 1e-10)),
+        ("Real exchange rate (Q)",  ss_results.Q_ss),
+        ("Consumption (C)",         ss_results.C_ss),
+        ("Labor (N)",               ss_results.N_ss),
+        ("Gross output/GDP",        sum(sec_results.Yi_ss) / max(ss_results.GDP_ss, 1e-10)),
+        ("Foreign debt/GDP",        ss_results.Q_ss * abs(ss_results.Bstar_ss) / max(ss_results.GDP_ss, 1e-10)),
     ]
-    for (label, val) in ss_display
-        @printf "  %-25s  %12.4f\n" label val
+    for (lbl, val) in ss_rows
+        @printf "  %-30s  %12.4f\n" lbl val
     end
-    @printf "\n  Sectoral SS values:\n"
-    @printf "  %-6s  %-30s  %10s  %10s  %10s\n" "Sector" "Name" "Y_ss" "L_ss" "PH_ss"
-    @printf "  %s\n" repeat("-", 70)
+    @printf "\n  %-6s  %-30s  %8s  %8s  %8s\n" "Sector" "Name" "Y_ss" "L_ss" "PH_ss"
+    @printf "  %s\n" repeat("-", 62)
     for i in 1:nsec
-        r = sec_results[i, :]
-        nm = string(names_vec[i])[1:min(28,length(string(names_vec[i])))]
-        @printf "  %-6d  %-30s  %10.4f  %10.4f  %10.4f\n" i nm r.Yi_ss r.L_ss r.pH_ss
+        r  = sec_results[i, :]
+        nm = string(names_vec[i])[1:min(28, length(string(names_vec[i])))]
+        @printf "  %-6d  %-30s  %8.4f  %8.4f  %8.4f\n" i nm r.Yi_ss r.L_ss r.pH_ss
+    end
+
+    # ---- 4. PDF FIGURES ------------------------------------------------- #
+    if !_PLOTS_OK[]
+        @printf "\n  Plots.jl not available — skipping PDF figures.\n"
+        @printf "  Install with:  using Pkg; Pkg.add(\"Plots\")\n"
+        @printf "\n--- Figures complete (text output only) ---\n"
+        return
+    end
+
+    periods = 1:n_periods
+    tag     = "ex$(EXERCISE)"
+
+    # 4a. Aggregate IRFs — one PDF per shock with 2×2 layout
+    for shock in all_shocks
+        irfs = [get_irf(df_irf, vn, shock; n_periods=n_periods) for vn in agg_vars]
+        p = Plots.plot(layout=(2,2), size=(900,600), titlefontsize=9,
+                       plot_title="$shock — $exercise_label")
+        for (k, (irf, lbl)) in enumerate(zip(irfs, agg_labels))
+            Plots.plot!(p, periods, irf, subplot=k, label="",
+                       color=:steelblue, lw=2, title=lbl,
+                       xlabel="Quarters", ylabel="% dev. from SS")
+            Plots.hline!(p, [0.0], subplot=k,
+                        color=:black, lw=0.8, ls=:dash, label="")
+        end
+        fname = joinpath(DATA_DIR, "irf_aggregate_$(tag)_$(shock).pdf")
+        _savefig_safe(p, fname)
+    end
+
+    # 4b. Sectoral output IRF — 4×3 subplot layout for main shock
+    p_Y = Plots.plot(layout=(4,3), size=(1200,900), titlefontsize=8,
+                     plot_title="Sectoral Output — $main_shock")
+    for i in 1:nsec
+        irf = get_irf(df_irf, "Y_$(i)", main_shock; n_periods=n_periods)
+        nm  = string(names_vec[i])[1:min(14, length(string(names_vec[i])))]
+        Plots.plot!(p_Y, periods, irf, subplot=i, title=nm, label="",
+                   color=:steelblue, lw=2, xlabel="Q", ylabel="% dev.")
+        Plots.hline!(p_Y, [0.0], subplot=i,
+                    color=:black, lw=0.5, ls=:dash, label="")
+    end
+    _savefig_safe(p_Y, joinpath(DATA_DIR, "irf_sectoral_Y_$(tag).pdf"))
+
+    # 4c. Sectoral prices
+    p_PH = Plots.plot(layout=(4,3), size=(1200,900), titlefontsize=8,
+                      plot_title="Sectoral Prices — $main_shock")
+    for i in 1:nsec
+        irf = get_irf(df_irf, "PH_$(i)", main_shock; n_periods=n_periods)
+        nm  = string(names_vec[i])[1:min(14, length(string(names_vec[i])))]
+        Plots.plot!(p_PH, periods, irf, subplot=i, title=nm, label="",
+                   color=:firebrick, lw=2, xlabel="Q", ylabel="% dev.")
+        Plots.hline!(p_PH, [0.0], subplot=i,
+                    color=:black, lw=0.5, ls=:dash, label="")
+    end
+    _savefig_safe(p_PH, joinpath(DATA_DIR, "irf_sectoral_PH_$(tag).pdf"))
+
+    # 4d. Sectoral employment
+    p_L = Plots.plot(layout=(4,3), size=(1200,900), titlefontsize=8,
+                     plot_title="Sectoral Employment — $main_shock")
+    for i in 1:nsec
+        irf = get_irf(df_irf, "L_$(i)", main_shock; n_periods=n_periods)
+        nm  = string(names_vec[i])[1:min(14, length(string(names_vec[i])))]
+        Plots.plot!(p_L, periods, irf, subplot=i, title=nm, label="",
+                   color=:darkgreen, lw=2, xlabel="Q", ylabel="% dev.")
+        Plots.hline!(p_L, [0.0], subplot=i,
+                    color=:black, lw=0.5, ls=:dash, label="")
+    end
+    _savefig_safe(p_L, joinpath(DATA_DIR, "irf_sectoral_L_$(tag).pdf"))
+
+    # 4e. Output gap (Ygap variables — deviation of NK from flex-price)
+    gap_vars_exist = any(r -> r.variable == "Ygap_1", eachrow(df_irf))
+    if gap_vars_exist
+        p_gap = Plots.plot(layout=(4,3), size=(1200,900), titlefontsize=8,
+                           plot_title="Output Gap — $main_shock")
+        for i in 1:nsec
+            irf = get_irf(df_irf, "Ygap_$(i)", main_shock; n_periods=n_periods)
+            nm  = string(names_vec[i])[1:min(14, length(string(names_vec[i])))]
+            Plots.plot!(p_gap, periods, irf, subplot=i, title=nm, label="",
+                       color=:darkorange, lw=2, xlabel="Q", ylabel="% dev.")
+            Plots.hline!(p_gap, [0.0], subplot=i,
+                        color=:black, lw=0.5, ls=:dash, label="")
+        end
+        _savefig_safe(p_gap, joinpath(DATA_DIR, "irf_output_gap_$(tag).pdf"))
     end
 
     @printf "\n--- Figures complete ---\n"
+    @printf "  PDFs saved to: %s\n" DATA_DIR
 end
