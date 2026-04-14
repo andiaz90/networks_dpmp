@@ -39,6 +39,14 @@ using CSV, DataFrames, LinearAlgebra, Statistics
 cd(MOD_DIR)
 @info "Running Dynare in $(pwd())"
 
+# Clear the Dynare.jl compiled model cache so the updated .mod and
+# params_jl.mod are always picked up fresh (avoids stale-cache bugs).
+cache_dir = joinpath(MOD_DIR, "NK_SOE_lev_gap2")
+if isdir(cache_dir)
+    @info "Clearing Dynare model cache: $cache_dir"
+    rm(cache_dir, recursive=true)
+end
+
 # @dynare at TOP LEVEL — no function scope, no world-age issues
 context = @dynare "NK_SOE_lev_gap2"
 
