@@ -56,37 +56,30 @@ OUTPUT_FILE = joinpath(MODELO_DIR, "data_moments_chile.mat")
 #  file and re-run this script.                                               #
 # =========================================================================== #
 
+function _main()   # wrapped in function so we can use `return` for early exit
+
 if isfile(OUTPUT_FILE)
     @printf "\n%s\n  data_moments_chile.mat already exists — loading directly.\n" repeat("=",61)
     @printf "  (Delete the file and re-run to recompute from raw Excel/CSV sources.)\n"
     @printf "%s\n\n" repeat("=",61)
 
-    tmp    = matread(OUTPUT_FILE)
-    dm     = tmp["dm_chile"]
-    y_d    = vec(Float64.(dm["y_d"]))
-    p_d    = vec(Float64.(dm["p_d"]))
-    l_d    = vec(Float64.(dm["l_d"]))
+    tmp = matread(OUTPUT_FILE)
+    dm  = tmp["dm_chile"]
+    y_d = vec(Float64.(dm["y_d"]))
+    p_d = vec(Float64.(dm["p_d"]))
+    l_d = vec(Float64.(dm["l_d"]))
 
-    # Validate and print summary
     @printf "  %-20s  %8s  %8s  %8s\n" "Sector" "std(Y)" "std(PH)" "std(L)"
     @printf "  %s\n" repeat("-", 50)
-    sector_names_fast = ["Agriculture","Mining","Manufacturing","Utilities","Construction",
-                          "Trade/Hotels","Transport/Comm","Finance","Real Estate",
-                          "Business Serv.","Personal Serv.","Public Admin."]
+    _snames = ["Agriculture","Mining","Manufacturing","Utilities","Construction",
+               "Trade/Hotels","Transport/Comm","Finance","Real Estate",
+               "Business Serv.","Personal Serv.","Public Admin."]
     for i in 1:12
-        @printf "  %-20s  %8.4f  %8.4f  %8.4f\n" sector_names_fast[i] y_d[i] p_d[i] l_d[i]
+        @printf "  %-20s  %8.4f  %8.4f  %8.4f\n" _snames[i] y_d[i] p_d[i] l_d[i]
     end
-    @printf "\n  Loaded from: %s\n\n" OUTPUT_FILE
-
-    # Re-save with any additional fields the MAT file might be missing
-    # (no-op if everything is already present)
-    @printf "Moments already available. No recomputation needed.\n"
+    @printf "\n  Loaded from: %s\n" OUTPUT_FILE
     @printf "  Re-run main_SOE_gap.jl or smm_estimation.jl to use these moments.\n\n"
-
-    # Exit early — no raw-file processing needed
-    # (wrap in a do-block so the rest of the script is skipped)
-    open("/dev/null", "w") do _; end  # dummy to avoid bare return at script level
-    exit(0)
+    return   # early exit — no raw-file processing needed
 end
 
 @printf "\n%s\n  Computing data moments from raw files (Chile)\n%s\n\n" repeat("=",61) repeat("=",61)
@@ -97,18 +90,18 @@ end
 #  SETTINGS                                                                    #
 # =========================================================================== #
 
-const NSEC   = 12
-const LAMBDA = 1600.0     # HP filter smoothing parameter (quarterly)
+NSEC   = 12
+LAMBDA = 1600.0     # HP filter smoothing parameter (quarterly)
 
 # Estimation sample
-const SAMPLE_START = (year=2006, q=1)
-const SAMPLE_END   = (year=2023, q=4)
+SAMPLE_START = (year=2006, q=1)
+SAMPLE_END   = (year=2023, q=4)
 
 # Sector classification (1-based indices)
-const GOODS    = [1,2,3,4,5]      # sectors 1-5
-const SERVICES = [6,7,8,9,10,11,12]  # sectors 6-12
+GOODS    = [1,2,3,4,5]      # sectors 1-5
+SERVICES = [6,7,8,9,10,11,12]  # sectors 6-12
 
-const SECTOR_NAMES = [
+SECTOR_NAMES = [
     "Agriculture", "Mining", "Manufacturing", "Utilities", "Construction",
     "Trade/Hotels", "Transport/Comm", "Finance", "Real Estate",
     "Business Serv.", "Personal Serv.", "Public Admin.",
@@ -241,7 +234,7 @@ end
 
 # CSV columns 2–13 are sectors in ALPHABETICAL order.
 # Mapping: CSV-alpha position → model sector number
-const ALPHA_TO_MODEL = [1, 10, 5, 4, 8, 3, 2, 11, 12, 9, 7, 6]
+ALPHA_TO_MODEL = [1, 10, 5, 4, 8, 3, 2, 11, 12, 9, 7, 6]
 
 fname_emp = joinpath(DATA_DIR, "count_workers_by_sector.csv")
 emp_df    = CSV.read(fname_emp, DataFrame)
@@ -281,7 +274,7 @@ n_defl = nrow(raw_defl) - 3
 yr_defl = zeros(Int, n_defl)
 q_defl  = zeros(Int, n_defl)
 
-const MONTH_TO_Q = Dict("MAR"=>1, "JUN"=>2, "SEP"=>3, "DIC"=>4)
+MONTH_TO_Q = Dict("MAR"=>1, "JUN"=>2, "SEP"=>3, "DIC"=>4)
 
 for (t, row) in enumerate(data_rows_defl)
     s   = strip(replace(string(row[1]), '"' => ""))
@@ -306,7 +299,7 @@ end
 @printf "  Deflators: %d quarterly obs  (%dQ%d – %dQ%d)\n" n_defl yr_defl[1] q_defl[1] yr_defl[end] q_defl[end]
 
 # Map 28 deflator columns → 12 model sectors (some sectors average sub-components)
-const DEFL_COLS = [
+DEFL_COLS = [
     [1, 2],   # Sector  1: Agro + Pesca (simple mean)
     [3],      # Sector  2: Mining (aggregate)
     [6],      # Sector  3: Manufacturing (aggregate)
@@ -987,3 +980,7 @@ dm_chile = Dict{String,Any}(
 matwrite(OUTPUT_FILE, Dict("dm_chile" => dm_chile))
 @printf "\nMoments saved to:\n  %s\n" OUTPUT_FILE
 @printf "\nAll moments computed from data. Ready to run smm_estimation.\n\n"
+
+end  # function _main()
+
+_main()
