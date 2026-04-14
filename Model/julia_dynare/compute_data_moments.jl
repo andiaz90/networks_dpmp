@@ -309,93 +309,86 @@ if isfile(fname_pib)
         # Row 3 = headers, rows 4+ = data
         data_start = 4
 
-        # Find last data row (stop at first fully empty row, handle missing/nothing)
+        # ------------------------------------------------------------------ #
+        # KEY BCCh QUIRK: the date column (col A) only has the year in the   #
+        # FIRST row of each quarter group (rows 4, 8, 12, …); the other 3   #
+        # rows in each group are BLANK.  Using col A to find the last row    #
+        # would stop at row 5 (the first blank), giving n_pib=1.            #
+        # Fix: use a DATA column (col B) to count rows; use row-position     #
+        # arithmetic to assign years and quarters.                           #
+        # ------------------------------------------------------------------ #
+
+        # Last row: scan col 2 (first data column) which is always populated
         last_row = data_start
-        while last_row < 300
-            v = ws[last_row + 1, 1]
-            (v === nothing || v === missing || v == "") && break
+        while last_row < 400
+            v = ws[last_row + 1, 2]   # col B: always has data in every quarter row
+            (v === nothing || v === missing) && break
+            # Stop on clearly empty numeric cell
+            (v isa AbstractString && strip(v) == "") && break
             last_row += 1
         end
         n_pib = last_row - data_start + 1
-        @printf "  readxlsx OK: %d data rows\n" n_pib
+        @printf "  readxlsx OK: %d data rows (col-B scan)\n" n_pib
 
-        # --- DIAGNOSTIC: show what XLSX.jl returns for the first date cell ---
+        # --- Detect start year from column A of first data row ------------ #
         cell0 = ws[data_start, 1]
-        @printf "  Date cell [row %d, col 1] → type=%s  value=%s\n" data_start typeof(cell0) string(cell0)
+        @printf "  Date cell [row %d, col 1] → type=%-16s  value=%s\n" data_start string(typeof(cell0)) string(cell0)
 
-        # --- Parse dates ---
-        # BCCh pib_sectorial_bc stores the YEAR as an Excel serial number
-        # in a date-formatted cell.  Excel serial N = days since 1899-12-30,
-        # so serial 2009 → ~1905-07-05 as a Date.  XLSX.jl may return:
-        #   Date     → serial = Dates.value(d - Date(1899,12,30)); if 1980-2100 use as year
-        #   Int/Float→ if 1980-2100 use directly as year; else treat as serial
-        #   String   → parse first 4 chars as year
-        #   nothing/missing → skip
-        # All 4 rows of the same year group → Q1…Q4 in row order.
-        yr_raw = zeros(Int, n_pib)
-        for t in 1:n_pib
-            v = ws[data_start + t - 1, 1]
+        function detect_pib_year(v)
+            v === nothing || v === missing && return 0
             if v isa Date || v isa DateTime
-                d    = v isa DateTime ? Date(v) : v
-                ser  = Dates.value(d - Date(1899, 12, 30))
-                yr_raw[t] = (1980 <= ser <= 2100) ? ser : year(d)
+                d   = v isa DateTime ? Date(v) : v
+                ser = Dates.value(d - Date(1899, 12, 30))
+                return (1980 <= ser <= 2060) ? ser : (1980 <= year(d) <= 2060 ? year(d) : 0)
             elseif v isa Integer
-                yr_raw[t] = (1980 <= v  <= 2100) ? v :
-                             (v > 0) ? year(Date(1899,12,30) + Dates.Day(v)) : 0
-            elseif v isa AbstractFloat && !isnan(v)
+                return (1980 <= v <= 2060) ? v :
+                       (v > 0 ? let yr = year(Date(1899,12,30) + Dates.Day(v)); 1980<=yr<=2060 ? yr : 0 end : 0)
+            elseif v isa AbstractFloat && isfinite(v)
                 vi = round(Int, v)
-                yr_raw[t] = (1980 <= vi <= 2100) ? vi :
-                             (vi > 0) ? year(Date(1899,12,30) + Dates.Day(vi)) : 0
+                return (1980 <= vi <= 2060) ? vi :
+                       (vi > 0 ? let yr = year(Date(1899,12,30) + Dates.Day(vi)); 1980<=yr<=2060 ? yr : 0 end : 0)
             elseif v isa AbstractString && length(v) >= 4
-                p = tryparse(Int, v[1:4])
-                yr_raw[t] = something(p, 0)
+                p = tryparse(Int, v[1:4]); return (p !== nothing && 1980<=p<=2060) ? p : 0
             end
-            # nothing / missing / unrecognised → leave as 0 (filtered later)
+            return 0
         end
 
-        # Assign Q1→Q4 in row order within each year group
-        yr_y_pib = copy(yr_raw)
-        qt_y_pib = zeros(Int, n_pib)
-        for uy in sort(unique(yr_y_pib[yr_y_pib .> 0]))
-            rows_in_yr = findall(==(uy), yr_y_pib)
-            for (qi, ri) in enumerate(rows_in_yr)
-                qt_y_pib[ri] = qi
-            end
+        start_year = detect_pib_year(cell0)
+        if start_year == 0
+            @printf "  WARNING: could not detect start year from col A. Defaulting to 2009.\n"
+            start_year = 2009   # BCCh PIB data documented start year
         end
+        @printf "  Start year detected: %d\n" start_year
 
-        # Drop rows with unparseable dates
-        valid   = yr_y_pib .> 0
-        n_valid = sum(valid)
+        # --- Assign years and quarters by row position (robust) ----------- #
+        # BCCh PIB always has exactly 4 consecutive rows per year (Q1→Q4).
+        # This is far more reliable than parsing partially-blank date cells.
+        yr_y_pib = [start_year + (t - 1) ÷ 4 for t in 1:n_pib]
+        qt_y_pib = [(t - 1) % 4 + 1            for t in 1:n_pib]
 
-        if n_valid == 0
-            @printf "  WARNING: all %d date cells failed to parse!\n" n_pib
-            @printf "  First 5 raw cells:\n"
-            for t in 1:min(5, n_pib)
-                v = ws[data_start + t - 1, 1]
-                @printf "    row %d: type=%-12s  val=%s\n" (data_start+t-1) string(typeof(v)) string(v)
-            end
-            @printf "  → y_d will be NaN. Check pib_sectorial_bc.xlsx sheet name and date column.\n"
-        else
-            @printf "  Date range: %dQ%d – %dQ%d  (%d valid rows)\n" minimum(yr_y_pib[valid]) qt_y_pib[findfirst(valid)] maximum(yr_y_pib[valid]) qt_y_pib[findlast(valid)] n_valid
-        end
+        @printf "  Date range (row-position): %dQ%d – %dQ%d  (%d rows = %.1f years)\n" yr_y_pib[1] qt_y_pib[1] yr_y_pib[end] qt_y_pib[end] n_pib (n_pib/4)
 
-        # Parse numeric cells for the 32 data columns (xlsx cols 2–33)
+        n_valid    = n_pib
+        valid_rows = 1:n_pib
+
+        # --- Parse numeric cells for 32 data columns (xlsx cols 2–33) ----- #
         pib_num = fill(NaN, n_valid, 32)
-        valid_rows = findall(valid)
-        for (ti, t) in enumerate(valid_rows)
+        for t in 1:n_valid
             for c in 1:32
                 v = ws[data_start + t - 1, c + 1]
-                if v isa Number && !ismissing(v)
-                    pib_num[ti, c] = Float64(v)
+                if v isa Number && !ismissing(v) && !isnan(Float64(v))
+                    pib_num[t, c] = Float64(v)
                 elseif v isa AbstractString
                     p = tryparse(Float64, strip(v))
-                    p !== nothing && (pib_num[ti, c] = p)
+                    p !== nothing && (pib_num[t, c] = p)
                 end
             end
         end
+        n_valid_cells = sum(!isnan, pib_num)
+        @printf "  Numeric parse: %d / %d cells valid (%.0f%%)\n" n_valid_cells length(pib_num) (100*n_valid_cells/length(pib_num))
 
-        # Aggregate to 12 model sectors (see column mapping in original MATLAB)
-        Y_sec_raw  = fill(NaN, n_valid, NSEC)
+        # Aggregate to 12 model sectors (column mapping mirrors MATLAB original)
+        Y_sec_raw  = fill(NaN, n_pib, NSEC)
         Y_sec_raw[:, 1]  = pib_num[:, 1]  .+ pib_num[:, 2]   # Agro + Pesca
         Y_sec_raw[:, 2]  = pib_num[:, 3]                       # Mining
         Y_sec_raw[:, 3]  = pib_num[:, 6]                       # Manufacturing
@@ -410,8 +403,8 @@ if isfile(fname_pib)
         Y_sec_raw[:, 12] = pib_num[:, 28]                      # Public admin
         GDP_data         = pib_num[:, 31]                       # PIB total
 
-        yr_y = yr_y_pib[valid]
-        qt_y = qt_y_pib[valid]
+        yr_y = yr_y_pib   # all rows used (no valid-mask needed with row-position approach)
+        qt_y = qt_y_pib
 
     catch e
         @printf "  ERROR reading pib_sectorial_bc.xlsx: %s\n" string(e)
