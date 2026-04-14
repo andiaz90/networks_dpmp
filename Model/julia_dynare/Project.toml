@@ -5,7 +5,7 @@ version = "0.1.0"
 [deps]
 CSV         = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
 DataFrames  = "a93c6f00-e57d-5684-b466-afe8fa294f15"
-Dynare      = "a457e1dd-cc9f-4b73-9c3f-b8aa63ead9da"
+Dynare      = "5203de40-99df-439e-afbc-014de65cb9ef"
 XLSX        = "fdbf4ff8-1666-58a4-91e7-1b58723a45e0"
 MAT         = "23992714-dd62-5051-b70f-ba57cb901cac"
 NLsolve               = "2774e3e8-f4cf-5e23-947b-6d7e65073b56"
