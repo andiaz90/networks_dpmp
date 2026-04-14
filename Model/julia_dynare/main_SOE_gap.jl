@@ -678,9 +678,12 @@ params_mod_path = write_params_mod(MOD_DIR, params_nt)
 # the included file at call time — so the preprocessor sees CWD = MOD_DIR.
 _orig_dir = pwd()
 cd(MOD_DIR)           # preprocessor will look for .mod files here
-include(joinpath(MOD_DIR, "run_dynare_model.jl"))  # sets Main.context
+include(joinpath(MOD_DIR, "run_dynare_model.jl"))  # sets Main.context in latest world
 cd(_orig_dir)
-context = Main.context  # @dynare in run_dynare_model.jl stores result here
+# Main.context is defined in a newer world than _main() runs in (Julia 1.12
+# strict world-age).  Core.eval(Main, :context) fetches the binding from
+# the LATEST world — equivalent to invokelatest but for global access.
+context = Core.eval(Main, :context)
 
 @printf "\n--- Dynare.jl completed ---\n\n"
 
