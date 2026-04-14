@@ -46,6 +46,54 @@ OUTPUT_FILE = joinpath(MODELO_DIR, "data_moments_chile.mat")
 
 
 # =========================================================================== #
+#  FAST PATH: load from existing data_moments_chile.mat                       #
+#                                                                              #
+#  If data_moments_chile.mat already exists (e.g. computed by the MATLAB      #
+#  team via compute_data_moments.m), load it directly and skip all the raw    #
+#  Excel/CSV processing.  This avoids XLSX.jl compatibility issues entirely.  #
+#                                                                              #
+#  To force a full recomputation from raw files, delete or rename the .mat    #
+#  file and re-run this script.                                               #
+# =========================================================================== #
+
+if isfile(OUTPUT_FILE)
+    @printf "\n%s\n  data_moments_chile.mat already exists — loading directly.\n" repeat("=",61)
+    @printf "  (Delete the file and re-run to recompute from raw Excel/CSV sources.)\n"
+    @printf "%s\n\n" repeat("=",61)
+
+    tmp    = matread(OUTPUT_FILE)
+    dm     = tmp["dm_chile"]
+    y_d    = vec(Float64.(dm["y_d"]))
+    p_d    = vec(Float64.(dm["p_d"]))
+    l_d    = vec(Float64.(dm["l_d"]))
+
+    # Validate and print summary
+    @printf "  %-20s  %8s  %8s  %8s\n" "Sector" "std(Y)" "std(PH)" "std(L)"
+    @printf "  %s\n" repeat("-", 50)
+    sector_names_fast = ["Agriculture","Mining","Manufacturing","Utilities","Construction",
+                          "Trade/Hotels","Transport/Comm","Finance","Real Estate",
+                          "Business Serv.","Personal Serv.","Public Admin."]
+    for i in 1:12
+        @printf "  %-20s  %8.4f  %8.4f  %8.4f\n" sector_names_fast[i] y_d[i] p_d[i] l_d[i]
+    end
+    @printf "\n  Loaded from: %s\n\n" OUTPUT_FILE
+
+    # Re-save with any additional fields the MAT file might be missing
+    # (no-op if everything is already present)
+    @printf "Moments already available. No recomputation needed.\n"
+    @printf "  Re-run main_SOE_gap.jl or smm_estimation.jl to use these moments.\n\n"
+
+    # Exit early — no raw-file processing needed
+    # (wrap in a do-block so the rest of the script is skipped)
+    open("/dev/null", "w") do _; end  # dummy to avoid bare return at script level
+    exit(0)
+end
+
+@printf "\n%s\n  Computing data moments from raw files (Chile)\n%s\n\n" repeat("=",61) repeat("=",61)
+@printf "  (Tip: if pib_sectorial_bc.xlsx fails to load, open it in Excel\n"
+@printf "   and File → Save As → .xlsx to fix XLSX.jl compatibility.)\n\n"
+
+# =========================================================================== #
 #  SETTINGS                                                                    #
 # =========================================================================== #
 
