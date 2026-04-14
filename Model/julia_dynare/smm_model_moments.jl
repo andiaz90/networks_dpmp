@@ -4,8 +4,8 @@ smm_model_moments.jl
 Compute theoretical model moments for parameter vector θ.
 
 PLATFORM NOTES:
-  On Apple Silicon (ARM) and on any platform: uses GenericSchur.jl
-  for the ordered QZ decomposition instead of LAPACK gees.
+  Uses GenericSchur.jl (pure Julia)
+  for the ordered QZ decomposition (no LAPACK dependency).
   The compiled Dynare Jacobian files (SparseDynamicG1!.jl etc.)
   are called directly — no Dynare.jl re-solve API needed.
 
@@ -37,6 +37,18 @@ const _JDYN_DIR   = @__DIR__
 const _MODEL_BASE = joinpath(_JDYN_DIR, "mod", "NK_SOE_lev_gap2")
 const _JULIA_DIR  = joinpath(_MODEL_BASE, "model", "julia")
 const _JSON_PATH  = joinpath(_MODEL_BASE, "model", "json", "dynamic.json")
+
+# Include compiled Dynare model files at TOP LEVEL so they are in the same
+# Julia world as all calling code.  Including them inside a function creates
+# world-age gaps that cause silent failures on all platforms.
+const _DYNARE_MODEL_LOADED = Ref(false)
+if isdir(_JULIA_DIR)
+    include(joinpath(_JULIA_DIR, "SparseDynamicResidTT!.jl"))
+    include(joinpath(_JULIA_DIR, "SparseDynamicResid!.jl"))
+    include(joinpath(_JULIA_DIR, "SparseDynamicG1TT!.jl"))
+    include(joinpath(_JULIA_DIR, "SparseDynamicG1!.jl"))
+    _DYNARE_MODEL_LOADED[] = true
+end
 
 # =========================================================================== #
 #  JACOBIAN SPARSITY STRUCTURE  (read once from dynamic.json)                 #
@@ -123,27 +135,16 @@ end
 #  KLEIN (2000) FIRST-ORDER SOLVER  (pure Julia, no LAPACK gees)             #
 # =========================================================================== #
 
-# Include compiled model files once
-const _MODEL_FILES_LOADED = Ref(false)
-function _ensure_model_files!()
-    _MODEL_FILES_LOADED[] && return
-    isdir(_JULIA_DIR) || error("Compiled model not found: $_JULIA_DIR")
-    include(joinpath(_JULIA_DIR, "SparseDynamicG1TT!.jl"))
-    include(joinpath(_JULIA_DIR, "SparseDynamicG1!.jl"))
-    _MODEL_FILES_LOADED[] = true
-end
-
 """
-Compute the 491×642 dynamic Jacobian by calling the compiled model files.
-Returns a sparse matrix G = [A|B|C|D] where:
-  A (491×78):  ∂f/∂y_{bk,t-1}
-  B (491×491): ∂f/∂y_t
-  C (491×56):  ∂f/∂y_{fw,t+1}
-  D (491×17):  ∂f/∂ε_t
+Compute the 491×642 dynamic Jacobian using the compiled Dynare model files.
+The SparseDynamic*.jl files are included at top level (not inside a function)
+to avoid Julia world-age issues.  Returns sparse G = [A|B|C|D]:
+  A (491×78):  ∂f/∂y_{bk,t-1}   B (491×491): ∂f/∂y_t
+  C (491×56):  ∂f/∂y_{fw,t+1}   D (491×17):  ∂f/∂ε_t
 """
 function _eval_dynamic_jacobian(context)
     _load_jacobian_structure!()
-    _ensure_model_files!()
+    _DYNARE_MODEL_LOADED[] || error("Compiled model files not loaded. Run main_SOE_gap.jl first.")
 
     ss     = context.results.model_results[1].trends.endogenous_steady_state
     n_endo = length(ss)
@@ -171,7 +172,7 @@ Compute the first-order decision rule matrices:
   g1_2 (491×17):  response of all endogenous to 17 shocks
 
 Uses the compiled Dynare Jacobian + GenericSchur.jl (Klein 2000).
-Works on ARM (Apple Silicon) and Intel — no LAPACK gees callback.
+Works on all platforms — no LAPACK dependency.
 """
 function resolve_first_order!(context)
     try
@@ -186,7 +187,7 @@ function resolve_first_order!(context)
                        Matrix{Float64}(lre.g1_1),
                        Matrix{Float64}(lre.g1_2),
                        context.models[1].Sigma_e
-            catch; end   # silent — Dynare exceptions segfault on ARM
+            catch; end   # silent — Dynare exceptions must not be converted to strings
         end
 
         # Klein (2000) path: pure Julia, works everywhere
@@ -299,7 +300,7 @@ function _klein_solve(context)
         return true, g1_1, g1_2, Σe
 
     catch e
-        # Silent catch — no string(e) to avoid ARM segfault via Tasmanian
+        # Silent catch — Dynare exceptions must not be string-ified
         return false, zeros(0,0), zeros(0,0), zeros(0,0)
     end
 end

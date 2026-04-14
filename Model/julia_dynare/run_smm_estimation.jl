@@ -13,10 +13,6 @@ WHAT IT DOES:
   Step 3 — Runs SMM estimation (CMA-ES optimizer, ~100k model evaluations)
   Step 4 — Saves Data/smm_estimates.csv for main_SOE_gap.jl to load
 
-NOTE ON APPLE SILICON (M1/M2/M3):
-  Dynare.jl's re-solve (compute_first_order_solution!) uses LAPACK gees
-  which is not available on ARM. The estimation must be run on Intel/x86.
-  On ARM, the pre-flight will print a clear error explaining this.
 
 ESTIMATED PARAMETERS (23-element vector θ):
   1   ilabcosts        aggregate labour adjustment cost
@@ -83,7 +79,7 @@ function _main()
 
     # ---- Step 2: Load / generate the SMM Dynare context -------------------
     # We use NK_SOE_lev_gap2_smm.mod (same model but WITHOUT stoch_simul).
-    # On ARM, stoch_simul's gees failure corrupts the context to 6 variables.
+    # Note: @dynare may return an inconsistent context (Dynare.jl issue).
     # By skipping stoch_simul, we always get the correct 491-variable context.
     context_file = joinpath(SCRIPT_DIR, "mod", "nk_iosoe_smm_context.jls")
 
@@ -117,7 +113,7 @@ function _main()
     @printf "  %s\n\n" ctx_path
     context = deserialize(ctx_path)
 
-    # On ARM, context.symboltable may have only 6 names (Dynare.jl bug:
+    # Note: context.symboltable may have fewer names than model results (Dynare.jl issue:
     # symboltable update fails when gees errors during check; even though
     # context.results.model_results[1] correctly has 491 variables).
     # Validate using the model results, not the symbol table.
@@ -135,7 +131,7 @@ function _main()
     end
 
     # Read endo_names from the CSV written by the Dynare subprocess.
-    # We do NOT use Dynare.get_endogenous(context.symboltable) because on ARM
+    # We do NOT use Dynare.get_endogenous(context.symboltable) because it may be inconsistent.
     # the symboltable may be inconsistent (6 names vs 491 in the results).
     MOD_DIR_smm = joinpath(SCRIPT_DIR, "mod")
     endo_names_file = joinpath(MOD_DIR_smm, "dynare_endo_names.csv")
@@ -155,7 +151,7 @@ function _main()
 
     # ---- Step 4: Summary ---------------------------------------------------
     if isnan(obj_hat)
-        # Estimation was skipped (ARM/gees limitation or other failure)
+        # Estimation did not complete.
         # smm_run already printed the reason above — nothing more to do here.
         @printf "\n  Estimation did not complete — see messages above.\n"
         @printf "  main_SOE_gap.jl will use hard-coded defaults until\n"

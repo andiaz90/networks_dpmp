@@ -330,7 +330,7 @@ Example:
 """
 function smm_run(context::Dynare.Context; endo_names_override=nothing)
 
-    # On ARM, context.symboltable may have inconsistent variable count.
+    # context.symboltable may have inconsistent variable count (Dynare.jl issue).
     # Use the override (from dynare_endo_names.csv) when provided.
     endo_names = if endo_names_override !== nothing && length(endo_names_override) >= 400
         endo_names_override
@@ -375,32 +375,17 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     ok_resolve, g_test, _, _ = resolve_first_order!(context)
     @printf "    success=%s  g1_1 size=%s\n\n" ok_resolve (ok_resolve ? string(size(g_test)) : "N/A")
 
-    # ARM early exit: if re-solve fails there is no point running the optimizer
     if !ok_resolve
-        @printf "%s\n" repeat("!", 62)
-        @printf "  SMM ESTIMATION NOT AVAILABLE ON THIS MACHINE\n"
-        @printf "%s\n\n" repeat("!", 62)
-        @printf "  The Dynare.jl re-solve step requires LAPACK gees with an\n"
-        @printf "  eigenvalue-ordering callback, which is not implemented in\n"
-        @printf "  the ARM (aarch64) LAPACK bundled with Julia on Apple Silicon.\n\n"
-        @printf "  HOW TO ESTIMATE:\n"
-        @printf "    Option 1 — Intel Mac or Linux x86 server:\n"
-        @printf "      julia --project=. run_smm_estimation.jl\n\n"
-        @printf "    Option 2 — Windows (MATLAB, original workflow):\n"
-        @printf "      Run smm_estimation.m in MATLAB, which writes smm_estimates.mat\n"
-        @printf "      Then convert once:  julia --project=. bootstrap_csv.jl\n"
-        @printf "      This creates Data/smm_estimates.csv that main_SOE_gap.jl reads.\n\n"
-        @printf "    Option 3 — Use existing estimates from a previous run:\n"
-        @printf "      Copy Data/smm_estimates.csv from a machine where estimation ran.\n"
-        @printf "      main_SOE_gap.jl will automatically load it on every run.\n\n"
-        @printf "  Current Data/smm_estimates.csv status: %s\n\n" (
-            isfile(joinpath(DATA_DIR, "smm_estimates.csv")) ?
-            "EXISTS — main_SOE_gap.jl is already using these estimates" :
-            "MISSING — model runs with hard-coded default parameters")
-        return fill(NaN, N_THETA), NaN, fill(NaN, 46)
+        @printf "  PRE-FLIGHT: model re-solve failed.\n"
+        @printf "  The Klein (2000) pure-Julia solver uses:\n"
+        @printf "    - SparseDynamicG1!.jl (compiled Jacobian)\n"
+        @printf "    - GenericSchur.jl (QZ decomposition, no LAPACK)\n"
+        @printf "  Check that mod/NK_SOE_lev_gap2/model/julia/ exists\n"
+        @printf "  and that main_SOE_gap.jl ran successfully first.\n\n"
+        error("Model re-solve failed at pre-flight. Run main_SOE_gap.jl first.")
     end
 
-    # 3. Full pre-flight (only reached on Intel/x86)
+    # 3. Full pre-flight
     @printf "=== PRE-FLIGHT CHECK ===\n"
     m_test, ok_test = smm_model_moments(θ0, context, baseline, endo_names)
     if !ok_test || any(isnan, m_test)
