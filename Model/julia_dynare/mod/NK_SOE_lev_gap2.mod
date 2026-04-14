@@ -829,12 +829,8 @@ Y_s_f = (0
 end;
 
 steady;
-ss1 = oo_.steady_state;
-
-
-% Compute and display residuals
-fprintf('\n--- Computing Residuals of Static Equations ---\n');
-resid;
+// ss1 = oo_.steady_state;  ← MATLAB-only: removed for Dynare.jl compatibility
+// resid;                    ← MATLAB-only: removed for Dynare.jl compatibility
 
 // Shocks
 shocks;
