@@ -102,44 +102,58 @@ end
 # Directory with .mod files (relative to this script)
 MOD_DIR = joinpath(SCRIPT_DIR, "mod")
 
-# ---- Data files ----
-# NOTE: 'Stata_to_excel_few_industries_chile.xls' must be saved as .xlsx
-#       (Excel→Save As→.xlsx) or the variable name below adjusted.
-#       CSV files can be used directly.
+# ---- Data file search ----
+# Use abspath to resolve ".." correctly across all operating systems.
+# The Data/ folder is two levels up from julia_dynare/ (repo_root/Data/).
+REPO_ROOT      = abspath(joinpath(SCRIPT_DIR, "..", ".."))
+DATA_DIR       = joinpath(REPO_ROOT, "Data")
 
-# Try to find data files in common locations (mirrors MATLAB path search)
-DATA_CANDIDATES = [
-    SCRIPT_DIR,
-    joinpath(SCRIPT_DIR, "..", "modelo_chile"),   # sibling folder
-    joinpath(SCRIPT_DIR, "..", "..", "Data"),
-    get(ENV, "NKIOSOE_DATA_DIR", ""),
-]
+DATA_CANDIDATES = filter!(!isempty, [
+    DATA_DIR,                                          # repo_root/Data/   ← primary
+    SCRIPT_DIR,                                        # same folder as script
+    abspath(joinpath(SCRIPT_DIR, "..", "modelo_chile")), # sibling modelo_chile/
+    get(ENV, "NKIOSOE_DATA_DIR", ""),                  # user override
+])
 
-function find_file(candidates, fname)
-    for d in candidates
-        isempty(d) && continue
+# find_file: accepts multiple alternative basenames (for .xls / .xlsx variants)
+function find_file(candidates, fnames...)
+    for d in candidates, fname in fnames
         p = joinpath(d, fname)
         isfile(p) && return p
     end
     return ""
 end
 
-fname_industries = "Stata_to_excel_few_industries_chile.xlsx"   # saved as xlsx
-fname_io         = "IO_2021_chile.csv"
-fname_fpa        = "fpa_vector_few_industries_chile.csv"
+# Accept both .xls and .xlsx — XLSX.jl can read both formats
+path_industries = find_file(DATA_CANDIDATES,
+    "Stata_to_excel_few_industries_chile.xlsx",
+    "Stata_to_excel_few_industries_chile.xls")
 
-path_industries = find_file(DATA_CANDIDATES, fname_industries)
-path_io         = find_file(DATA_CANDIDATES, fname_io)
-path_fpa        = find_file(DATA_CANDIDATES, fname_fpa)
+path_io  = find_file(DATA_CANDIDATES, "IO_2021_chile.csv")
+path_fpa = find_file(DATA_CANDIDATES, "fpa_vector_few_industries_chile.csv")
 
-for (p, n) in [(path_industries, fname_industries),
-               (path_io, fname_io),
-               (path_fpa, fname_fpa)]
-    isempty(p) && error("""
-    Required data file not found: $n
-    Searched in: $(join(filter(!isempty, DATA_CANDIDATES), ", "))
-    Set the environment variable NKIOSOE_DATA_DIR to the folder containing the data files,
-    or copy them next to this script.
+# Report which files were found
+@printf "  Data root   : %s\n" DATA_DIR
+for (p, label) in [(path_industries, "industries Excel"),
+                   (path_io,         "IO matrix CSV"),
+                   (path_fpa,        "FPA vector CSV")]
+    @printf "  %-20s : %s\n" label (isempty(p) ? "NOT FOUND" : basename(p))
+end
+println()
+
+missing_files = String[]
+isempty(path_industries) && push!(missing_files, "Stata_to_excel_few_industries_chile.xls[x]")
+isempty(path_io)  && push!(missing_files, "IO_2021_chile.csv")
+isempty(path_fpa) && push!(missing_files, "fpa_vector_few_industries_chile.csv")
+
+if !isempty(missing_files)
+    searched = join(DATA_CANDIDATES, "\n    ")
+    error("""
+    Required data file(s) not found: $(join(missing_files, ", "))
+    Searched in:
+        $searched
+    Set NKIOSOE_DATA_DIR to override the search path:
+        export NKIOSOE_DATA_DIR="/path/to/Data"
     """)
 end
 
