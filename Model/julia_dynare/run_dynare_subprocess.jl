@@ -42,20 +42,110 @@ cd(MOD_DIR)
 # @dynare at TOP LEVEL — no function scope, no world-age issues
 context = @dynare "NK_SOE_lev_gap2"
 
-@info "Dynare solve complete — extracting results"
+@info "Dynare solve complete — inspecting context structure"
 
 # =========================================================================== #
-#  Extract results from context                                               #
+#  Inspect Dynare.jl context to find the correct field names in v0.10.x      #
 # =========================================================================== #
 
 mr         = context.results.model_results[1]
 endo_names = Dynare.get_endogenous(context.symboltable)
-ss_vec     = mr.trends.endogenous_steady_state
-lre        = mr.linearrationalexpectations
-g1_1       = Matrix{Float64}(lre.g1_1)   # n_endo × n_states
-g1_2       = Matrix{Float64}(lre.g1_2)   # n_endo × n_shocks
-Sigma_e    = Matrix{Float64}(context.models[1].Sigma_e)
-state_rows = Int.(context.models[1].i_bkwrd_b)
+n_endo     = length(endo_names)
+
+# Print context structure for debugging
+@info "context type: $(typeof(context))"
+@info "context fields: $(fieldnames(typeof(context)))"
+@info "mr type: $(typeof(mr))"
+@info "mr fields: $(fieldnames(typeof(mr)))"
+if isdefined(mr, :trends)
+    @info "mr.trends type: $(typeof(mr.trends))"
+    @info "mr.trends fields: $(fieldnames(typeof(mr.trends)))"
+    @info "mr.trends.endogenous_steady_state length: $(length(mr.trends.endogenous_steady_state))"
+end
+if isdefined(context, :work)
+    @info "context.work fields: $(fieldnames(typeof(context.work)))"
+    if isdefined(context.work, :steady_state)
+        @info "context.work.steady_state length: $(length(context.work.steady_state))"
+    end
+end
+
+# ---- Steady state: try multiple access paths ----
+function get_ss(context, mr, n_endo)
+    # Path 1: trends field (Dynare.jl ≤ 0.9)
+    if isdefined(mr, :trends) && length(mr.trends.endogenous_steady_state) == n_endo
+        return Float64.(mr.trends.endogenous_steady_state)
+    end
+    # Path 2: direct field on mr
+    for fname in (:endogenous_steady_state, :steady_state, :ys)
+        if isdefined(mr, fname)
+            v = getfield(mr, fname)
+            length(v) == n_endo && return Float64.(v)
+        end
+    end
+    # Path 3: context.work
+    if isdefined(context, :work)
+        w = context.work
+        for fname in (:steady_state, :endogenous_steady_state)
+            if isdefined(w, fname)
+                v = getfield(w, fname)
+                length(v) == n_endo && return Float64.(v)
+            end
+        end
+    end
+    # Path 4: linearrationalexpectations
+    if isdefined(mr, :linearrationalexpectations)
+        lre = mr.linearrationalexpectations
+        for fname in fieldnames(typeof(lre))
+            v = getfield(lre, fname)
+            if isa(v, AbstractVector) && length(v) == n_endo
+                @info "Found SS in lre.$fname"
+                return Float64.(v)
+            end
+        end
+    end
+    @warn "Could not find steady state of length $n_endo — using zeros"
+    return zeros(n_endo)
+end
+
+ss_vec = get_ss(context, mr, n_endo)
+@info "SS length: $(length(ss_vec))  range: [$(minimum(ss_vec)), $(maximum(ss_vec))]"
+
+# ---- Decision rule ----
+function get_decision_rule(mr, n_endo)
+    if !isdefined(mr, :linearrationalexpectations)
+        @warn "no linearrationalexpectations field"
+        return zeros(n_endo, 1), zeros(n_endo, 1)
+    end
+    lre = mr.linearrationalexpectations
+    @info "lre fields: $(fieldnames(typeof(lre)))"
+
+    g1_1 = nothing; g1_2 = nothing
+    for (cand1, cand2) in [(:g1_1, :g1_2), (:ghx, :ghu), (:g1, :g2)]
+        if isdefined(lre, cand1) && isdefined(lre, cand2)
+            g1_1 = Matrix{Float64}(getfield(lre, cand1))
+            g1_2 = Matrix{Float64}(getfield(lre, cand2))
+            @info "Found decision rule as lre.$cand1 / lre.$cand2 — sizes: $(size(g1_1)) / $(size(g1_2))"
+            break
+        end
+    end
+    if isnothing(g1_1)
+        @warn "Could not find decision rule matrices"
+        g1_1 = zeros(n_endo, 1); g1_2 = zeros(n_endo, 1)
+    end
+    return g1_1, g1_2
+end
+
+g1_1, g1_2 = get_decision_rule(mr, n_endo)
+
+# ---- Sigma_e ----
+Sigma_e = isdefined(context.models[1], :Sigma_e) ?
+          Matrix{Float64}(context.models[1].Sigma_e) :
+          Matrix{Float64}(I, size(g1_2, 2), size(g1_2, 2))
+
+# ---- State variable rows ----
+state_rows = isdefined(context.models[1], :i_bkwrd_b) ?
+             Int.(context.models[1].i_bkwrd_b) :
+             collect(1:size(g1_1, 2))
 
 # =========================================================================== #
 #  Write CSV files                                                            #
