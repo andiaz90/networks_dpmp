@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Read(//Users/agustindiaz/.julia/registries/**)"
+      "Read(//Users/agustindiaz/.julia/registries/**)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)"
+    ],
+    "additionalDirectories": [
+      "/Users/agustindiaz/Library/CloudStorage/Dropbox/Proyectos/Networks-DPMP"
     ]
   }
 }
