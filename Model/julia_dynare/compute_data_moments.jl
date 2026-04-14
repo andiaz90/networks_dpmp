@@ -296,48 +296,67 @@ qt_y       = Int[]
 
 if isfile(fname_pib)
     try
-        wb      = XLSX.readxlsx(fname_pib)
-        ws      = wb["Cuadro"]
-        # Row 3 = headers, rows 4–73 = data (70 quarters 2009Q1–2026Q2)
-        # We read from row 4 onward; XLSX.jl is 1-indexed
-        hdr_row  = 3
+        wb  = XLSX.readxlsx(fname_pib)
+
+        # Try sheet name "Cuadro" first; fall back to first sheet.
+        # Print available sheet names to help debug if "Cuadro" is wrong.
+        sheet_names = XLSX.sheetnames(wb)
+        @printf "  Sheets in file: %s\n" join(sheet_names, ", ")
+        ws = "Cuadro" in sheet_names ? wb["Cuadro"] : wb[1]
+        ws_name = "Cuadro" in sheet_names ? "Cuadro" : sheet_names[1]
+        @printf "  Using sheet: %s\n" ws_name
+
+        # Row 3 = headers, rows 4+ = data
         data_start = 4
 
-        # Find last data row
+        # Find last data row (stop at first fully empty row, handle missing/nothing)
         last_row = data_start
-        while !ismissing(ws[last_row + 1, 1]) && last_row < 200
+        while last_row < 300
+            v = ws[last_row + 1, 1]
+            (v === nothing || v === missing || v == "") && break
             last_row += 1
         end
         n_pib = last_row - data_start + 1
         @printf "  readxlsx OK: %d data rows\n" n_pib
 
+        # --- DIAGNOSTIC: show what XLSX.jl returns for the first date cell ---
+        cell0 = ws[data_start, 1]
+        @printf "  Date cell [row %d, col 1] → type=%s  value=%s\n" data_start typeof(cell0) string(cell0)
+
         # --- Parse dates ---
-        # BCCh stores the year as a plain integer in a date-formatted cell.
-        # XLSX.jl returns these as Date objects (Excel serial 2009 ≈ 1905-07-05).
-        # All 4 quarters of the same year share the same integer → infer quarters
-        # from row order within each year group.
+        # BCCh pib_sectorial_bc stores the YEAR as an Excel serial number
+        # in a date-formatted cell.  Excel serial N = days since 1899-12-30,
+        # so serial 2009 → ~1905-07-05 as a Date.  XLSX.jl may return:
+        #   Date     → serial = Dates.value(d - Date(1899,12,30)); if 1980-2100 use as year
+        #   Int/Float→ if 1980-2100 use directly as year; else treat as serial
+        #   String   → parse first 4 chars as year
+        #   nothing/missing → skip
+        # All 4 rows of the same year group → Q1…Q4 in row order.
         yr_raw = zeros(Int, n_pib)
         for t in 1:n_pib
-            cell_val = ws[data_start + t - 1, 1]
-            if cell_val isa Date
-                # Excel serial = days since 1899-12-30; if it equals a plausible year
-                serial = Dates.value(cell_val - Date(1899, 12, 30))
-                if 1980 <= serial <= 2100
-                    yr_raw[t] = serial    # BCCh format: serial IS the year
-                else
-                    yr_raw[t] = year(cell_val)
-                end
-            elseif cell_val isa Integer
-                yr_raw[t] = cell_val >= 1980 ? cell_val : year(Date(Dates.UTD(cell_val + Dates.value(Date(1899,12,30)))))
-            elseif cell_val isa AbstractString
-                yr_raw[t] = parse(Int, cell_val[1:4])
+            v = ws[data_start + t - 1, 1]
+            if v isa Date || v isa DateTime
+                d    = v isa DateTime ? Date(v) : v
+                ser  = Dates.value(d - Date(1899, 12, 30))
+                yr_raw[t] = (1980 <= ser <= 2100) ? ser : year(d)
+            elseif v isa Integer
+                yr_raw[t] = (1980 <= v  <= 2100) ? v :
+                             (v > 0) ? year(Date(1899,12,30) + Dates.Day(v)) : 0
+            elseif v isa AbstractFloat && !isnan(v)
+                vi = round(Int, v)
+                yr_raw[t] = (1980 <= vi <= 2100) ? vi :
+                             (vi > 0) ? year(Date(1899,12,30) + Dates.Day(vi)) : 0
+            elseif v isa AbstractString && length(v) >= 4
+                p = tryparse(Int, v[1:4])
+                yr_raw[t] = something(p, 0)
             end
+            # nothing / missing / unrecognised → leave as 0 (filtered later)
         end
 
-        # Assign Q1→Q4 in sequence within each year group
+        # Assign Q1→Q4 in row order within each year group
         yr_y_pib = copy(yr_raw)
         qt_y_pib = zeros(Int, n_pib)
-        for uy in unique(yr_y_pib[yr_y_pib .> 0])
+        for uy in sort(unique(yr_y_pib[yr_y_pib .> 0]))
             rows_in_yr = findall(==(uy), yr_y_pib)
             for (qi, ri) in enumerate(rows_in_yr)
                 qt_y_pib[ri] = qi
@@ -345,9 +364,20 @@ if isfile(fname_pib)
         end
 
         # Drop rows with unparseable dates
-        valid = yr_y_pib .> 0
+        valid   = yr_y_pib .> 0
         n_valid = sum(valid)
-        @printf "  Date range: %dQ%d – %dQ%d  (%d valid rows)\n" minimum(yr_y_pib[valid]) qt_y_pib[findfirst(valid)] maximum(yr_y_pib[valid]) qt_y_pib[findlast(valid)] n_valid
+
+        if n_valid == 0
+            @printf "  WARNING: all %d date cells failed to parse!\n" n_pib
+            @printf "  First 5 raw cells:\n"
+            for t in 1:min(5, n_pib)
+                v = ws[data_start + t - 1, 1]
+                @printf "    row %d: type=%-12s  val=%s\n" (data_start+t-1) string(typeof(v)) string(v)
+            end
+            @printf "  → y_d will be NaN. Check pib_sectorial_bc.xlsx sheet name and date column.\n"
+        else
+            @printf "  Date range: %dQ%d – %dQ%d  (%d valid rows)\n" minimum(yr_y_pib[valid]) qt_y_pib[findfirst(valid)] maximum(yr_y_pib[valid]) qt_y_pib[findlast(valid)] n_valid
+        end
 
         # Parse numeric cells for the 32 data columns (xlsx cols 2–33)
         pib_num = fill(NaN, n_valid, 32)
@@ -788,16 +818,40 @@ d_vec_check = [y_d; p_d; l_d; d_std_GDP; d_std_pi; d_corr_GDPpi;
                d_omG; d_std_Q; d_TBGDP; d_autocorr_Q; d_corr_GDPQ]
 nan_idx = findall(isnan, d_vec_check)
 if !isempty(nan_idx)
-    @printf "\nERROR: %d moment(s) are NaN — fix data sources before SMM:\n" length(nan_idx)
     moment_labels = [["std(Y_$i)" for i in 1:NSEC];
                      ["std(PH_$i)" for i in 1:NSEC];
                      ["std(L_$i)"  for i in 1:NSEC];
                      ["std(GDP)","std(pi)","corr(GDP,pi)","omG",
                       "std(Q)","TB/GDP","autocorr(Q)","corr(GDP,Q)"]]
-    for k in nan_idx
-        @printf "  [%2d] %s\n" k moment_labels[k]
-    end
-    error("$(length(nan_idx)) of 44 moments are NaN. See list above.")
+
+    # Build a readable list — included directly in the error() so it appears
+    # in the exception message even when stdout has scrolled past.
+    nan_lines = join(["  [$(k)] $(moment_labels[k])" for k in nan_idx], "\n")
+
+    # Likely cause diagnostics
+    causes = String[]
+    any(isnan, y_d)  && push!(causes, "→ std(Y_i) NaN: pib_sectorial_bc.xlsx not found, wrong sheet name, or date-parsing failure. Run with VERBOSE_PIB=true for cell-level debug.")
+    any(isnan, p_d)  && push!(causes, "→ std(PH_i) NaN: deflactor_pib.csv columns didn't parse. Check file path and column count.")
+    any(isnan, l_d)  && push!(causes, "→ std(L_i) NaN: count_workers_by_sector.csv missing or sector alignment wrong.")
+    isnan(d_std_Q)   && push!(causes, "→ std(Q) NaN: reer_chile_bis.xlsx not found or RBCL column missing.")
+    isnan(d_TBGDP)   && push!(causes, "→ TB/GDP NaN: datos_CCNN_mayo2025.xlsx not found or column mapping failed.")
+    cause_lines = isempty(causes) ? "" : "\n\nLikely causes:\n" * join(causes, "\n")
+
+    @printf "\n%s\n" repeat("!", 62)
+    @printf "  NaN MOMENTS (%d of 44):\n" length(nan_idx)
+    println(nan_lines)
+    @printf "%s\n" repeat("!", 62)
+
+    error("""
+    $(length(nan_idx)) of 44 moments are NaN.
+
+    NaN moments:
+    $(nan_lines)
+    $(cause_lines)
+
+    DATA_DIR searched: $(DATA_DIR)
+    Files present: $(filter(f -> endswith(f, r"\.xlsx|\.csv"), readdir(DATA_DIR, join=true) .|> basename))
+    """)
 end
 @assert length(d_vec_check) == 44 "BUG: expected 44 moments, got $(length(d_vec_check))"
 @printf "\nValidation passed: all 44 moments are non-NaN.\n"
