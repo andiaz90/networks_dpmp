@@ -146,50 +146,42 @@ values in context.models[1].params.  Equivalent to Dynare/MATLAB's resol().
 Returns (true, g1_1, g1_2, Sigma_e) on success, (false, ...) on failure.
 """
 function resolve_first_order!(context::Dynare.Context)
+    # CRITICAL: NEVER call string() on any Dynare exception.
+    # On Apple Silicon, the Tasmanian library segfaults when Julia's show()
+    # traverses the Dynare context (via string(exception)).
+    # All catch blocks must be completely silent.
+
+    solved = false
+    for fn_name in [:compute_first_order_solution!,
+                    :first_order_solution!,
+                    :stoch_simul!]
+        isdefined(Dynare, fn_name) || continue
+        try
+            getfield(Dynare, fn_name)(context)
+            solved = true
+            break
+        catch
+            # Catch silently — DO NOT call string() on the exception
+        end
+    end
+
+    if !solved
+        # Print static message only — no exception objects, no string() calls
+        @printf "\n  [resolve_first_order!] All Dynare re-solve attempts failed.\n"
+        @printf "  Tried: compute_first_order_solution!, first_order_solution!, stoch_simul!\n"
+        @printf "  On Apple Silicon (ARM): LAPACK gees is unavailable → estimation needs Intel/x86.\n"
+        @printf "  Options: (1) Intel Mac/Linux, (2) MATLAB on Windows, (3) use smm_estimates.csv\n\n"
+        return false, zeros(0,0), zeros(0,0), zeros(0,0)
+    end
+
     try
-        # Dynare.jl 0.10.x: find the correct re-solve function.
-        # Try several possible API names in priority order.
-        solved = false
-        for fn_name in [:compute_first_order_solution!,
-                        :first_order_solution!,
-                        :stoch_simul!]
-            if isdefined(Dynare, fn_name)
-                try
-                    getfield(Dynare, fn_name)(context)
-                    solved = true
-                    break
-                catch inner_e
-                    # gees failure on ARM: log once then continue
-                    if occursin("gees", string(inner_e))
-                        @warn "resolve_first_order!: $fn_name failed (gees/ARM): $(string(inner_e)[1:min(120,length(string(inner_e)))])"
-                    end
-                end
-            end
-        end
-        if !solved
-            @warn """
-            resolve_first_order!: no Dynare re-solve function worked.
-            Tried: compute_first_order_solution!, first_order_solution!, stoch_simul!
-
-            On Apple Silicon (ARM), Dynare.jl uses LAPACK gees internally which
-            is not available on aarch64. SMM estimation must run on Intel/x86.
-
-            Options:
-              1. Run estimation on an Intel Mac or Linux server
-              2. Use MATLAB smm_estimation.m on Windows (original workflow)
-              3. Apply existing smm_estimates.csv from a previous run
-            """
-            return false, zeros(0,0), zeros(0,0), zeros(0,0)
-        end
-
         mr   = context.results.model_results[1]
         lre  = mr.linearrationalexpectations
         g1_1 = Matrix{Float64}(lre.g1_1)
         g1_2 = Matrix{Float64}(lre.g1_2)
         Σe   = context.models[1].Sigma_e
         return true, g1_1, g1_2, Σe
-    catch e
-        @warn "resolve_first_order! unexpected error: $(string(e)[1:min(200,length(string(e)))])"
+    catch
         return false, zeros(0,0), zeros(0,0), zeros(0,0)
     end
 end
