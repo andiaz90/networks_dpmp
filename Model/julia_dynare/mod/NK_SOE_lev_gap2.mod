@@ -100,6 +100,8 @@ rho_pvstar sigma_pvstar rho_xi sigma_xi
 Ctot_ss Ctotg_ss Ctots_ss VA_ss M_tot_ss Y_ss IMP_ss
 // Shock activation parameters (set by params_jl.mod; 0=off, 1=on)
 shock_eps_om shock_eps_i shock_eps_pvstar shock_eps_xi
+// Scalar SS values used in initval block (set by params_jl.mod)
+pi_ss r_ss w_ss N_ss GDP_ss C_ss C_g_ss C_s_ss p_g_ss p_s_ss Bstar_ss
 
     @#for i in 1:nsec
         gammag_@{i}
@@ -122,6 +124,21 @@ shock_eps_om shock_eps_i shock_eps_pvstar shock_eps_xi
         isigma_tfp_@{i}
         PL_ss@{i}
         shock_epsA_@{i}
+        // Sectoral SS values used in initval block
+        PH_ss@{i}
+        MC_ss@{i}
+        Y_ss@{i}
+        L_ss@{i}
+        Cgi_ss@{i}
+        Csi_ss@{i}
+        P_ss@{i}
+        PMi_ss@{i}
+        Mi_ss@{i}
+        CFg_ss@{i}
+        CFs_ss@{i}
+        CHg_ss@{i}
+        CHs_ss@{i}
+        Vi_ss@{i}
     @#endfor
     ;
 

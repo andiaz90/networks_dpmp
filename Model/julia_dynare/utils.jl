@@ -80,6 +80,10 @@ function write_params_mod(mod_dir::String, p::NamedTuple)
         println(io)
 
         # ---- Steady-state scalars ---------------------------------------- #
+        # pi_ss = 1 (zero net domestic inflation in SS)
+        # r_ss = Pistar_ss / beta (from household Euler equation)
+        _wp(io, "pi_ss",   1.0)
+        _wp(io, "r_ss",    p.Pistar_ss_val / p.beta_val)
         _wp(io, "w_ss",    p.w_ss)
         _wp(io, "C_ss",    p.C_ss)
         _wp(io, "GDP_ss",  p.GDP_ss)

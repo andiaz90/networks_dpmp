@@ -69,46 +69,46 @@ if isdefined(context, :work)
     end
 end
 
-# ---- Steady state: try multiple access paths ----
+# ---- Steady state ----
+# In Dynare.jl 0.10.x, the steady state is in mr.trends.endogenous_steady_state
+# ONLY when stoch_simul successfully computes it (requires all initval vars defined).
+# With missing parameter declarations (now fixed), this should now be populated.
+# If still empty, fall back to context.work.initval_endogenous (user's initval).
 function get_ss(context, mr, n_endo)
-    # Path 1: trends field (Dynare.jl ≤ 0.9)
+    # Primary: trends field (populated after successful stoch_simul solve)
     if isdefined(mr, :trends) && length(mr.trends.endogenous_steady_state) == n_endo
+        @info "SS from mr.trends.endogenous_steady_state"
         return Float64.(mr.trends.endogenous_steady_state)
     end
-    # Path 2: direct field on mr
-    for fname in (:endogenous_steady_state, :steady_state, :ys)
-        if isdefined(mr, fname)
-            v = getfield(mr, fname)
-            length(v) == n_endo && return Float64.(v)
+    # Fallback 1: initval_endogenous from context.work
+    if isdefined(context, :work) && isdefined(context.work, :initval_endogenous)
+        v = context.work.initval_endogenous
+        if isa(v, AbstractVector) && length(v) == n_endo
+            @info "SS from context.work.initval_endogenous"
+            return Float64.(v)
         end
     end
-    # Path 3: context.work
-    if isdefined(context, :work)
-        w = context.work
-        for fname in (:steady_state, :endogenous_steady_state)
-            if isdefined(w, fname)
-                v = getfield(w, fname)
-                length(v) == n_endo && return Float64.(v)
-            end
-        end
-    end
-    # Path 4: linearrationalexpectations
-    if isdefined(mr, :linearrationalexpectations)
-        lre = mr.linearrationalexpectations
-        for fname in fieldnames(typeof(lre))
-            v = getfield(lre, fname)
+    # Fallback 2: any non-boolean vector field of correct length on mr or lre
+    for obj in [mr, isdefined(mr, :linearrationalexpectations) ? mr.linearrationalexpectations : nothing]
+        obj === nothing && continue
+        for fname in fieldnames(typeof(obj))
+            v = getfield(obj, fname)
             if isa(v, AbstractVector) && length(v) == n_endo
-                @info "Found SS in lre.$fname"
-                return Float64.(v)
+                vf = Float64.(v)
+                # Skip boolean flags (stationary_variables has range [0,1] with integer values)
+                if any(x -> !(x ≈ 0.0 || x ≈ 1.0), vf) || std(vf) > 0.01
+                    @info "SS from $(typeof(obj)).$fname"
+                    return vf
+                end
             end
         end
     end
-    @warn "Could not find steady state of length $n_endo — using zeros"
+    @warn "Could not find steady state — returning zeros. Check that pi_ss, r_ss, etc. are declared in parameters block."
     return zeros(n_endo)
 end
 
 ss_vec = get_ss(context, mr, n_endo)
-@info "SS length: $(length(ss_vec))  range: [$(minimum(ss_vec)), $(maximum(ss_vec))]"
+@info "SS length: $(length(ss_vec))  non-zero entries: $(sum(abs.(ss_vec) .> 1e-10))"
 
 # ---- Decision rule ----
 function get_decision_rule(mr, n_endo)
