@@ -167,13 +167,18 @@ function resolve_first_order!(context::Dynare.Context)
             end
         end
         if !solved
-            # List available Dynare functions for debugging
-            dynare_fns = filter(s -> !startswith(string(s),"#"),
-                                names(Dynare, all=true))
-            solve_fns  = filter(s -> occursin("solut", lowercase(string(s))) ||
-                                     occursin("first", lowercase(string(s))),
-                                dynare_fns)
-            @warn "No Dynare re-solve function worked. Candidates: $solve_fns"
+            @warn """
+            resolve_first_order!: no Dynare re-solve function worked.
+            Tried: compute_first_order_solution!, first_order_solution!, stoch_simul!
+
+            On Apple Silicon (ARM), Dynare.jl uses LAPACK gees internally which
+            is not available on aarch64. SMM estimation must run on Intel/x86.
+
+            Options:
+              1. Run estimation on an Intel Mac or Linux server
+              2. Use MATLAB smm_estimation.m on Windows (original workflow)
+              3. Apply existing smm_estimates.csv from a previous run
+            """
             return false, zeros(0,0), zeros(0,0), zeros(0,0)
         end
 
