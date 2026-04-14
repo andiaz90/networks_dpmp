@@ -98,6 +98,8 @@ rhoi rhoirule ilabcosts sigma_i sigma_om sigma_L_agg Rworld_ss
 bbar chii_b omegaX epsilonX ystar_ss etastar kappaV epsilonV sigmaH Pistar_ss PVstar_ss
 rho_pvstar sigma_pvstar rho_xi sigma_xi
 Ctot_ss Ctotg_ss Ctots_ss VA_ss M_tot_ss Y_ss IMP_ss
+// Shock activation parameters (set by params_jl.mod; 0=off, 1=on)
+shock_eps_om shock_eps_i shock_eps_pvstar shock_eps_xi
 
     @#for i in 1:nsec
         gammag_@{i}
@@ -119,98 +121,16 @@ Ctot_ss Ctotg_ss Ctots_ss VA_ss M_tot_ss Y_ss IMP_ss
         varrho_@{i}
         isigma_tfp_@{i}
         PL_ss@{i}
+        shock_epsA_@{i}
     @#endfor
-    ;  
+    ;
 
       
-load params_val_ul.mat;
-//load params_val_SOE.mat;
-
-sigma_i     = sigma_i_val;
-sigma_L_agg = sigma_L_agg_val;
-sigma_om    = sigma_om_val;
-ilabcosts   = ilabcosts_val;
-
-gamma      = gamma_val;
-psi        = 1;
-beta       = beta_val;
-phi        = phi_val;
-epsilon    = 10;
-rho        = rho_val;
-rho_om1    = rho_om1_val;
-rho_om2    = rho_om2_val;
-rho_tfp1   = rho_tfp1_val;
-rho_tfp2   = rho_tfp2_val;
-rhoi       = 0.5+0*rhoi_val;
-rhoirule   = rhoirule_val;
-ombar      = ombar_val;
-chii_b     = chii_b_val;
-bbar       = bbar_val;
-epsilonX   = epsilonX_val;
-omegaX     = omegaX_val;
-ystar_ss   = ystar_ss_val;
-etastar    = etastar_val;
-epsilonV   = epsilonV_val;
-kappaV     = kappaV_val;
-sigmaH     = sigmaH_val;
-w_ss       = w_ss;
-C_ss       = C_ss;
-GDP_ss     = GDP_ss;
-N_ss       = N_ss;
-p_s_ss     = p_s_ss;
-p_g_ss     = p_g_ss;
-C_s_ss     = C_s_ss;
-C_g_ss     = C_g_ss;
-Pistar_ss  = Pistar_ss_val;
-PVstar_ss    = PVstar_ss_val;
-rho_pvstar   = rho_pvstar_val;
-sigma_pvstar = sigma_pvstar_val;
-rho_xi       = rho_xi_val;
-sigma_xi     = sigma_xi_val;
-Rworld_ss    = Rworld_ss_val;
-Bstar_ss   = Bstar_ss;
-IMP_ss   = IMP_ss_val;
-Ctot_ss  = Ctot_ss_val;
-Ctotg_ss = Ctotg_ss_val;
-Ctots_ss = Ctots_ss_val;
-VA_ss    = VA_ss_val;
-M_tot_ss = M_tot_ss_val;
-@#for i in 1:nsec
-    gammag_@{i} = modgammag(@{i});
-    gammas_@{i} = modgammas(@{i});
-    alpha_@{i}  = modalpha(@{i});
-    @#for j in 1:nsec
-        beta_@{i}_@{j} = modbeta(@{i},@{j});
-    @#endfor
-    epsY_@{i}   = modepsY(@{i});
-    epsM_@{i}   = modepsM(@{i});
-    kappa_@{i}  = modkappa(@{i});
-    dummyg_@{i} = goods(@{i});
-    dummys_@{i} = services(@{i});
-    cl_@{i}     = modcl(@{i});
-    clneg_@{i}  = modclneg(@{i});
-    cm_@{i}     = modcm(@{i});
-    chiX_@{i}   = modchiX(@{i});
-    alphaV_@{i} = modalphaV(@{i});
-    varrho_@{i} = modvarrho(@{i});
-    isigma_tfp_@{i} = isigma_tfp_val(@{i});
-    PL_ss@{i}   = PL_ss(@{i});
-    CFg_ss@{i}  = CFg_ss(@{i});
-    CFs_ss@{i}  = CFs_ss(@{i});
-    CHg_ss@{i}  = CHg_ss(@{i});
-    CHs_ss@{i}  = CHs_ss(@{i});
-    Vi_ss@{i}   = Vi_ss(@{i});
-    PH_ss@{i}   = pH_ss(@{i});
-    MC_ss@{i}   = MCi_ss(@{i});
-    Y_ss@{i}   = Yi_ss(@{i});
-    L_ss@{i}   = L_ss(@{i});
-    Cgi_ss@{i} = C_gi_ss(@{i});
-    Csi_ss@{i} = C_si_ss(@{i});
-    P_ss@{i}   = P_ss(@{i});
-    PMi_ss@{i} = PMi_ss(@{i});
-    Mi_ss@{i}  = M_ss(@{i});
-@#endfor
-Y_ss = Y_tot_ss;   // Y_tot_ss saved from main_SOE_ul.m (sum of Yi_ss)
+// -----------------------------------------------------------------------
+// All parameter values are loaded from a Julia-generated include file.
+// main_SOE_gap.jl writes mod/params_jl.mod before calling @dynare.
+// -----------------------------------------------------------------------
+@#include "params_jl.mod"
 
 
 
@@ -900,13 +820,13 @@ resid;
 
 // Shocks
 shocks;
-var eps_om=shock_eps_om_val;
-var eps_i=shock_eps_i_val;
+var eps_om=shock_eps_om;
+var eps_i=shock_eps_i;
 var epschi=0.0;
-var eps_pvstar=shock_eps_pvstar_val;
-var eps_xi=shock_eps_xi_val;
+var eps_pvstar=shock_eps_pvstar;
+var eps_xi=shock_eps_xi;
 @#for z in 1:nsec
-   var epsA_@{z}=shock_epsA_val(@{z});
+   var epsA_@{z}=shock_epsA_@{z};
 @#endfor
 end;
 

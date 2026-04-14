@@ -43,8 +43,9 @@ using NLsolve
 using CSV
 using DataFrames
 using XLSX
-using MAT
+using MAT          # for reading smm_estimates.mat / smm_best_so_far.mat
 using StatsBase
+using Dynare        # native Julia reimplementation — no MATLAB, no Octave needed
 
 # =========================================================================== #
 #  INCLUDE HELPERS                                                              #
@@ -97,17 +98,6 @@ end
 #  DATA PATHS                                                                  #
 #  Adjust DYNARE_MATLAB_PATH and DATA_DIR to match your installation.          #
 # =========================================================================== #
-
-# ---- Dynare/Octave setup ----
-# Path to Dynare's matlab/ subfolder. Common locations:
-#   Linux   : /usr/share/dynare/matlab
-#   macOS   : /usr/local/share/dynare/matlab  (Homebrew) or
-#             /Applications/Dynare/6.4/matlab
-#   Windows : C:/Program Files/Dynare/6.4/matlab
-DYNARE_MATLAB_PATH = get(ENV, "DYNARE_HOME",
-    "/usr/share/dynare/matlab")   # <<< SET THIS or export DYNARE_HOME
-
-OCTAVE_EXE = get(ENV, "OCTAVE_EXE", "octave")   # "octave" if on PATH
 
 # Directory with .mod files (relative to this script)
 MOD_DIR = joinpath(SCRIPT_DIR, "mod")
@@ -566,216 +556,165 @@ sigma_psi_val = 0.001
 
 
 # =========================================================================== #
-#  SAVE params_val_ul.mat  (read by NK_SOE_lev_gap2.mod via `load`)           #
+#  WRITE params_jl.mod  (read by NK_SOE_lev_gap2.mod via @#include)          #
+#  Dynare.jl processes this as a Dynare parameter file — no MATLAB/Octave.   #
 # =========================================================================== #
 
-params_dict = Dict{String, Any}(
-    # --- Shock standard deviations / variances ---
-    "sigma_i_val"     => sigma_i_val,
-    "sigma_L_agg_val" => sigma_L_agg_val,
-    "sigma_om_val"    => sigma_om_val,
-
-    # --- Structural parameters ---
-    "ilabcosts_val"   => ilabcosts_val,
-    "gamma_val"       => gamma,
-    "beta_val"        => beta_val,
-    "phi_val"         => phi_val,
-    "rho_val"         => rho_val,
-    "rho_om1_val"     => rho_om1_val,
-    "rho_om2_val"     => rho_om2_val,
-    "rho_tfp1_val"    => rho_tfp1_val,
-    "rho_tfp2_val"    => rho_tfp2_val,
-    "rhoi_val"        => rhoi_val,
-    "rhoirule_val"    => rhoirule_val,
-    "ombar_val"       => ombar_val,
-
-    # --- External sector ---
-    "chii_b_val"      => chii_b_val,
-    "bbar_val"        => bbar_val,
-    "epsilonX_val"    => epsilonX_val,
-    "omegaX_val"      => omegaX_val,
-    "ystar_ss_val"    => ystar_ss_val,
-    "etastar_val"     => etastar_val,
-    "epsilonV_val"    => epsilonV_val,
-    "kappaV_val"      => kappaV_val,
-    "sigmaH_val"      => sigmaH_val,
-    "Pistar_ss_val"   => Pistar_ss_val,
-    "PVstar_ss_val"   => PVstar_ss_val,
-    "Rworld_ss_val"   => Rworld_ss_val,
-    "rho_pvstar_val"  => rho_pvstar_val,
-    "sigma_pvstar_val"=> sigma_pvstar_val,
-    "rho_xi_val"      => rho_xi_val,
-    "sigma_xi_val"    => sigma_xi_val,
-
-    # --- Steady state values (scalars) ---
-    "w_ss"            => w_ss,
-    "C_ss"            => C_ss,
-    "GDP_ss"          => GDP_ss,
-    "N_ss"            => N_ss,
-    "p_s_ss"          => p_s_ss,
-    "p_g_ss"          => p_g_ss,
-    "C_s_ss"          => C_s_ss,
-    "C_g_ss"          => C_g_ss,
-    "Bstar_ss"        => Bstar_ss,
-    "IMP_ss_val"      => IMP_ss_val,
-    "Ctot_ss_val"     => Ctot_ss_val,
-    "Ctotg_ss_val"    => Ctotg_ss_val,
-    "Ctots_ss_val"    => Ctots_ss_val,
-    "VA_ss_val"       => VA_ss_val,
-    "M_tot_ss_val"    => M_tot_ss,
-    "Y_tot_ss"        => Y_tot_ss,
-
-    # --- Sectoral vectors (stored as column vectors) ---
-    "modgammag"       => reshape(modgammag, nsec, 1),
-    "modgammas"       => reshape(modgammas, nsec, 1),
-    "modalpha"        => reshape(modalpha, nsec, 1),
-    "modalphaV"       => reshape(modalphaV, nsec, 1),
-    "modepsY"         => reshape(modepsY, nsec, 1),
-    "modepsM"         => reshape(modepsM, nsec, 1),
-    "modkappa"        => reshape(modkappa, nsec, 1),
-    "goods"           => reshape(Float64.(goods), nsec, 1),
-    "services"        => reshape(Float64.(services), nsec, 1),
-    "modcl"           => reshape(modcl, nsec, 1),
-    "modclneg"        => reshape(modclneg, nsec, 1),
-    "modcm"           => reshape(modcm, nsec, 1),
-    "modchiX"         => reshape(modchiX, nsec, 1),
-    "modvarrho"       => reshape(modvarrho, nsec, 1),
-    "isigma_tfp_val"  => reshape(isigma_tfp_val, nsec, 1),
-    "PL_ss"           => reshape(PL_ss, nsec, 1),
-    "pH_ss"           => reshape(pH_ss, nsec, 1),
-    "PH_ss"           => reshape(pH_ss, nsec, 1),
-
-    # Sectoral SS vectors (MATLAB-named for Dynare compatibility)
-    "CFg_ss"          => reshape(CFg_ss, nsec, 1),
-    "CFs_ss"          => reshape(CFs_ss, nsec, 1),
-    "CHg_ss"          => reshape(CHg_ss, nsec, 1),
-    "CHs_ss"          => reshape(CHs_ss, nsec, 1),
-    "Vi_ss"           => reshape(Vi_ss, nsec, 1),
-    "MCi_ss"          => reshape(MCi_ss, nsec, 1),
-    "Yi_ss"           => reshape(Yi_ss, nsec, 1),
-    "L_ss"            => reshape(L_ss, nsec, 1),
-    "C_gi_ss"         => reshape(C_gi_ss, nsec, 1),
-    "C_si_ss"         => reshape(C_si_ss, nsec, 1),
-    "P_ss"            => reshape(P_ss, nsec, 1),
-    "PMi_ss"          => reshape(PMi_ss, nsec, 1),
-    "M_ss"            => reshape(M_ss, nsec, 1),
-
-    # --- IO matrix ---
-    "modbeta"         => modbeta,   # nsec × nsec
-
-    # --- Shock indicators ---
-    "shock_eps_om_val"     => shock_eps_om_val,
-    "shock_eps_i_val"      => shock_eps_i_val,
-    "shock_eps_pvstar_val" => shock_eps_pvstar_val,
-    "shock_eps_xi_val"     => shock_eps_xi_val,
-    "shock_epsA_val"       => reshape(shock_epsA_val, nsec, 1),
+params_nt = (
+    nsec           = nsec,
+    # Shock scalars
+    sigma_i_val    = sigma_i_val,
+    sigma_L_agg_val= sigma_L_agg_val,
+    sigma_om_val   = sigma_om_val,
+    ilabcosts_val  = ilabcosts_val,
+    gamma_val      = gamma,
+    beta_val       = beta_val,
+    phi_val        = phi_val,
+    rho_val        = rho_val,
+    rho_om1_val    = rho_om1_val,
+    rho_om2_val    = rho_om2_val,
+    rho_tfp1_val   = rho_tfp1_val,
+    rho_tfp2_val   = rho_tfp2_val,
+    rhoi_val       = rhoi_val,
+    rhoirule_val   = rhoirule_val,
+    ombar_val      = ombar_val,
+    chii_b_val     = chii_b_val,
+    bbar_val       = bbar_val,
+    epsilonX_val   = epsilonX_val,
+    omegaX_val     = omegaX_val,
+    ystar_ss_val   = ystar_ss_val,
+    etastar_val    = etastar_val,
+    epsilonV_val   = epsilonV_val,
+    kappaV_val     = kappaV_val,
+    sigmaH_val     = sigmaH_val,
+    Pistar_ss_val  = Pistar_ss_val,
+    PVstar_ss_val  = PVstar_ss_val,
+    Rworld_ss_val  = Rworld_ss_val,
+    rho_pvstar_val = rho_pvstar_val,
+    sigma_pvstar_val=sigma_pvstar_val,
+    rho_xi_val     = rho_xi_val,
+    sigma_xi_val   = sigma_xi_val,
+    # Steady state scalars
+    w_ss           = w_ss,
+    C_ss           = C_ss,
+    GDP_ss         = GDP_ss,
+    N_ss           = N_ss,
+    p_s_ss         = p_s_ss,
+    p_g_ss         = p_g_ss,
+    C_s_ss         = C_s_ss,
+    C_g_ss         = C_g_ss,
+    Bstar_ss       = Bstar_ss,
+    IMP_ss_val     = IMP_ss_val,
+    Ctot_ss_val    = Ctot_ss_val,
+    Ctotg_ss_val   = Ctotg_ss_val,
+    Ctots_ss_val   = Ctots_ss_val,
+    VA_ss_val      = VA_ss_val,
+    M_tot_ss       = M_tot_ss,
+    Y_tot_ss       = Y_tot_ss,
+    # Shock flags
+    shock_eps_om_val     = shock_eps_om_val,
+    shock_eps_i_val      = shock_eps_i_val,
+    shock_eps_pvstar_val = shock_eps_pvstar_val,
+    shock_eps_xi_val     = shock_eps_xi_val,
+    shock_epsA_val       = shock_epsA_val,
+    # Sectoral vectors
+    modgammag    = modgammag,
+    modgammas    = modgammas,
+    modalpha     = modalpha,
+    modalphaV    = modalphaV,
+    modepsY      = modepsY,
+    modepsM      = modepsM,
+    modkappa     = modkappa,
+    goods        = goods,
+    services     = services,
+    modcl        = modcl,
+    modclneg     = modclneg,
+    modcm        = modcm,
+    modchiX      = modchiX,
+    modvarrho    = modvarrho,
+    isigma_tfp_val = isigma_tfp_val,
+    PL_ss        = PL_ss,
+    CFg_ss       = CFg_ss,
+    CFs_ss       = CFs_ss,
+    CHg_ss       = CHg_ss,
+    CHs_ss       = CHs_ss,
+    Vi_ss        = Vi_ss,
+    pH_ss        = pH_ss,
+    MCi_ss       = MCi_ss,
+    Yi_ss        = Yi_ss,
+    L_ss         = L_ss,
+    C_gi_ss      = C_gi_ss,
+    C_si_ss      = C_si_ss,
+    P_ss         = P_ss,
+    PMi_ss       = PMi_ss,
+    M_ss         = M_ss,
+    modbeta      = modbeta,
 )
 
-# Also save indexed scalar variables (MATLAB-style PHss1, PHss2, ... for @#for loops in mod)
-for i in 1:nsec
-    params_dict["CFg_ss$(i)"]  = CFg_ss[i]
-    params_dict["CFs_ss$(i)"]  = CFs_ss[i]
-    params_dict["CHg_ss$(i)"]  = CHg_ss[i]
-    params_dict["CHs_ss$(i)"]  = CHs_ss[i]
-    params_dict["Vi_ss$(i)"]   = Vi_ss[i]
-    params_dict["PH_ss$(i)"]   = pH_ss[i]
-    params_dict["MC_ss$(i)"]   = MCi_ss[i]
-    params_dict["Y_ss$(i)"]    = Yi_ss[i]
-    params_dict["L_ss$(i)"]    = L_ss[i]
-    params_dict["Cgi_ss$(i)"]  = C_gi_ss[i]
-    params_dict["Csi_ss$(i)"]  = C_si_ss[i]
-    params_dict["P_ss$(i)"]    = P_ss[i]
-    params_dict["PMi_ss$(i)"]  = PMi_ss[i]
-    params_dict["Mi_ss$(i)"]   = M_ss[i]
-    params_dict["PL_ss$(i)"]   = PL_ss[i]
-end
-
-# Also save rhoi_val (used in mod file directly — may not be in SMM output)
-if !haskey(params_dict, "rhoi_val")
-    params_dict["rhoi_val"] = rhoi_val
-end
-
-params_mat_path = joinpath(MOD_DIR, "params_val_ul.mat")
-matwrite(params_mat_path, params_dict)
-@printf "--- Saved params_val_ul.mat to %s ---\n\n" params_mat_path
+params_mod_path = write_params_mod(MOD_DIR, params_nt)
+@printf "--- Wrote params_jl.mod to %s ---\n\n" params_mod_path
 
 
 # =========================================================================== #
-#  RUN DYNARE (via Octave — free)                                              #
+#  RUN DYNARE.jl  — pure Julia, no MATLAB, no Octave                         #
 # =========================================================================== #
 
-@printf "--- Running Dynare ---\n"
-@printf "  Dynare path : %s\n" DYNARE_MATLAB_PATH
-@printf "  Octave exe  : %s\n" OCTAVE_EXE
-@printf "  Model dir   : %s\n\n" MOD_DIR
+@printf "--- Running Dynare.jl ---\n"
+@printf "  Model dir : %s\n\n" MOD_DIR
 
-run_dynare_octave(MOD_DIR, "NK_SOE_lev_gap2", DYNARE_MATLAB_PATH; octave_exe=OCTAVE_EXE)
-
-
-# =========================================================================== #
-#  LOAD DYNARE RESULTS                                                         #
-# =========================================================================== #
-
-@printf "--- Loading Dynare results ---\n"
-(oo, M_model, options_dyn) = load_dynare_results(MOD_DIR, "NK_SOE_lev_gap2")
-
-# Helper to safely access nested Dict/struct from matread
-function get_nested(d, keys...; default=nothing)
-    v = d
-    for k in keys
-        v isa AbstractDict || return default
-        v = get(v, k, default)
-        v === nothing && return default
-    end
-    return v
+# @dynare must be called with the path to the .mod file (without extension).
+# It reads params_jl.mod via @#include before solving the model.
+context = cd(MOD_DIR) do
+    @dynare "NK_SOE_lev_gap2"
 end
 
-ss_ok  = let ss = get_nested(oo, "steady_state")
-             ss !== nothing && !any(isnan, ss) && !any(isinf, ss)
-         end
-bk_ok  = false
-nsfwrd = get_nested(M_model, "nsfwrd"; default=0)
-eigval = get_nested(oo, "dr", "eigval")
-if eigval !== nothing
-    bk_ok = sum(abs.(eigval) .> 1.000001) == nsfwrd
-end
-sim_ok = get_nested(oo, "endo_simul") !== nothing
-
-@printf "--- Dynare results ---\n"
-@printf "  Steady state   : %s\n" (ss_ok  ? "OK" : "FAILED")
-@printf "  Blanchard-Kahn : %s\n" (bk_ok  ? "OK" : "FAILED")
-@printf "  Simulation     : %s\n\n" (sim_ok ? "OK" : "FAILED")
-
-if !sim_ok
-    @printf "Simulation failed – aborting.\n"
-    exit(1)
-end
+@printf "\n--- Dynare.jl completed ---\n\n"
 
 
 # =========================================================================== #
-#  EXTRACT SIMULATION RESULTS                                                  #
+#  EXTRACT RESULTS FROM DYNARE.jl CONTEXT                                     #
+#                                                                              #
+#  Dynare.jl stores everything in the `context` object:                       #
+#    Steady state    : context.results.model_results[1].trends                #
+#                      .endogenous_steady_state                                #
+#    Decision rule   : context.results.model_results[1].linearrationalexpectations #
+#                      .g1_1  (state feedback ≈ ghx)                          #
+#                      .g1_2  (shock impact  ≈ ghu)                           #
+#    Simulations     : context.results.model_results[1].simulations[1].data   #
+#    Variable names  : get_endogenous(context.symboltable)                     #
+#    Shock cov matrix: context.models[1].Sigma_e                               #
 # =========================================================================== #
 
-endo_simul = get_nested(oo, "endo_simul")
-endo_names = let en = get_nested(M_model, "endo_names")
-                 en === nothing ? String[] : vec(string.(en))
-             end
+mr        = context.results.model_results[1]
+endo_names = Dynare.get_endogenous(context.symboltable)
 
-# Build a Dict: variable_name => time series
-endo_dict = Dict{String, Vector{Float64}}()
-if endo_simul !== nothing && !isempty(endo_names)
-    nEndo, nT = size(endo_simul)
-    if nEndo != length(endo_names) && nT == length(endo_names)
-        endo_simul = endo_simul'
-        nEndo, nT  = size(endo_simul)
-    end
-    for (k, nm) in enumerate(endo_names)
-        nm_stripped = strip(nm)
-        if k <= nEndo
-            endo_dict[nm_stripped] = vec(endo_simul[k, :])
-        end
-    end
-end
+# Steady state vector (one value per endogenous variable, declaration order)
+ss_vec    = mr.trends.endogenous_steady_state
+
+# Decision rule (first-order approximation)
+# g1_1 : n_endo × n_states  (≈ oo_.dr.ghx in MATLAB)
+# g1_2 : n_endo × n_shocks  (≈ oo_.dr.ghu in MATLAB)
+lre = mr.linearrationalexpectations
+ghx_jl = lre.g1_1
+ghu_jl = lre.g1_2
+Σe_jl  = context.models[1].Sigma_e
+
+ss_ok  = !any(isnan, ss_vec) && !any(isinf, ss_vec)
+sim_ok = !isempty(mr.simulations)
+
+@printf "--- Dynare.jl results ---\n"
+@printf "  Steady state : %s\n" (ss_ok  ? "OK" : "FAILED")
+@printf "  Simulation   : %s\n\n" (sim_ok ? "OK" : "FAILED")
+
+(!ss_ok || !sim_ok) && (@printf "Model failed – aborting.\n"; exit(1))
+
+# Build variable-name → index map
+endo_idx = Dict(nm => i for (i, nm) in enumerate(endo_names))
+
+# Simulation time series (AxisArrayTable → named-column table)
+sim_data  = mr.simulations[1].data   # AxisArrayTable, rows=periods, cols=variables
+# Access as a matrix: columns correspond to endo_names order
+sim_matrix = Matrix(sim_data)        # periods × n_endo
 
 
 # =========================================================================== #
@@ -788,59 +727,45 @@ std_Y_m  = fill(NaN, nsec)
 std_PH_m = fill(NaN, nsec)
 std_L_m  = fill(NaN, nsec)
 
-ghx = get_nested(oo, "dr", "ghx")
-ghu = get_nested(oo, "dr", "ghu")
-Σe  = get_nested(M_model, "Sigma_e")
-ys  = get_nested(oo, "dr", "ys")
-order_var  = get_nested(oo, "dr", "order_var")
-state_var  = get_nested(oo, "dr", "state_var")
-
 rc_lyap_ok = false
-if ghx !== nothing && ghu !== nothing && Σe !== nothing
-    try
-        T_rc  = Float64.(ghx)
-        R_rc  = Float64.(ghu)
-        Qe_rc = Float64.(Σe)
-        n_st  = size(T_rc, 2)
-        ov    = Int.(vec(order_var))
-        sv    = Int.(vec(state_var))
+try
+    # State-variable indices in the DR ordering
+    n_state = size(ghx_jl, 2)
+    n_endo  = length(endo_names)
 
-        # Row indices of state variables in the DR ordering
-        state_rows = [findfirst(==(sv[k]), ov) for k in 1:n_st]
-        A_rc  = T_rc[state_rows, :]
-        B_rc  = R_rc[state_rows, :]
-        P_st  = local_dlyap(A_rc, B_rc * Qe_rc * B_rc')
-        Γ_rc  = T_rc * P_st * T_rc' + R_rc * Qe_rc * R_rc'
-        Γ_rc  = (Γ_rc + Γ_rc') / 2
+    # Lyapunov: unconditional variance of all endogenous variables
+    # P_state = ghx * P_state * ghx' + ghu * Σe * ghu'
+    ghx_s = ghx_jl[1:n_state, :]   # state rows of ghx
+    ghu_s = ghu_jl[1:n_state, :]   # state rows of ghu
+    P_st  = local_dlyap(ghx_s, ghu_s * Σe_jl * ghu_s')
+    Γ_rc  = ghx_jl * P_st * ghx_jl' + ghu_jl * Σe_jl * ghu_jl'
+    Γ_rc  = (Γ_rc + Γ_rc') / 2
 
-        for i in 1:nsec
-            for (kv, vn) in enumerate(["Y_$(i)", "PH_$(i)", "L_$(i)"])
-                dec_idx = findfirst(==(strip(vn)), strip.(endo_names))
-                dec_idx === nothing && continue
-                dr_idx  = findfirst(==(dec_idx), ov)
-                dr_idx  === nothing && continue
-                ss_val  = abs(ys[dec_idx])
-                ss_val < 1e-12 && (ss_val = 1.0)
-                pstd    = sqrt(max(Γ_rc[dr_idx, dr_idx], 0.0)) / ss_val
-                kv == 1 && (std_Y_m[i]  = pstd)
-                kv == 2 && (std_PH_m[i] = pstd)
-                kv == 3 && (std_L_m[i]  = pstd)
-            end
-        end
-        rc_lyap_ok = true
-    catch e
-        @printf "  [rank corr] Lyapunov approach failed (%s); falling back to simulation std devs.\n" string(e)
-    end
-end
-
-# Fallback: simulation-based std devs
-if !rc_lyap_ok && !isempty(endo_dict)
-    ys_arr = ys === nothing ? nothing : Float64.(vec(ys))
     for i in 1:nsec
         for (kv, vn) in enumerate(["Y_$(i)", "PH_$(i)", "L_$(i)"])
-            !haskey(endo_dict, vn) && continue
-            ts     = endo_dict[vn]
-            ss_val = ys_arr === nothing ? 1.0 : abs(ys_arr[findfirst(==(vn), endo_names)])
+            dr_idx = get(endo_idx, vn, nothing)
+            dr_idx === nothing && continue
+            ss_val = abs(ss_vec[dr_idx])
+            ss_val < 1e-12 && (ss_val = 1.0)
+            pstd = sqrt(max(Γ_rc[dr_idx, dr_idx], 0.0)) / ss_val
+            kv == 1 && (std_Y_m[i]  = pstd)
+            kv == 2 && (std_PH_m[i] = pstd)
+            kv == 3 && (std_L_m[i]  = pstd)
+        end
+    end
+    rc_lyap_ok = true
+catch e
+    @printf "  [rank corr] Lyapunov failed (%s); using simulation std devs.\n" string(e)
+end
+
+# Fallback: simulation std devs
+if !rc_lyap_ok
+    for i in 1:nsec
+        for (kv, vn) in enumerate(["Y_$(i)", "PH_$(i)", "L_$(i)"])
+            col = get(endo_idx, vn, nothing)
+            col === nothing && continue
+            ts     = sim_matrix[:, col]
+            ss_val = abs(ss_vec[col])
             ss_val < 1e-12 && (ss_val = 1.0)
             pstd   = std(ts) / ss_val
             kv == 1 && (std_Y_m[i]  = pstd)

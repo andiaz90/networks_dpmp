@@ -1,76 +1,48 @@
-# NK-IOSOE Julia/Dynare — Free MATLAB Replacement
+# NK-IOSOE — Julia / Dynare.jl
 
-This folder contains a complete Julia translation of `main_SOE_gap.m` for the
-**12-sector New Keynesian Input-Output Small Open Economy (NK-IOSOE)** model
-of the Chilean economy.
+Pure Julia implementation of the 12-sector **New Keynesian Input-Output Small
+Open Economy** model for Chile.  
+**No MATLAB. No Octave. No licenses required.**
 
-Run the full simulation pipeline without MATLAB by installing two free tools:
-**Julia** and **Octave + Dynare**.
+Uses [Dynare.jl](https://github.com/DynareJulia/Dynare.jl) — the official Julia
+rewrite of Dynare maintained by the same team — to solve and simulate the model.
 
 ---
 
-## Quick Start (3 steps)
+## Quick Start (2 steps)
 
 ### Step 1 — Install Julia
 
-Download from <https://julialang.org/downloads/> (≥ 1.9).
+Download Julia ≥ 1.9 from <https://julialang.org/downloads/>.
 
-### Step 2 — Install Octave and Dynare
-
-**Octave** is a free, drop-in MATLAB replacement:
-
-| OS | Command |
-|----|---------|
-| Linux (Ubuntu/Debian) | `sudo apt install octave` |
-| macOS (Homebrew) | `brew install octave` |
-| Windows | Download from <https://octave.org/download> |
-
-**Dynare** — install for Octave use:
-
-| OS | Instructions |
-|----|-------------|
-| Linux (Ubuntu) | `sudo apt install dynare` (or <https://dynare.org/download>) |
-| macOS | Download `.pkg` from <https://dynare.org/download>; choose "Octave" version |
-| Windows | Download installer from <https://dynare.org/download>; choose "Octave" version |
-
-After installing Dynare, note the path to its `matlab/` subfolder:
-- Linux: `/usr/share/dynare/matlab`
-- macOS: `/Applications/Dynare/6.x/matlab`
-- Windows: `C:\Program Files\Dynare\6.x\matlab`
-
-### Step 3 — Install Julia packages and run
+### Step 2 — Install packages and run
 
 ```bash
-# From this folder:
+# Navigate to this folder
 cd Model/julia_dynare
 
-# Install all Julia dependencies (first time only, takes ~2 min)
+# Install all Julia dependencies (first time only, ~3 min including Dynare.jl)
 julia --project=. -e "import Pkg; Pkg.instantiate()"
 
-# Edit DYNARE_MATLAB_PATH in main_SOE_gap.jl to match your install,
-# or set the environment variable:
-export DYNARE_HOME="/usr/share/dynare/matlab"   # Linux
-# export DYNARE_HOME="/Applications/Dynare/6.4/matlab"  # macOS
-# set DYNARE_HOME=C:\Program Files\Dynare\6.4\matlab     # Windows (cmd)
-
-# Run the model
+# Run the model (default: Exercise 2 — Manufacturing TFP shock)
 julia --project=. main_SOE_gap.jl
 ```
+
+Dynare.jl downloads its own preprocessor binary automatically — nothing else
+to install.
 
 ---
 
 ## Data Files Required
 
-The script searches for these files in common locations (sibling `modelo_chile/`
-folder or via `NKIOSOE_DATA_DIR` environment variable):
+The script searches for these files next to itself, or in the sibling
+`modelo_chile/` folder, or wherever `NKIOSOE_DATA_DIR` points:
 
-| File | Notes |
-|------|-------|
+| File | Note |
+|------|------|
 | `Stata_to_excel_few_industries_chile.xlsx` | **Save the original `.xls` as `.xlsx`** (Excel → Save As → `.xlsx`) |
 | `IO_2021_chile.csv` | 12×12 input-output matrix |
-| `fpa_vector_few_industries_chile.csv` | Price adjustment frequencies |
-
-Set `NKIOSOE_DATA_DIR` if files are elsewhere:
+| `fpa_vector_few_industries_chile.csv` | Price-adjustment frequencies |
 
 ```bash
 export NKIOSOE_DATA_DIR="/path/to/your/data"
@@ -80,7 +52,7 @@ export NKIOSOE_DATA_DIR="/path/to/your/data"
 
 ## Selecting an Exercise
 
-Edit the `EXERCISE` variable near the top of `main_SOE_gap.jl`:
+Edit `EXERCISE` near the top of `main_SOE_gap.jl`:
 
 ```julia
 EXERCISE = 0   # 0 = Baseline (all shocks, matches SMM calibration)
@@ -91,77 +63,89 @@ EXERCISE = 0   # 0 = Baseline (all shocks, matches SMM calibration)
 
 ---
 
+## How It Works
+
+```
+Julia (main_SOE_gap.jl)
+  ├─ Loads data (XLSX.jl, CSV.jl)
+  ├─ Solves outer steady state (NLsolve.jl)
+  ├─ Writes mod/params_jl.mod  ← all parameter values, one line per param
+  │
+  └─ @dynare "NK_SOE_lev_gap2"   ← Dynare.jl reads the .mod file
+       ├─ Preprocessor: expands @#include "params_jl.mod", @#for loops
+       ├─ Solves model equations symbolically
+       ├─ Computes first-order perturbation (stoch_simul order=1)
+       └─ Returns context object with results
+  
+  ├─ Extracts from context:
+  │    context.results.model_results[1].trends.endogenous_steady_state
+  │    context.results.model_results[1].linearrationalexpectations.g1_1  (≈ ghx)
+  │    context.results.model_results[1].linearrationalexpectations.g1_2  (≈ ghu)
+  │    context.results.model_results[1].simulations[1].data
+  │    context.models[1].Sigma_e
+  │
+  └─ Computes rank correlations (Lyapunov equation) and saves results
+```
+
+The `.mod` files in `mod/` are unchanged from the MATLAB version — Dynare.jl
+reads them natively.  The only modification is replacing `load params_val_ul.mat`
+with `@#include "params_jl.mod"` (a Julia-generated plain-text file).
+
+---
+
 ## File Structure
 
 ```
 julia_dynare/
-├── Project.toml                  # Julia package dependencies
-├── README.md                     # This file
-├── main_SOE_gap.jl              # Main script — run this
-├── steady_ntwsoe.jl             # Outer steady-state residuals (outer NLsolve)
-├── steady_ntwsoe_system.jl      # Inner production-block system (inner NLsolve)
-├── utils.jl                     # Helpers: Spearman, Lyapunov, run_dynare_octave
-└── mod/                         # Dynare model files
-    ├── NK_SOE_lev_gap2.mod      # Main model (levels + output-gap version)
+├── Project.toml                 # Julia packages (] instantiate to install)
+├── README.md                    # This file
+├── main_SOE_gap.jl             # Main script — run this
+├── steady_ntwsoe.jl            # Outer steady-state residuals
+├── steady_ntwsoe_system.jl     # Inner production-block system
+├── utils.jl                    # write_params_mod, Spearman, Lyapunov
+└── mod/                        # Dynare model files
+    ├── NK_SOE_lev_gap2.mod     # Main model (modified: @#include instead of load)
     ├── definition_block_nsec.mod
     ├── definition_block_io.mod
     ├── definition_block_lab.mod
-    └── solution_block.mod
+    ├── solution_block.mod
+    └── params_jl.mod           # auto-generated by main_SOE_gap.jl
 ```
 
 ---
 
-## How It Works
+## Comparison: MATLAB vs Julia
 
-| Step | MATLAB original | Julia equivalent |
-|------|-----------------|-----------------|
-| Data I/O | `readtable` (Excel) | `XLSX.readxlsx` |
-| CSV I/O | `readmatrix` | `CSV.read` |
-| `.mat` files | `load` / `save` | `MAT.matread` / `MAT.matwrite` |
-| Nonlinear solve | `fsolve` | `NLsolve.nlsolve` (trust-region) |
-| Dynare run | `dynare model.mod` | System call to Octave + Dynare |
-| Spearman corr | `corr(..., 'Spearman')` | `StatsBase.corspearman` |
-| Lyapunov eq | `dlyap` | `local_dlyap` (doubling algorithm) |
-| Parameter save | `save params_val_ul.mat` | `MAT.matwrite` (v5 format) |
-
-The Dynare `.mod` files are **unchanged** — Julia saves `params_val_ul.mat` that
-Dynare's `load params_val_ul.mat` reads, exactly as in the MATLAB workflow.
-
----
-
-## SMM Estimates
-
-If `smm_estimates.mat` (or `smm_best_so_far.mat`) exists in the `modelo_chile/`
-sibling folder, Julia loads it automatically and overrides the default parameter
-values — identical behavior to the MATLAB script.
-
----
-
-## Environment Variables Reference
-
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `DYNARE_HOME` | `(edit in script)` | Path to Dynare's `matlab/` subfolder |
-| `OCTAVE_EXE` | `octave` | Octave executable name/path |
-| `NKIOSOE_DATA_DIR` | `(auto-search)` | Folder containing the three data files |
-| `SMM_EXERCISE` | `(not set)` | Forces exercise index; used by SMM estimation |
+| MATLAB original | Julia equivalent |
+|-----------------|-----------------|
+| `readtable` (Excel) | `XLSX.readxlsx` |
+| `readmatrix` (CSV) | `CSV.read` |
+| `load smm_estimates.mat` | `MAT.matread` |
+| `fsolve` | `NLsolve.nlsolve` (trust-region) |
+| `save params_val_ul.mat` | `write_params_mod` → `params_jl.mod` (plain text) |
+| `dynare NK_SOE_lev_gap2.mod` | `@dynare "NK_SOE_lev_gap2"` |
+| `oo_.dr.ghx` / `oo_.dr.ghu` | `context.results.model_results[1].linearrationalexpectations.g1_1` / `.g1_2` |
+| `oo_.dr.ys` | `context.results.model_results[1].trends.endogenous_steady_state` |
+| `M_.Sigma_e` | `context.models[1].Sigma_e` |
+| `oo_.endo_simul` | `context.results.model_results[1].simulations[1].data` |
+| `dlyap` | `local_dlyap` (doubling algorithm in utils.jl) |
+| `corr(...,'Spearman')` | `StatsBase.corspearman` |
 
 ---
 
 ## Troubleshooting
 
-**"Required data file not found"**
-- Convert `.xls` → `.xlsx` and place next to this script or set `NKIOSOE_DATA_DIR`.
+**"Required data file not found"**  
+Convert `.xls` → `.xlsx` and place it next to `main_SOE_gap.jl`, or set `NKIOSOE_DATA_DIR`.
 
-**"Dynare results file not found"**
-- Check that Octave and Dynare are on your PATH.
-- Verify `DYNARE_HOME` points to the correct `matlab/` subfolder.
-- Run `octave --eval "addpath('$DYNARE_HOME'); dynare('mod/NK_SOE_lev_gap2.mod')"` manually to see error output.
+**Dynare.jl preprocessor errors (`@#include "params_jl.mod" not found`)**  
+Run `main_SOE_gap.jl` from start — it always writes `params_jl.mod` before calling `@dynare`.
 
-**"Outer steady-state solver did not converge"**
-- The model is at the calibrated parameter values from `params_val.mat`.
-  If parameters were changed, the initial guesses may need adjustment.
+**Blanchard-Kahn conditions not satisfied**  
+Usually a parameter calibration issue.  Check that the steady state converged (`ss_ok = true`) and that `bbar_val` and `Rworld_ss_val` are consistent.
 
-**Julia package errors**
-- Run `julia --project=. -e "import Pkg; Pkg.status()"` to verify all packages are installed.
-- Run `julia --project=. -e "import Pkg; Pkg.instantiate()"` to install missing ones.
+**Julia package errors**  
+```bash
+julia --project=. -e "import Pkg; Pkg.status()"    # list installed packages
+julia --project=. -e "import Pkg; Pkg.instantiate()" # install missing ones
+```
