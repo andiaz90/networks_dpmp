@@ -298,6 +298,7 @@ pib_error_msg = ""   # captured here so the validation error always shows it
 
 if isfile(fname_pib)
     try
+        global pib_error_msg   # Julia soft-scoping: declare global before any *= in this block
         # ------------------------------------------------------------------ #
         # Read the whole sheet as a Matrix{Any} in ONE call.                 #
         # This avoids ALL cell-by-cell iteration issues and the BCCh blank-  #
@@ -436,10 +437,31 @@ if isfile(fname_pib)
         qt_y = qt_y_pib
 
     catch e
-        pib_error_msg *= "  EXCEPTION: $(sprint(showerror, e))\n"
-        @printf "  EXCEPTION in pib_sectorial_bc.xlsx loading:\n  %s\n" sprint(showerror, e)
-        @printf "  → y_d will be NaN. Stack:\n"
-        showerror(stdout, e, catch_backtrace()); println()
+        global pib_error_msg   # needed: Julia soft-scoping requires explicit global in catch block
+
+        err_str = sprint(showerror, e)
+        pib_error_msg *= "  EXCEPTION: $err_str\n"
+
+        @printf "\n  %s\n" repeat("!", 58)
+        @printf "  EXCEPTION reading pib_sectorial_bc.xlsx:\n  %s\n" err_str
+        @printf "  %s\n\n" repeat("!", 58)
+
+        # ---- Specific diagnosis for common XLSX.jl failures ---- #
+        if occursin("x:workbook", err_str) || occursin("Malformed", err_str)
+            @printf """
+  DIAGNOSIS: pib_sectorial_bc.xlsx uses a non-standard XML namespace
+  prefix ('x:workbook' instead of 'workbook') that XLSX.jl cannot read.
+
+  ONE-TIME FIX (30 seconds):
+    1. Open  Data/pib_sectorial_bc.xlsx  in Excel (or LibreOffice Calc)
+    2. File → Save As → Excel Workbook (.xlsx)  [overwrite the same file]
+    3. Re-run compute_data_moments.jl
+
+  This rewrites the XML without the namespace prefix — XLSX.jl will
+  then read it correctly.
+
+"""
+        end
     end
 else
     pib_error_msg = "  File not found: $fname_pib\n"
