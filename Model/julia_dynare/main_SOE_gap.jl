@@ -882,7 +882,9 @@ sec_results_for_figs = DataFrame(
     std_Y   = std_Y_m, std_PH = std_PH_m, std_L = std_L_m,
 )
 
-generate_figures(
+# include() inside _main() defines generate_figures in a newer world —
+# invokelatest bridges the world-age gap.
+Base.invokelatest(generate_figures;
     MOD_DIR        = MOD_DIR,
     DATA_DIR       = DATA_DIR,
     SCRIPT_DIR     = SCRIPT_DIR,
