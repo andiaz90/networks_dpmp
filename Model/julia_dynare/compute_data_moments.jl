@@ -305,7 +305,7 @@ if isfile(fname_pib)
         # ------------------------------------------------------------------ #
         wb          = XLSX.readxlsx(fname_pib)
         sheet_names = XLSX.sheetnames(wb)
-        pib_error_msg *= "  Sheets in file: $(join(sheet_names, \", \"))\n"
+        pib_error_msg *= "  Sheets in file: " * join(sheet_names, ", ") * "\n"
         @printf "  Sheets in file: %s\n" join(sheet_names, ", ")
 
         ws      = "Cuadro" in sheet_names ? wb["Cuadro"] : wb[1]
