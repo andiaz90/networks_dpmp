@@ -141,74 +141,90 @@ CSV.write(joinpath(MOD_DIR, "dynare_sigma_e.csv"),
 CSV.write(joinpath(MOD_DIR, "dynare_state_rows.csv"),
     DataFrame(state_row = state_rows))
 
-# Simulated paths (if available)
-if !isempty(mr.simulations)
-    sim_data = Matrix{Float64}(mr.simulations[1].data)  # periods × variables
-    df_sim   = DataFrame(sim_data, [Symbol(n) for n in endo_names])
-    CSV.write(joinpath(MOD_DIR, "dynare_sim.csv"), df_sim)
-    @info "Simulation saved ($(size(sim_data,1)) periods × $(size(sim_data,2)) variables)"
-else
-    @info "No simulation data"
-end
+# Simulated paths (skip — not needed; we compute IRFs analytically below)
+@info "Skipping stochastic simulation (not required for IRF/variance analysis)"
 
-# ---- IRFs (impulse response functions) ----
-# Diagnose mr.irfs type first so we can handle any Dynare.jl 0.10.x structure
-@info "mr.irfs type: $(typeof(mr.irfs))  isempty: $(isempty(mr.irfs))"
+# =========================================================================== #
+#  COMPUTE IRFs ANALYTICALLY FROM DECISION RULE (bypasses stoch_simul/gees) #
+#                                                                              #
+#  On Apple Silicon (aarch64), Dynare's stoch_simul IRF computation fails    #
+#  because LAPACK's gees() with select function is not available on ARM.     #
+#  We compute IRFs directly from the first-order decision rule:              #
+#                                                                              #
+#  Let A = state rows of g1_1  (n_states × n_states, transition)             #
+#      B = state rows of g1_2  (n_states × n_shocks,  impact)                #
+#  At horizon 1: state  x_1 = B[:,k]  for shock k                           #
+#                model  y_1 = g1_1 * 0 + g1_2[:,k]  = g1_2[:,k]             #
+#  At horizon h: state  x_h = A * x_{h-1}                                   #
+#                model  y_h = g1_1 * x_{h-1}                                 #
+#                                                                              #
+#  This is exact (not approximate) for first-order perturbation.             #
+# =========================================================================== #
+
+@info "Computing IRFs analytically from decision rule (bypasses gees/ARM issue)"
 
 irf_rows = NamedTuple{(:variable, :shock, :period, :value), Tuple{String,String,Int,Float64}}[]
 
-if !isempty(mr.irfs)
-    # Determine structure: Dict or AxisArray?
-    first_val = first(values(mr.irfs))
-    @info "  first shock value type: $(typeof(first_val))"
+try
+    n_irf    = 150         # horizon matches stoch_simul(irf=150)
+    n_endo_  = size(g1_1, 1)
+    n_states = size(g1_1, 2)
+    n_shocks = size(g1_2, 2)
 
-    try
-        for (shock_name, var_data) in mr.irfs
-            if var_data isa AbstractDict
-                # Dict{varname => Vector}
-                for (var_name, irf_vec) in var_data
-                    for (t, v) in enumerate(irf_vec)
-                        push!(irf_rows, (variable=string(var_name), shock=string(shock_name),
-                                         period=t, value=Float64(v)))
-                    end
-                end
+    # Identify state-variable rows (backward-looking variables in g1_1)
+    # context.models[1].i_bkwrd_b gives the 1-based row indices
+    sr = state_rows   # already extracted above
+
+    A = g1_1[sr, :]   # n_states × n_states  (transition matrix)
+    B = g1_2[sr, :]   # n_states × n_shocks  (impact matrix)
+
+    # Exogenous variable names from the model
+    exo_names = string.(Dynare.get_exogenous(context.symboltable))
+    @info "  Computing IRFs for $(n_shocks) shock(s): $(join(exo_names, ", "))"
+
+    for k in 1:n_shocks
+        shock_name = k <= length(exo_names) ? exo_names[k] : "shock_$k"
+        x = zeros(n_states)    # state vector (starts at SS = 0 deviation)
+        bk = B[:, k]           # impact of shock k on states at t=1
+
+        for h in 1:n_irf
+            if h == 1
+                y_h = g1_2[:, k]       # direct impact: y_1 = g1_2 * e_k
+                x   = bk               # state after shock
             else
-                # AxisArrayTable or Matrix: rows=periods, cols=variables
-                mat = Matrix{Float64}(var_data)
-                vnames = string.(names(var_data))   # column names = variable names
-                for (ci, vn) in enumerate(vnames)
-                    for t in 1:size(mat, 1)
-                        push!(irf_rows, (variable=vn, shock=string(shock_name),
-                                         period=t, value=mat[t, ci]))
-                    end
+                y_h = g1_1 * x         # propagation: y_h = g1_1 * x_{h-1}
+                x   = A * x            # update state
+            end
+
+            # Store percentage deviations (scaled by SS; skip near-zero SS)
+            for (i, vn) in enumerate(endo_names)
+                ss_val = abs(ss_vec[i])
+                if ss_val > 1e-10
+                    push!(irf_rows, (variable=vn, shock=shock_name,
+                                     period=h, value=100.0 * y_h[i] / ss_val))
                 end
             end
         end
-    catch e
-        @warn "IRF extraction failed: $e"
     end
 
-    if !isempty(irf_rows)
-        df_irfs = DataFrame(irf_rows)
-        CSV.write(joinpath(MOD_DIR, "dynare_irfs.csv"), df_irfs)
-        @info "IRFs saved: $(length(mr.irfs)) shock(s), $(length(unique(df_irfs.variable))) variable(s)"
-    else
-        @warn "IRF extraction produced no rows despite non-empty mr.irfs"
-        CSV.write(joinpath(MOD_DIR, "dynare_irfs.csv"),
-                  DataFrame(variable=String[], shock=String[], period=Int[], value=Float64[]))
-    end
-else
-    @info "No IRF data in mr.irfs — stoch_simul may not have completed"
+    df_irfs = DataFrame(irf_rows)
+    CSV.write(joinpath(MOD_DIR, "dynare_irfs.csv"), df_irfs)
+    @info "IRFs saved: $(n_shocks) shock(s), $(length(endo_names)) variable(s), $(n_irf) periods"
+
+catch e
+    @warn "Analytical IRF computation failed: $e"
     CSV.write(joinpath(MOD_DIR, "dynare_irfs.csv"),
               DataFrame(variable=String[], shock=String[], period=Int[], value=Float64[]))
 end
 
-# Also save endogenous_variance if available (unconditional variance matrix)
+# ---- Save endogenous_variance (unconditional variance matrix Γ) ----------- #
+# Available even when stoch_simul fails on aarch64.
+# Used in main_SOE_gap.jl for Lyapunov-based rank correlations.
 if isdefined(mr.linearrationalexpectations, :endogenous_variance)
     ev = mr.linearrationalexpectations.endogenous_variance
     if !isnothing(ev) && !isempty(ev)
         ev_mat = Matrix{Float64}(ev)
-        @info "endogenous_variance size: $(size(ev_mat))"
+        @info "endogenous_variance size: $(size(ev_mat)) — saving for rank correlations"
         CSV.write(joinpath(MOD_DIR, "dynare_endogenous_variance.csv"),
                   DataFrame(ev_mat, [Symbol("c$i") for i in 1:size(ev_mat,2)]))
     end

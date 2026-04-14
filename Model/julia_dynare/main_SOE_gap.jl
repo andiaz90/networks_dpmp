@@ -775,21 +775,24 @@ std_L_m  = fill(NaN, nsec)
 
 rc_lyap_ok = false
 try
-    # g1_1 : n_endo × n_states  (all endogenous variables, columns = state vars)
-    # g1_2 : n_endo × n_shocks
-    #
-    # Identify which ROWS of g1_1 correspond to state (backward-looking) variables.
-    # state_rows was read from dynare_state_rows.csv (written by the subprocess)
-
-    ghx_s = ghx_jl[state_rows, :]   # n_states × n_states  (transition matrix)
-    ghu_s = ghu_jl[state_rows, :]   # n_states × n_shocks  (impact matrix)
-
-    # Solve  P = ghx_s * P * ghx_s' + ghu_s * Σe * ghu_s'
-    P_st = local_dlyap(ghx_s, ghu_s * Σe_jl * ghu_s')
-
-    # Unconditional variance of all endogenous variables
-    Γ_rc = ghx_jl * P_st * ghx_jl' + ghu_jl * Σe_jl * ghu_jl'
-    Γ_rc = (Γ_rc + Γ_rc') / 2
+    # Primary: use endogenous_variance.csv from Dynare.jl (lre.endogenous_variance).
+    # This is the exact unconditional variance-covariance matrix Γ (491×491),
+    # computed by Dynare.jl's own solver. It's available even when stoch_simul
+    # fails on ARM (aarch64) due to the gees/Schur select issue.
+    ev_file = joinpath(MOD_DIR, "dynare_endogenous_variance.csv")
+    if isfile(ev_file)
+        ev_df = CSV.read(ev_file, DataFrame)
+        Γ_rc  = Matrix{Float64}(ev_df)
+        Γ_rc  = (Γ_rc + Γ_rc') / 2
+        @printf "  Using Dynare.jl endogenous_variance (%dx%d)\n" size(Γ_rc)...
+    else
+        # Fallback: solve Lyapunov ourselves (may fail on ARM with gees error)
+        ghx_s = ghx_jl[state_rows, :]
+        ghu_s = ghu_jl[state_rows, :]
+        P_st  = local_dlyap(ghx_s, ghu_s * Σe_jl * ghu_s')
+        Γ_rc  = ghx_jl * P_st * ghx_jl' + ghu_jl * Σe_jl * ghu_jl'
+        Γ_rc  = (Γ_rc + Γ_rc') / 2
+    end
 
     for i in 1:nsec
         for (kv, vn) in enumerate(["Y_$(i)", "PH_$(i)", "L_$(i)"])
