@@ -33,7 +33,7 @@ try
 catch
     import Pkg; Pkg.add("Dynare"); using Dynare
 end
-using CSV, DataFrames, LinearAlgebra
+using CSV, DataFrames, LinearAlgebra, Statistics
 
 # Change to the model directory so @dynare finds .mod and @#include files
 cd(MOD_DIR)
@@ -42,32 +42,12 @@ cd(MOD_DIR)
 # @dynare at TOP LEVEL — no function scope, no world-age issues
 context = @dynare "NK_SOE_lev_gap2"
 
-@info "Dynare solve complete — inspecting context structure"
-
-# =========================================================================== #
-#  Inspect Dynare.jl context to find the correct field names in v0.10.x      #
-# =========================================================================== #
+@info "Dynare solve complete — extracting results"
 
 mr         = context.results.model_results[1]
 endo_names = Dynare.get_endogenous(context.symboltable)
 n_endo     = length(endo_names)
-
-# Print context structure for debugging
-@info "context type: $(typeof(context))"
-@info "context fields: $(fieldnames(typeof(context)))"
-@info "mr type: $(typeof(mr))"
-@info "mr fields: $(fieldnames(typeof(mr)))"
-if isdefined(mr, :trends)
-    @info "mr.trends type: $(typeof(mr.trends))"
-    @info "mr.trends fields: $(fieldnames(typeof(mr.trends)))"
-    @info "mr.trends.endogenous_steady_state length: $(length(mr.trends.endogenous_steady_state))"
-end
-if isdefined(context, :work)
-    @info "context.work fields: $(fieldnames(typeof(context.work)))"
-    if isdefined(context.work, :steady_state)
-        @info "context.work.steady_state length: $(length(context.work.steady_state))"
-    end
-end
+@info "  $n_endo endogenous variables"
 
 # ---- Steady state ----
 # In Dynare.jl 0.10.x, the steady state is in mr.trends.endogenous_steady_state
@@ -75,35 +55,19 @@ end
 # With missing parameter declarations (now fixed), this should now be populated.
 # If still empty, fall back to context.work.initval_endogenous (user's initval).
 function get_ss(context, mr, n_endo)
-    # Primary: trends field (populated after successful stoch_simul solve)
-    if isdefined(mr, :trends) && length(mr.trends.endogenous_steady_state) == n_endo
+    # Primary: trends field (populated after successful stoch_simul steady state solve)
+    if length(mr.trends.endogenous_steady_state) == n_endo
         @info "SS from mr.trends.endogenous_steady_state"
         return Float64.(mr.trends.endogenous_steady_state)
     end
-    # Fallback 1: initval_endogenous from context.work
-    if isdefined(context, :work) && isdefined(context.work, :initval_endogenous)
-        v = context.work.initval_endogenous
-        if isa(v, AbstractVector) && length(v) == n_endo
-            @info "SS from context.work.initval_endogenous"
-            return Float64.(v)
-        end
+    # Fallback: initval_endogenous — the initval block values set by params_jl.mod.
+    # Confirmed present in context.work from diagnostic run.
+    v = context.work.initval_endogenous
+    if isa(v, AbstractVector) && length(v) == n_endo
+        @info "SS from context.work.initval_endogenous ($(sum(abs.(Float64.(v)) .> 1e-10)) non-zero)"
+        return Float64.(v)
     end
-    # Fallback 2: any non-boolean vector field of correct length on mr or lre
-    for obj in [mr, isdefined(mr, :linearrationalexpectations) ? mr.linearrationalexpectations : nothing]
-        obj === nothing && continue
-        for fname in fieldnames(typeof(obj))
-            v = getfield(obj, fname)
-            if isa(v, AbstractVector) && length(v) == n_endo
-                vf = Float64.(v)
-                # Skip boolean flags (stationary_variables has range [0,1] with integer values)
-                if any(x -> !(x ≈ 0.0 || x ≈ 1.0), vf) || std(vf) > 0.01
-                    @info "SS from $(typeof(obj)).$fname"
-                    return vf
-                end
-            end
-        end
-    end
-    @warn "Could not find steady state — returning zeros. Check that pi_ss, r_ss, etc. are declared in parameters block."
+    @warn "No SS of length $n_endo found — returning zeros"
     return zeros(n_endo)
 end
 
