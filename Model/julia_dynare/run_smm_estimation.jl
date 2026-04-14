@@ -102,7 +102,22 @@ function _main()
     @printf "  %s\n\n" ctx_path
     context = deserialize(ctx_path)
     n_endo  = length(Dynare.get_endogenous(context.symboltable))
-    @printf "  Context loaded: %d endogenous variables\n\n" n_endo
+    @printf "  Context loaded: %d endogenous variables\n" n_endo
+
+    # Validate — the NK-IOSOE model has 491 endogenous variables.
+    # A stale/wrong context file produces a mismatch here.
+    if n_endo < 400
+        @printf "\n  ERROR: context has only %d variables (expected ~491).\n" n_endo
+        @printf "  The context file is stale or from a different model.\n"
+        @printf "  Fix:\n"
+        @printf "    1. Delete the stale file:\n"
+        @printf "       rm %s\n" ctx_path
+        @printf "    2. Re-run main_SOE_gap.jl to generate a fresh context:\n"
+        @printf "       julia --project=. main_SOE_gap.jl\n"
+        @printf "    3. Then re-run estimation.\n\n"
+        error("Stale context file — $(n_endo) variables, expected ≥400. Delete and re-run main_SOE_gap.jl.")
+    end
+    @printf "\n"
 
     # ---- Step 3: Run SMM estimation ----------------------------------------
     @printf "--- Step 3: Running SMM estimation ---\n\n"
