@@ -7,15 +7,16 @@ HOW TO RUN:
   julia --project=. run_smm_estimation.jl
 
 WHAT IT DOES:
-  Step 1 — Compute data moments (skipped if CSVs already exist)
-  Step 2 — Run main_SOE_gap.jl with EXERCISE=0 (Baseline)
-            This computes the steady state, writes params_jl.mod,
-            runs Dynare, and saves the compiled context to
-            mod/nk_iosoe_context.jls
-  Step 3 — Load the context and run SMM estimation (CMA-ES)
-            Estimated parameters saved to Data/smm_estimates.csv
-  Step 4 — Re-run main_SOE_gap.jl (EXERCISE=0) with the estimates
-            to verify the moment fit
+  Step 1 — Verifies data moments exist (run bootstrap_csv.jl first if missing)
+  Step 2 — Loads the compiled Dynare context from mod/nk_iosoe_context.jls
+            (created automatically when main_SOE_gap.jl runs)
+  Step 3 — Runs SMM estimation (CMA-ES optimizer, ~100k model evaluations)
+  Step 4 — Saves Data/smm_estimates.csv for main_SOE_gap.jl to load
+
+NOTE ON APPLE SILICON (M1/M2/M3):
+  Dynare.jl's re-solve (compute_first_order_solution!) uses LAPACK gees
+  which is not available on ARM. The estimation must be run on Intel/x86.
+  On ARM, the pre-flight will print a clear error explaining this.
 
 ESTIMATED PARAMETERS (23-element vector θ):
   1   ilabcosts        aggregate labour adjustment cost
@@ -24,110 +25,97 @@ ESTIMATED PARAMETERS (23-element vector θ):
   4   log(kappaV)      log of import price adj. cost
   5   rho_om           AR persistence, goods-services shock
   6   sigma_om         std dev, goods-services shock
-  7   rho_A            AR persistence, TFP shocks
-  8–19 isigma_tfp_i   std dev, sector i TFP shock
+  7   rho_A            AR persistence, TFP shocks (common)
+  8–19 isigma_tfp_i   std dev of sector i TFP shock
   20  rho_pvstar       AR persistence, import price shock
   21  sigma_pvstar     std dev, import price shock
   22  rho_xi           AR persistence, preference shock
   23  sigma_xi         std dev, preference shock
 
 OUTPUT:
-  Data/smm_estimates.csv    — estimated θ (read by main_SOE_gap.jl)
+  Data/smm_estimates.csv    — estimated θ (auto-loaded by main_SOE_gap.jl)
   Data/smm_results.csv      — full moment-fit table
-  Data/smm_checkpoint.csv   — rolling best-so-far (warm start)
-
-WARM START:
-  If Data/smm_estimates.csv or Data/smm_checkpoint.csv already exists,
-  the optimizer starts from the previous best solution.
-  Delete those files to restart from scratch.
+  Data/smm_checkpoint.csv   — CMA-ES warm-start checkpoint
 """
 
+# =========================================================================== #
+#  Top-level: packages + includes (no world-age issues here)                  #
+# =========================================================================== #
+
+using CSV, DataFrames, Printf, Serialization, Dynare
+
 SCRIPT_DIR = @__DIR__
+DATA_DIR   = joinpath(abspath(SCRIPT_DIR, "..", ".."), "Data")
 
-# =========================================================================== #
-#  STEP 1: Check data moments                                                 #
-# =========================================================================== #
-
-using CSV, DataFrames, Printf
-
-DATA_DIR = joinpath(abspath(SCRIPT_DIR, "..", ".."), "Data")
-
-sec_ok = isfile(joinpath(DATA_DIR, "sectoral_moments.csv"))
-agg_ok = isfile(joinpath(DATA_DIR, "aggregate_moments.csv"))
-
-if !sec_ok || !agg_ok
-    @printf "--- Step 1: Computing data moments ---\n"
-    include(joinpath(SCRIPT_DIR, "compute_data_moments.jl"))
-else
-    @printf "--- Step 1: Data moments already available ---\n"
-    @printf "  %s\n" joinpath(DATA_DIR, "sectoral_moments.csv")
-    @printf "  %s\n\n" joinpath(DATA_DIR, "aggregate_moments.csv")
-end
-
-# =========================================================================== #
-#  STEP 2: Compile model with EXERCISE=0 (Baseline)                          #
-# =========================================================================== #
-
-context_file = joinpath(SCRIPT_DIR, "mod", "nk_iosoe_context.jls")
-
-if isfile(context_file)
-    @printf "--- Step 2: Compiled Dynare context already exists ---\n"
-    @printf "  %s\n\n" context_file
-    @printf "  (Delete this file and re-run to recompile with new parameters)\n\n"
-else
-    @printf "--- Step 2: Compiling model (EXERCISE=0, Baseline) ---\n"
-    @printf "  This runs main_SOE_gap.jl and takes ~3 minutes on first run.\n\n"
-
-    # Run main_SOE_gap.jl with EXERCISE=0 via subprocess to compile the model
-    julia_exe = joinpath(Sys.BINDIR, "julia")
-    project   = dirname(Base.active_project())
-    main_script = joinpath(SCRIPT_DIR, "main_SOE_gap.jl")
-
-    # Override EXERCISE to 0 via environment variable
-    ENV["SMM_EXERCISE"] = "0"
-    run(`$julia_exe --project=$project $main_script`)
-    delete!(ENV, "SMM_EXERCISE")
-
-    if !isfile(context_file)
-        error("""
-        Context file not found after running main_SOE_gap.jl:
-          $context_file
-        Something went wrong — check the output above for errors.
-        """)
-    end
-    @printf "\n--- Model compiled and context saved ---\n\n"
-end
-
-# =========================================================================== #
-#  STEP 3: Run SMM estimation                                                 #
-# =========================================================================== #
-
-@printf "--- Step 3: SMM Estimation ---\n\n"
-
-using Dynare, Serialization
-
-context = deserialize(context_file)
-@printf "  Context loaded: %d endogenous variables\n\n" length(Dynare.get_endogenous(context.symboltable))
-
+# Include all modules at TOP LEVEL so they share the same world
 include(joinpath(SCRIPT_DIR, "steady_ntwsoe_system.jl"))
 include(joinpath(SCRIPT_DIR, "steady_ntwsoe.jl"))
 include(joinpath(SCRIPT_DIR, "utils.jl"))
 include(joinpath(SCRIPT_DIR, "smm_model_moments.jl"))
 include(joinpath(SCRIPT_DIR, "smm_estimation.jl"))
 
-# All functions defined via include() are in a newer world than this script.
-# invokelatest bridges the world-age gap (same fix as in main_SOE_gap.jl).
-theta_hat, obj_hat, moments_hat = Base.invokelatest(smm_run, context)
 
 # =========================================================================== #
-#  STEP 4: Summary                                                            #
+#  _main() — wrapped for Julia 1.12 world-age compatibility                  #
 # =========================================================================== #
 
-@printf "\n%s\n" repeat("=", 60)
-@printf "  ESTIMATION COMPLETE\n"
-@printf "%s\n\n" repeat("=", 60)
-@printf "  Objective at θ̂:  %.6f\n" obj_hat
-@printf "  Estimates saved: %s\n" joinpath(DATA_DIR, "smm_estimates.csv")
-@printf "\n  Next step: re-run the model with the estimates applied:\n"
-@printf "    julia --project=. main_SOE_gap.jl   (EXERCISE=0)\n\n"
-@printf "  smm_estimates.csv is automatically loaded by main_SOE_gap.jl.\n\n"
+function _main()
+
+    @printf "\n%s\n" repeat("=", 60)
+    @printf "  SMM ESTIMATION — NK-IOSOE Chile Model\n"
+    @printf "%s\n\n" repeat("=", 60)
+
+    # ---- Step 1: Check data moments ----------------------------------------
+    sec_ok = isfile(joinpath(DATA_DIR, "sectoral_moments.csv"))
+    agg_ok = isfile(joinpath(DATA_DIR, "aggregate_moments.csv"))
+
+    if !sec_ok || !agg_ok
+        error("""
+        Data moment files not found in $(DATA_DIR).
+        Run bootstrap_csv.jl first to generate them from existing .mat files:
+          julia --project=. bootstrap_csv.jl
+        Or run compute_data_moments.jl to recompute from raw Excel/CSV sources.
+        """)
+    end
+    @printf "--- Step 1: Data moments OK ---\n"
+    @printf "  %s\n" joinpath(DATA_DIR, "sectoral_moments.csv")
+    @printf "  %s\n\n" joinpath(DATA_DIR, "aggregate_moments.csv")
+
+    # ---- Step 2: Load compiled Dynare context ------------------------------
+    context_file = joinpath(SCRIPT_DIR, "mod", "nk_iosoe_context.jls")
+    # Fallback: Dynare.jl's own cache
+    context_alt  = joinpath(SCRIPT_DIR, "mod", "NK_SOE_lev_gap2",
+                             "output", "NK_SOE_lev_gap2.jls")
+    ctx_path = isfile(context_file) ? context_file :
+               isfile(context_alt)  ? context_alt  : ""
+
+    if isempty(ctx_path)
+        error("""
+        Compiled Dynare context not found.
+        Run main_SOE_gap.jl first (EXERCISE=0) to compile the model:
+          julia --project=. main_SOE_gap.jl
+        Then re-run this script.
+        """)
+    end
+
+    @printf "--- Step 2: Loading context ---\n"
+    @printf "  %s\n\n" ctx_path
+    context = deserialize(ctx_path)
+    n_endo  = length(Dynare.get_endogenous(context.symboltable))
+    @printf "  Context loaded: %d endogenous variables\n\n" n_endo
+
+    # ---- Step 3: Run SMM estimation ----------------------------------------
+    @printf "--- Step 3: Running SMM estimation ---\n\n"
+    theta_hat, obj_hat, moments_hat = smm_run(context)
+
+    # ---- Step 4: Summary ---------------------------------------------------
+    @printf "\n%s\n  ESTIMATION COMPLETE\n%s\n\n" repeat("=",60) repeat("=",60)
+    @printf "  Objective at θ̂:  %.6f\n" obj_hat
+    @printf "  Estimates:  %s\n" joinpath(DATA_DIR, "smm_estimates.csv")
+    @printf "  Results:    %s\n" joinpath(DATA_DIR, "smm_results.csv")
+    @printf "\n  Apply estimates: re-run main_SOE_gap.jl (EXERCISE=0)\n"
+    @printf "  smm_estimates.csv is loaded automatically.\n\n"
+
+end  # function _main()
+
+Base.invokelatest(_main)
