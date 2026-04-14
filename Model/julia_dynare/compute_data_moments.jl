@@ -49,6 +49,29 @@ OUT_AGGREGATE = joinpath(DATA_DIR, "aggregate_moments.csv")
 
 function _main()   # wrapped in function so we can use `return` for early exit
 
+# =========================================================================== #
+#  FAST PATH: if CSV outputs already exist, load them and skip all xlsx work  #
+# =========================================================================== #
+if isfile(OUT_SECTORAL) && isfile(OUT_AGGREGATE)
+    @printf "\n%s\n  CSV moment files already exist — loading directly.\n" repeat("=",61)
+    @printf "  (Delete and re-run to recompute from raw Excel/CSV sources.)\n"
+    @printf "%s\n\n" repeat("=",61)
+
+    sec = CSV.read(OUT_SECTORAL,  DataFrame)
+    agg = CSV.read(OUT_AGGREGATE, DataFrame)
+
+    @printf "  %-20s  %8s  %8s  %8s\n" "Sector" "std(Y)" "std(PH)" "std(L)"
+    @printf "  %s\n" repeat("-", 50)
+    for r in eachrow(sec)
+        @printf "  %-20s  %8.4f  %8.4f  %8.4f\n" r.name r.std_Y r.std_PH r.std_L
+    end
+    agg_d = Dict(String(r.moment) => Float64(r.value) for r in eachrow(agg))
+    @printf "\n  std(GDP)=%.4f  std(pi)=%.4f  corr(GDP,pi)=%.4f\n" agg_d["std_GDP"] agg_d["std_pi"] agg_d["corr_GDPpi"]
+    @printf "  std(Q)=%.4f   autocorr(Q)=%.4f  TB/GDP=%.4f\n\n" agg_d["std_Q"] agg_d["autocorr_Q"] agg_d["TBGDP"]
+    @printf "  Loaded from: %s\n\n" OUT_SECTORAL
+    return   # done — no raw file processing needed
+end
+
 @printf "\n%s\n  Computing data moments from raw files (Chile)\n%s\n\n" repeat("=",61) repeat("=",61)
 @printf "  (Tip: if pib_sectorial_bc.xlsx fails to load, open it in Excel\n"
 @printf "   and File → Save As → .xlsx to fix XLSX.jl compatibility.)\n\n"
@@ -306,7 +329,7 @@ pib_error_msg = ""   # captured here so the validation error always shows it
 
 if isfile(fname_pib)
     try
-        global pib_error_msg   # Julia soft-scoping: declare global before any *= in this block
+
         # ------------------------------------------------------------------ #
         # Read the whole sheet as a Matrix{Any} in ONE call.                 #
         # This avoids ALL cell-by-cell iteration issues and the BCCh blank-  #
@@ -445,7 +468,7 @@ if isfile(fname_pib)
         qt_y = qt_y_pib
 
     catch e
-        global pib_error_msg   # needed: Julia soft-scoping requires explicit global in catch block
+
 
         err_str = sprint(showerror, e)
         pib_error_msg *= "  EXCEPTION: $err_str\n"
@@ -952,4 +975,4 @@ CSV.write(OUT_AGGREGATE, df_agg)
 
 end  # function _main()
 
-_main()
+Base.invokelatest(_main)  # Julia 1.12: world-age fix
