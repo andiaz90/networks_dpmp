@@ -368,17 +368,38 @@ function smm_run(context::Dynare.Context)
     ok_resolve, g_test, _, _ = resolve_first_order!(context)
     @printf "    success=%s  g1_1 size=%s\n\n" ok_resolve (ok_resolve ? string(size(g_test)) : "N/A")
 
-    # 3. Full pre-flight
+    # ARM early exit: if re-solve fails there is no point running the optimizer
+    if !ok_resolve
+        @printf "%s\n" repeat("!", 62)
+        @printf "  SMM ESTIMATION NOT AVAILABLE ON THIS MACHINE\n"
+        @printf "%s\n\n" repeat("!", 62)
+        @printf "  The Dynare.jl re-solve step requires LAPACK gees with an\n"
+        @printf "  eigenvalue-ordering callback, which is not implemented in\n"
+        @printf "  the ARM (aarch64) LAPACK bundled with Julia on Apple Silicon.\n\n"
+        @printf "  HOW TO ESTIMATE:\n"
+        @printf "    Option 1 — Intel Mac or Linux x86 server:\n"
+        @printf "      julia --project=. run_smm_estimation.jl\n\n"
+        @printf "    Option 2 — Windows (MATLAB, original workflow):\n"
+        @printf "      Run smm_estimation.m in MATLAB, which writes smm_estimates.mat\n"
+        @printf "      Then convert once:  julia --project=. bootstrap_csv.jl\n"
+        @printf "      This creates Data/smm_estimates.csv that main_SOE_gap.jl reads.\n\n"
+        @printf "    Option 3 — Use existing estimates from a previous run:\n"
+        @printf "      Copy Data/smm_estimates.csv from a machine where estimation ran.\n"
+        @printf "      main_SOE_gap.jl will automatically load it on every run.\n\n"
+        @printf "  Current Data/smm_estimates.csv status: %s\n\n" (
+            isfile(joinpath(DATA_DIR, "smm_estimates.csv")) ?
+            "EXISTS — main_SOE_gap.jl is already using these estimates" :
+            "MISSING — model runs with hard-coded default parameters")
+        return fill(NaN, N_THETA), NaN, fill(NaN, 46)
+    end
+
+    # 3. Full pre-flight (only reached on Intel/x86)
     @printf "=== PRE-FLIGHT CHECK ===\n"
     m_test, ok_test = smm_model_moments(θ0, context, baseline, endo_names)
     if !ok_test || any(isnan, m_test)
         @printf "  PRE-FLIGHT FAILED — model did not solve at θ₀.\n"
-        @printf "  NaN moments: %s\n" string(findall(isnan, m_test))
-        if !ok_resolve
-            @printf "  CAUSE: resolve_first_order!() failed (see warnings above).\n"
-            @printf "  On Apple Silicon (ARM), Dynare.jl's Schur solver (gees) is broken.\n"
-            @printf "  The estimation must be run on an Intel machine (or Windows via MATLAB).\n"
-        end
+        @printf "  NaN moment indices: %s\n" string(findall(isnan, m_test))
+        @printf "  → Check that main_SOE_gap.jl ran EXERCISE=0 (Baseline) first.\n"
         error("SMM pre-flight failed. Fix model setup before estimation.")
     end
     obj_test = smm_objective(θ0, data_moments, W, context, baseline, endo_names)[1]
