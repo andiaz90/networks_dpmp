@@ -26,7 +26,14 @@ length(ARGS) >= 1 || error("Usage: julia run_dynare_subprocess.jl /path/to/mod")
 MOD_DIR = ARGS[1]
 isdir(MOD_DIR) || error("MOD_DIR not found: $MOD_DIR")
 
-using Dynare, CSV, DataFrames, LinearAlgebra
+# If Dynare is not in the active project, try importing from the default depot.
+# This handles the case where the parent's project differs from julia_dynare/.
+try
+    using Dynare
+catch
+    import Pkg; Pkg.add("Dynare"); using Dynare
+end
+using CSV, DataFrames, LinearAlgebra
 
 # Change to the model directory so @dynare finds .mod and @#include files
 cd(MOD_DIR)

@@ -685,7 +685,11 @@ params_mod_path = write_params_mod(MOD_DIR, params_nt)
 
 dynare_script = joinpath(SCRIPT_DIR, "run_dynare_subprocess.jl")
 julia_exe     = joinpath(Sys.BINDIR, "julia")
-project_dir   = SCRIPT_DIR   # Project.toml is in julia_dynare/
+
+# Use the PARENT process's active project (where Dynare is already installed).
+# The julia_dynare/Project.toml lists Dynare but requires `Pkg.instantiate()`
+# before the subprocess can use it — the parent's env already has it.
+project_dir = dirname(Base.active_project())
 
 @printf "--- Running Dynare.jl (subprocess) ---\n"
 @printf "  Script : %s\n" dynare_script
