@@ -671,13 +671,12 @@ params_mod_path = write_params_mod(MOD_DIR, params_nt)
 
 # @dynare must be called with the path to the .mod file (without extension).
 # It reads params_jl.mod via @#include before solving the model.
-# Pass the full absolute path to the .mod file.
-# @dynare "name" passes only the bare filename to the Dynare preprocessor,
-# which then searches relative to its own CWD — unreliable inside functions.
-# Passing the full path (without .mod extension) fixes the "Could not open
-# file" error regardless of where Julia's CWD is.
-_mod_path = joinpath(MOD_DIR, "NK_SOE_lev_gap2")
-context   = @dynare _mod_path
+# @dynare macro requires a string LITERAL — variables are not accepted.
+# Instead call Dynare.dynare() directly (the function @dynare wraps).
+# This lets us pass a computed absolute path so the preprocessor finds
+# both NK_SOE_lev_gap2.mod and @#include "params_jl.mod" correctly.
+_mod_path = joinpath(MOD_DIR, "NK_SOE_lev_gap2")   # full path, no extension
+context   = Dynare.dynare(_mod_path)
 
 @printf "\n--- Dynare.jl completed ---\n\n"
 
