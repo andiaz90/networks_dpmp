@@ -1,0 +1,23 @@
+name = "NKIOSOE"
+uuid = "d3f2a1b0-4e5c-11ee-8c99-0242ac120002"
+version = "0.1.0"
+
+[deps]
+CSV         = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
+DataFrames  = "a93c6f00-e57d-5684-b466-afe8fa294f15"
+XLSX        = "fdbf4ff8-1666-58a4-91e7-1b58723a45e0"
+MAT         = "23992714-dd62-5051-b70f-ba57cb901cac"
+NLsolve     = "2774e3e8-f4cf-5e23-947b-6d7e65073b56"
+StatsBase   = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Statistics  = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+Printf      = "de0858da-6303-5e67-8744-51eddeeeb8d3"
+
+[compat]
+julia = "1.9"
+CSV = "0.10"
+DataFrames = "1.5"
+XLSX = "0.10"
+MAT = "0.10"
+NLsolve = "4.5"
+StatsBase = "0.34"

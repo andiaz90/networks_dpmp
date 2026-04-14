@@ -1,0 +1,22 @@
+# MATLAB
+*.asv
+*.m~
+*.mat.bak
+dynare_output_log.txt
+*.log
+
+# Dynare outputs (large binary files)
+*.endo_simul
+*.exo_simul
+
+# Data and results (large files)
+Data/
+outcmaes*.dat
+
+# OS
+.DS_Store
+Thumbs.db
+__pycache__/
+
+# Julia artifacts
+julia_dynare/Manifest.toml
