@@ -147,7 +147,38 @@ function param_idx(context, name::String)
     return get(_param_cache[context], name, nothing)
 end
 
+"""
+Build parameter name → index mapping.
+
+Primary: read from modfile.json 'parameters' array.  Dynare writes parameters
+in declaration order, which matches context.models[1].params vector ordering.
+Position j in the array (1-based) = params[j].  This is robust and works even
+when the symboltable is corrupted (as it is in contexts built with stoch_simul
+that failed due to the ARM Mac gees issue).
+
+Fallback: iterate symboltable fields (works on uncorrupted contexts).
+"""
 function _build_param_cache(context)
+    # ---- Primary: modfile.json parameters array (always available) ---------- #
+    if isfile(_MODFILE_PATH)
+        try
+            raw = read(_MODFILE_PATH, String)
+            # Find "parameters" array and extract all {name: ...} entries
+            pm = match(r"\"parameters\"\s*:\s*\[(.+?)\]\s*,\s*\"orig_endo_nbr\"", raw)
+            if pm !== nothing
+                names = collect(eachmatch(r"\"name\"\s*:\s*\"([^\"]+)\"", pm.captures[1]))
+                cache = Dict{String,Int}()
+                for (j, m) in enumerate(names)
+                    cache[String(m.captures[1])] = j
+                end
+                if !isempty(cache)
+                    return cache
+                end
+            end
+        catch; end
+    end
+
+    # ---- Fallback: symboltable traversal (works on non-corrupted contexts) -- #
     cache = Dict{String,Int}()
     st = context.symboltable
     try
