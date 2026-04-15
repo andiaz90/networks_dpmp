@@ -355,7 +355,20 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     @printf "  Weighting matrix built (%dx%d diagonal).\n\n" size(W,1) size(W,2)
 
     # --- Initial θ ---
+    # default_theta0 reads from _SMM_PARAMS (params_jl.mod).  The baseline
+    # has isigma_tfp_i = 0 for all sectors (no TFP shocks in calibration),
+    # so the initial model moments are near-zero — very flat landscape.
+    # Override the zero shock parameters with data-informed starting values:
+    #   isigma_tfp_i ≈ std(Y_i) * 0.4  (rough approximation)
+    #   sigma_om     ≈ 0.05
     θ0 = default_theta0(context)
+    # Override zero/tiny shock starting values with data-informed guesses
+    θ0[6]  = max(θ0[6],  0.05)                          # sigma_om
+    for i in 1:12
+        θ0[7+i] = max(θ0[7+i], clamp(y_d[i] * 0.4, LB[7+i], UB[7+i]))
+    end                                                   # isigma_tfp_i
+    θ0[21] = max(θ0[21], 0.05)                           # sigma_pvstar
+    θ0[23] = max(θ0[23], 0.05)                           # sigma_xi
     # Try warm start
     θ_warm = load_warm_start(N_THETA)
     θ0     = something(θ_warm, θ0)
@@ -414,7 +427,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     # --- CMA-ES optimisation ---
     # CMA-ES (Covariance Matrix Adaptation Evolution Strategy) is a state-of-the-art
     # black-box derivative-free optimizer — the standard choice for SMM estimation.
-    max_evals = 5000 * N_THETA
+    max_evals = 30_000   # ~1300 generations for n=23; enough for convergence
     @printf "--- CMA-ES (black-box, derivative-free) ---\n"
     @printf "  %d parameters  |  %d moments  |  max %d evaluations\n" N_THETA 46 max_evals
     @printf "  %-6s  %-14s  %-10s\n" "eval" "objective" "BK/NaN"
@@ -434,8 +447,8 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
             best_θ[]   = copy(θ)
         end
         obj >= 1e7 && (fail_count[] += 1)
-        # Print progress every 500 evaluations
-        if eval_count[] % 500 == 0
+        # Print progress every 200 evaluations
+        if eval_count[] % 200 == 0
             @printf "  %-6d  %-14.6f  %-10d\n" eval_count[] best_obj[] fail_count[]
             flush(stdout)
         end
