@@ -43,10 +43,10 @@ SCRIPT_DIR  = @__DIR__
 REPO_ROOT   = abspath(joinpath(SCRIPT_DIR, "..", ".."))
 DATA_DIR    = joinpath(REPO_ROOT, "Data")
 
-include("steady_ntwsoe_system.jl")
-include("steady_ntwsoe.jl")
-include("utils.jl")
-include("smm_model_moments.jl")
+# NOTE: steady_ntwsoe_system.jl, steady_ntwsoe.jl, utils.jl, and
+# smm_model_moments.jl are included by run_smm_estimation.jl BEFORE this
+# file is included, to avoid double-include const-redefinition issues.
+# When using smm_estimation.jl standalone, include those files first.
 
 @printf "\n%s\n  SMM ESTIMATION: NK-IOSOE Chile Model\n%s\n\n" repeat("=",60) repeat("=",60)
 

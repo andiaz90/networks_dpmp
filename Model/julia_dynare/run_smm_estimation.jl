@@ -77,34 +77,30 @@ function _main()
     @printf "  %s\n" joinpath(DATA_DIR, "sectoral_moments.csv")
     @printf "  %s\n\n" joinpath(DATA_DIR, "aggregate_moments.csv")
 
-    # ---- Step 2: Load / generate the SMM Dynare context -------------------
-    # We use NK_SOE_lev_gap2_smm.mod (same model but WITHOUT stoch_simul).
-    # Note: @dynare may return an inconsistent context (Dynare.jl issue).
-    # By skipping stoch_simul, we always get the correct 491-variable context.
-    context_file = joinpath(SCRIPT_DIR, "mod", "nk_iosoe_smm_context.jls")
+    # ---- Step 2: Load the Dynare context -----------------------------------
+    # Strategy: prefer nk_iosoe_context.jls (main context, written by
+    # main_SOE_gap.jl with stoch_simul).  Even though stoch_simul's gees call
+    # fails on ARM Mac and corrupts the symboltable (to 6 names), the
+    # model_results[1] still has 491 variables AND lre.g1_1/g1_2 are populated
+    # by the first-order perturbation step BEFORE gees is called.  Those
+    # non-zero decision rule matrices are what the cached-fallback path in
+    # resolve_first_order! needs.
+    #
+    # The SMM context (nk_iosoe_smm_context.jls, no stoch_simul) has a clean
+    # symboltable but zero lre.g1_1/g1_2 (first-order solution never computed).
+    #
+    # endo_names bypass (from dynare_endo_names.csv) avoids both symboltable
+    # issues regardless of which context is loaded.
+    main_ctx = joinpath(SCRIPT_DIR, "mod", "nk_iosoe_context.jls")
+    smm_ctx  = joinpath(SCRIPT_DIR, "mod", "nk_iosoe_smm_context.jls")
+    context_file = isfile(main_ctx) ? main_ctx : smm_ctx
 
     if !isfile(context_file)
-        @printf "--- Step 2: Generating SMM context (first run) ---\n"
-        @printf "  Running NK_SOE_lev_gap2_smm.mod (no stoch_simul → no gees issue)\n\n"
-
-        # Check that params_jl.mod exists (written by main_SOE_gap.jl)
-        params_mod = joinpath(SCRIPT_DIR, "mod", "params_jl.mod")
-        isfile(params_mod) || error("""
-            params_jl.mod not found. Run main_SOE_gap.jl first:
-              julia --project=. main_SOE_gap.jl
-            This writes params_jl.mod and then run_smm_estimation.jl can proceed.
-            """)
-
-        julia_exe  = joinpath(Sys.BINDIR, "julia")
-        project    = dirname(Base.active_project())
-        smm_sub    = joinpath(SCRIPT_DIR, "run_dynare_smm_subprocess.jl")
-        MOD_DIR_   = joinpath(SCRIPT_DIR, "mod")
-        run(`$julia_exe --project=$project $smm_sub $MOD_DIR_`)
-
-        isfile(context_file) || error("""
-            SMM context was not created by the subprocess.
-            Check output above for errors from run_dynare_smm_subprocess.jl.
-            """)
+        error("""
+        No Dynare context found.  Run main_SOE_gap.jl first:
+          julia --project=. main_SOE_gap.jl
+        This creates $(main_ctx) which contains the first-order decision rule.
+        """)
     end
 
     ctx_path = context_file
