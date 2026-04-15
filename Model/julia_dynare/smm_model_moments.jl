@@ -228,81 +228,121 @@ function _klein_solve(context)
         D = Matrix{Float64}(G[:, n_bk+n_endo+n_fw+1 : end])
 
         # ---- 2. Identify backward and forward variable index sets -------- #
-        bkwrd_b = context.models[1].i_bkwrd_b   # rows in g1_1 for state vars
-        fwrd_b  = context.models[1].i_fwrd_b    # rows in g1_1 for forward vars
+        bkwrd_b = collect(Int, context.models[1].i_bkwrd_b)  # 78 state rows
+        fwrd_b  = collect(Int, context.models[1].i_fwrd_b)   # 56 forward rows
 
-        # ---- 3. Klein (2000) QZ problem ---------------------------------- #
-        # System: A*y_{bk,t-1} + B*y_t + C*y_{fw,t+1} + D*ε_t = 0
+        # ---- 3. Static variable elimination ------------------------------ #
+        # The full 491×491 QZ has only 56 finite eigenvalues (rank(C_pad)=56),
+        # so n_stable can never reach n_bk=78.  Reduce to the 134×134 system
+        # of backward+forward variables by eliminating the 357 static variables.
         #
-        # Augment with n_bk trivial state equations y_{bk,t} = y_{bk,t}:
-        #   [B  C_pad] [y_t      ]   [-A   0 ] [y_{bk,t-1}]   [-D] [ε_t]
-        #   [I_bk  0 ] [y_{fw,t+1}] = [  0   0 ] [   ...     ] + [0 ] [   ]
-        # leading to generalized eigenvalue problem (AA, BB):
-        n_z   = n_bk + n_fw    # 78+56 = 134 "essential" variables
+        # Static variables: not in bkwrd_b and not in fwrd_b
+        s_idx = setdiff(1:n_endo, union(bkwrd_b, fwrd_b))  # 357 static var indices
+        n_s   = length(s_idx)   # 357
 
-        # Build the n_endo×n_endo generalized eigenvalue matrices
-        # using the C matrix padded to full endo size
-        C_pad        = zeros(n_eq, n_endo)
-        C_pad[:, fwrd_b] = C          # place forward Jacobian at fwrd positions
+        # Static equations: rows where ∂f/∂y_{t-1} ≈ 0  AND  ∂f/∂y_{t+1} ≈ 0
+        # (purely contemporaneous — no leads or lags)
+        s_eq = findall(r -> norm(A[r,:]) < 1e-10 && norm(C[r,:]) < 1e-10, 1:n_eq)
+        dyn_eq = setdiff(1:n_eq, s_eq)   # 134 dynamic equations (have A or C ≠ 0)
 
-        A_pad        = zeros(n_eq, n_endo)
-        A_pad[:, bkwrd_b] = A         # place backward Jacobian at bkwrd positions
-
-        # AA y_{t+1} = BB y_t  =>  AA = -C_pad, BB = B + A_pad/shift_back
-        # Standard form for generalized Schur:
-        #   C_pad E[y_{t+1}] = -(B y_t + A_pad y_{t-1,bkwrd} + D ε)
-        # For the eigenvalue problem we ignore the driving terms:
-        AA_qz = C_pad       # n_endo × n_endo (leading matrix)
-        BB_qz = -B          # n_endo × n_endo (lagging matrix)
-
-        # ---- 4. Ordered QZ via GenericSchur.jl (pure Julia, no gees!) --- #
-        F = GenericSchur.schur(AA_qz, BB_qz)
-        S = F.S; T = F.T
-
-        # Generalised eigenvalues |T_ii / S_ii| — stable if < 1
-        λ = [let si = abs(S[i,i]), ti = abs(T[i,i])
-                 si < 1e-14 ? Inf : ti / si
-             end for i in 1:n_endo]
-
-        n_stable = sum(λ .< 1.0)
-        # Blanchard-Kahn: exactly n_bk stable eigenvalues
-        if n_stable != n_bk
-            @printf "  [Klein] BK failed: %d stable eigenvalues, expected %d\n" n_stable n_bk
+        if length(s_eq) != n_s
+            @printf "  [Klein] Static elimination mismatch: %d static eqs, %d static vars (expected both=%d)\n" length(s_eq) n_s n_s
             return false, zeros(0,0), zeros(0,0), zeros(0,0)
         end
 
-        # Reorder: stable eigenvalues first
+        # Express statics as y_s = -B_ss^{-1}(B_sb y_b + B_sf y_f)
+        B_ss = B[s_eq, s_idx]          # 357×357
+        B_sb = B[s_eq, bkwrd_b]        # 357×78
+        B_sf = B[s_eq, fwrd_b]         # 357×56
+        F_ss = lu(B_ss)
+        Bss_inv_sb = F_ss \ B_sb        # 357×78
+        Bss_inv_sf = F_ss \ B_sf        # 357×56
+
+        # Substitute into dynamic equations: build reduced 134×134 system
+        B_db = B[dyn_eq, bkwrd_b]      # 134×78
+        B_df = B[dyn_eq, fwrd_b]       # 134×56
+        B_ds = B[dyn_eq, s_idx]        # 134×357
+        A_dyn = A[dyn_eq, :]           # 134×78
+        C_dyn = C[dyn_eq, :]           # 134×56
+
+        B_red_b = B_db - B_ds * Bss_inv_sb   # 134×78  (after static elimination)
+        B_red_f = B_df - B_ds * Bss_inv_sf   # 134×56
+        B_red   = [B_red_b B_red_f]           # 134×134
+        C_red   = C_dyn                        # 134×56  (A stays as A_dyn)
+
+        # ---- 4. Ordered QZ on the reduced 134×134 system ----------------- #
+        # Variable ordering in 134-space: positions 1:78 = backward, 79:134 = forward
+        # Leading matrix AA: C_red in forward columns (79:134), zeros in backward
+        n_134   = n_bk + n_fw   # 134
+        fw_cols = (n_bk+1):n_134   # 79:134
+
+        C_pad_134 = zeros(n_134, n_134)
+        C_pad_134[:, fw_cols] = C_red   # only forward vars appear at t+1
+
+        AA_qz = C_pad_134   # 134×134 leading  (coefficient of y_{t+1})
+        BB_qz = -B_red       # 134×134 lagging  (coefficient of y_t)
+
+        F = GenericSchur.schur(AA_qz, BB_qz)
+        S = F.S; T = F.T
+
+        # GenericSchur convention: schur(A,B) → A = Q S Z*, B = Q T Z*
+        # Generalized eigenvalues = S[i,i] / T[i,i]  (S from AA, T from BB)
+        #
+        # In the 134×134 system with the correct S/T convention:
+        #   Backward positions (cols 1:78 of AA=C_pad_134 are zero):
+        #     S[i,i] ≈ 0, T[i,i] ≠ 0  →  λ = S/T ≈ 0  (stable, |λ|<1) ✓
+        #   Forward positions (cols 79:134 are C_red):
+        #     S[i,i] ≠ 0, T[i,i] ≠ 0  →  λ = S/T > 1  (explosive) ✓
+        # → n_stable = 78 = n_bk  satisfying Blanchard-Kahn ✓
+        #
+        # NOTE: T/S would invert all eigenvalues and give n_stable=56=n_fw (wrong).
+        λ = [let si = abs(S[i,i]), ti = abs(T[i,i])
+                 ti < 1e-14 ? Inf : si / ti   # S/T convention
+             end for i in 1:n_134]
+
+        n_stable = sum(λ .< 1.0)
+        if n_stable != n_bk
+            @printf "  [Klein] BK failed on 134×134 reduced system: %d stable eigenvalues, expected %d\n" n_stable n_bk
+            return false, zeros(0,0), zeros(0,0), zeros(0,0)
+        end
+
+        # Reorder: stable eigenvalues (backward vars) first
         select = λ .< 1.0
         F2 = GenericSchur.ordschur(F, select)
-        Z  = real(F2.Z)    # n_endo × n_endo
+        Z  = real(F2.Z)   # 134×134
 
-        # ---- 5. Extract decision rule (Klein 2000, eq 14-16) ------------- #
-        Z11 = Z[bkwrd_b, 1:n_bk]     # n_bk × n_bk  (state block)
-        Z21 = Z[setdiff(1:n_endo, bkwrd_b), 1:n_bk]  # (n_endo-n_bk) × n_bk
+        # ---- 5. Extract decision rule from the reduced system ------------ #
+        # In the 134-dim space: rows 1:78 = backward vars, rows 79:134 = forward vars
+        bk_in_134 = 1:n_bk
+        nf_in_134 = (n_bk+1):n_134   # forward vars in the 134 space
+
+        Z11 = Z[bk_in_134, 1:n_bk]   # 78×78  (state block)
+        Z21 = Z[nf_in_134, 1:n_bk]   # 56×78  (non-state block → forward vars)
 
         abs(det(Z11)) < 1e-10 && return false, zeros(0,0), zeros(0,0), zeros(0,0)
 
-        # Decision rule for non-state variables as function of states:
-        # y_{non,t} = gx × y_{bk,t-1}
-        gx = Z21 / Z11    # (n_endo-n_bk) × n_bk
+        # Decision rule in the 134 space: y_fw = gx_fw × y_bk_{t-1}
+        gx_fw = Z21 / Z11   # 56×78  (forward vars as function of states)
 
-        # Build full g1_1 (n_endo × n_bk):
+        # Recover static vars: y_s = -(Bss_inv_sb + Bss_inv_sf * gx_fw) y_bk_{t-1}
+        gx_s = -(Bss_inv_sb + Bss_inv_sf * gx_fw)   # 357×78
+
+        # ---- 6. Build full g1_1 (491×78) --------------------------------- #
         g1_1 = zeros(n_endo, n_bk)
-        g1_1[bkwrd_b, :]                      = I(n_bk)  # state vars = identity
-        g1_1[setdiff(1:n_endo, bkwrd_b), :] = gx
+        g1_1[bkwrd_b, :] = I(n_bk)    # backward vars: identity (predetermined)
+        g1_1[fwrd_b,  :] = gx_fw       # forward vars
+        g1_1[s_idx,   :] = gx_s        # static vars
 
-        # ---- 6. Solve for shock impact g1_2 (n_endo × n_exo) ------------ #
-        # From: B × g1_2 + C × g1_2_fwrd + D = 0
-        # where g1_2_fwrd = (C_impact rows of g1_2)
-        # Approx: (B + C × g1_1[fwrd,:] × g1_1[bkwrd,:]) × g1_2 ≈ -D
+        # ---- 7. Solve for shock impact g1_2 (491×17) --------------------- #
+        # From B*g1_2 + C*(g1_1[fwrd,:]*g1_2[bkwrd,:]) + D = 0  (approx):
         effective_B = B + C * g1_1[fwrd_b, :] * g1_1[bkwrd_b, :]
-        if abs(det(effective_B)) > 1e-10
-            g1_2 = -effective_B \ D
+        g1_2 = if abs(det(effective_B)) > 1e-10
+            -effective_B \ D
         else
-            g1_2 = -pinv(effective_B) * D
+            -pinv(effective_B) * D
         end
 
-        # Store result back into context for next iteration
+        # Store computed decision rule back into the context for the cached path
         try
             lre = context.results.model_results[1].linearrationalexpectations
             if size(lre.g1_1) == size(g1_1)
