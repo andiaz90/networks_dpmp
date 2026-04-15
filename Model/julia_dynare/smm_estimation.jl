@@ -126,10 +126,13 @@ function build_baseline(context::Dynare.Context,
                          d_std_Y, d_std_PH, d_std_L,
                          d_TBGDP, d_omG)
     # Load calibration vectors from _SMM_PARAMS (robust against uninitialized work.params)
+    # FIX: _SMM_PARAMS_READY is a per-thread Vector{Ref{Bool}}, not a single Ref.
+    # Must index with _tid() before dereferencing with [].
     function pvec(nm)
         idx = param_idx(context, nm)
         idx === nothing && return NaN
-        p = _SMM_PARAMS_READY[] ? _SMM_PARAMS[] : _load_smm_params!(context)
+        tid = _tid()
+        p = _SMM_PARAMS_READY[tid][] ? _SMM_PARAMS[tid][] : _load_smm_params!(context)
         (isempty(p) || idx > length(p)) ? NaN : p[idx]
     end
 
@@ -246,7 +249,8 @@ function default_theta0(context::Dynare.Context)
     pv(nm) = let idx = param_idx(context, nm)
                  if idx === nothing; 0.0
                  else
-                     p = _SMM_PARAMS_READY[] ? _SMM_PARAMS[] : _load_smm_params!(context)
+                     tid = _tid()
+                     p = _SMM_PARAMS_READY[tid][] ? _SMM_PARAMS[tid][] : _load_smm_params!(context)
                      (isempty(p) || idx > length(p)) ? 0.0 : p[idx]
                  end
              end
