@@ -160,18 +160,23 @@ Fallback: iterate symboltable fields (works on uncorrupted contexts).
 """
 function _build_param_cache(context)
     # ---- Primary: modfile.json parameters array (always available) ---------- #
+    # The "parameters" array is ordered identically to context.models[1].params.
+    # Use position-based slicing (not a dotall regex) so it works whether the
+    # JSON is compact or pretty-printed with newlines.
     if isfile(_MODFILE_PATH)
         try
-            raw = read(_MODFILE_PATH, String)
-            # Find "parameters" array and extract all {name: ...} entries
-            pm = match(r"\"parameters\"\s*:\s*\[(.+?)\]\s*,\s*\"orig_endo_nbr\"", raw)
-            if pm !== nothing
-                names = collect(eachmatch(r"\"name\"\s*:\s*\"([^\"]+)\"", pm.captures[1]))
-                cache = Dict{String,Int}()
-                for (j, m) in enumerate(names)
-                    cache[String(m.captures[1])] = j
-                end
-                if !isempty(cache)
+            raw  = read(_MODFILE_PATH, String)
+            p_start = findfirst("\"parameters\"", raw)
+            p_end   = findfirst("\"orig_endo_nbr\"", raw)
+            if p_start !== nothing && p_end !== nothing && p_start[1] < p_end[1]
+                chunk = raw[p_start[1] : p_end[1]-1]
+                # Match only exact "name" key (not "texName"/"longName")
+                names = collect(eachmatch(r"\"name\"\s*:\s*\"([^\"]+)\"", chunk))
+                if length(names) > 100   # sanity: model has hundreds of params
+                    cache = Dict{String,Int}()
+                    for (j, m) in enumerate(names)
+                        cache[String(m.captures[1])] = j
+                    end
                     return cache
                 end
             end
