@@ -143,7 +143,9 @@ function _main()
     # ---- Step 3: Run SMM estimation ----------------------------------------
     @printf "--- Step 3: Running SMM estimation ---\n\n"
     # Pass endo_names_override so smm_run uses CSV names instead of broken symboltable
-    theta_hat, obj_hat, moments_hat = smm_run(context; endo_names_override=endo_names_override)
+    # invokelatest: Julia 1.12 strict world-age requires this when smm_run was
+    # defined (via include of smm_estimation.jl) in a world newer than _main.
+    theta_hat, obj_hat, moments_hat = Base.invokelatest(smm_run, context; endo_names_override=endo_names_override)
 
     # ---- Step 4: Summary ---------------------------------------------------
     if isnan(obj_hat)

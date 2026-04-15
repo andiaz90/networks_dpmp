@@ -417,7 +417,9 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         obj
     end
 
-    insigma = (UB .- LB) ./ 6
+    # CMAEvolutionStrategy.jl in this version requires a scalar σ0 (not a vector).
+    # Use mean of (UB-LB)/6 so the global step size spans ~1/6 of the feasible range.
+    insigma = mean((UB .- LB) ./ 6)
 
     result = CMAEvolutionStrategy.minimize(
         obj_fn,
