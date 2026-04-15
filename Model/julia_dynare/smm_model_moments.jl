@@ -426,7 +426,6 @@ function smm_model_moments(θ, context, baseline, endo_names)
     set_param!(context,"sigma_pvstar",sigma_pvstar); set_param!(context,"rho_xi",rho_xi)
     set_param!(context,"sigma_xi",sigma_xi)
     for i in 1:nsec; set_param!(context,"isigma_tfp_$(i)",isigma_tfp[i]); end
-    try context.models[1].Sigma_e[4,4]=1.0; context.models[1].Sigma_e[17,17]=1.0; catch; end
 
     epsY_prev = get_param_val(context,"epsY_1"); epsM_prev = get_param_val(context,"epsM_1")
     need_ss = abs(epsY-epsY_prev)>1e-8 || abs(epsM-epsM_prev)>1e-8
@@ -435,6 +434,27 @@ function smm_model_moments(θ, context, baseline, endo_names)
 
     success, T, R, Σe = resolve_first_order!(context)
     !success && return NAN46, false
+
+    # Build normalized Sigma_e from the 16 active shocks.
+    # The SMM context has Sigma_e = zeros(17,17) because stoch_simul was not
+    # run for the _smm mod file.  We CANNOT rely on mutating context.models[1].Sigma_e
+    # (may fail silently on ARM due to immutability in deserialized structs).
+    # Instead, construct Sigma_e locally: each active shock has unit variance;
+    # amplitude scaling is handled by the parameters in the model equations
+    # (sigma_om * eps_om, isigma_tfp_i * epsA_i, sigma_pvstar * eps_pvstar,
+    #  sigma_xi * eps_xi).
+    #
+    # varexo order (from NK_SOE_lev_gap2_smm.mod):
+    #   1 = eps_om    2 = eps_i     3 = epschi (unused)  4 = eps_pvstar
+    #   5:16 = epsA_1:12             17 = eps_xi
+    n_exo = size(R, 2)   # should be 17
+    Σe = zeros(n_exo, n_exo)
+    Σe[1, 1]  = 1.0                        # eps_om
+    Σe[4, 4]  = 1.0                        # eps_pvstar
+    for i in 5:min(16, n_exo)
+        Σe[i, i] = 1.0                     # epsA_1 through epsA_12
+    end
+    if n_exo >= 17; Σe[17, 17] = 1.0; end # eps_xi
 
     sr = context.models[1].i_bkwrd_b
     P  = local_dlyap(T[sr,:], R[sr,:]*Σe*R[sr,:]')
