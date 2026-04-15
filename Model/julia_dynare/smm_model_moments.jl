@@ -151,7 +151,7 @@ end
 Build parameter name → index mapping.
 
 Primary: read from modfile.json 'parameters' array.  Dynare writes parameters
-in declaration order, which matches context.models[1].params vector ordering.
+in declaration order, which matches context.work.params vector ordering.
 Position j in the array (1-based) = params[j].  This is robust and works even
 when the symboltable is corrupted (as it is in contexts built with stoch_simul
 that failed due to the ARM Mac gees issue).
@@ -160,7 +160,7 @@ Fallback: iterate symboltable fields (works on uncorrupted contexts).
 """
 function _build_param_cache(context)
     # ---- Primary: modfile.json parameters array (always available) ---------- #
-    # The "parameters" array is ordered identically to context.models[1].params.
+    # The "parameters" array is ordered identically to context.work.params.
     # Use position-based slicing (not a dotall regex) so it works whether the
     # JSON is compact or pretty-printed with newlines.
     if isfile(_MODFILE_PATH)
@@ -205,12 +205,12 @@ end
 set_param!(ctx, name::String, val::Real) = begin
     idx = param_idx(ctx, name)
     idx === nothing && return
-    ctx.models[1].params[idx] = Float64(val)
+    ctx.work.params[idx] = Float64(val)
 end
 
 get_param_val(ctx, name::String) = begin
     idx = param_idx(ctx, name)
-    idx === nothing ? NaN : ctx.models[1].params[idx]
+    idx === nothing ? NaN : ctx.work.params[idx]
 end
 
 
@@ -231,8 +231,8 @@ function _eval_dynamic_jacobian(context)
 
     ss     = context.results.model_results[1].trends.endogenous_steady_state
     n_endo = length(ss)
-    params = context.models[1].params
-    n_exo  = context.models[1].exo_nbr
+    params = context.work.params
+    n_exo  = context.models[1].exogenous_nbr
 
     # y = [ss_lag; ss_now; ss_lead] — all 491 vars at each time period
     y = vcat(ss, ss, ss)          # length 3*491 = 1473
@@ -312,35 +312,15 @@ function _klein_solve(context)
         # ---- 2. Identify backward and forward variable index sets -------- #
         bkwrd_b = collect(Int, context.models[1].i_bkwrd_b)  # 78 state rows
 
-        # i_fwrd_b: 1-based declaration-order indices of forward-looking variables.
-        # Priority 1: context field (various possible names across Dynare.jl versions).
-        # Priority 2: modfile.json lead_lag_incidence (deterministic, always available).
-        # Priority 3: dynare_fwd_rows.csv (written by updated subprocess).
-        fwrd_b = nothing
-        m1 = context.models[1]
-        for fname in (:i_fwrd_b, :i_fwrd, :i_lead_b, :i_nontemporal_b)
-            if isdefined(m1, fname)
-                v = getfield(m1, fname)
-                if !isempty(v) && length(v) == n_fw
-                    fwrd_b = collect(Int, v); break
-                end
-            end
-        end
-        if isnothing(fwrd_b)
-            # Load from modfile.json (lead_lag_incidence, col 3 > 0 → forward var)
-            _load_fwrd_indices!()
-            if length(_I_FWRD_B) == n_fw
-                fwrd_b = copy(_I_FWRD_B)
-            elseif !isempty(_I_FWRD_B)
-                @printf "  [Klein] modfile.json gave %d fwrd vars, expected %d\n" length(_I_FWRD_B) n_fw
-            end
-        end
-        if isnothing(fwrd_b)
-            fwd_csv = joinpath(_JDYN_DIR, "mod", "dynare_fwd_rows.csv")
-            if isfile(fwd_csv)
-                df_fwd = CSV.read(fwd_csv, DataFrame)
-                fb2 = Int.(df_fwd.fwd_row)
-                length(fb2) == n_fw && (fwrd_b = fb2)
+        # i_fwrd_b is a direct field of context.models[1] in this Dynare.jl version.
+        # Use it directly; fall back to modfile.json lead_lag_incidence if absent.
+        fwrd_b = let m1 = context.models[1]
+            if isdefined(m1, :i_fwrd_b) && !isempty(m1.i_fwrd_b) && length(m1.i_fwrd_b) == n_fw
+                collect(Int, m1.i_fwrd_b)
+            else
+                # Fallback: read from modfile.json lead_lag_incidence
+                _load_fwrd_indices!()
+                length(_I_FWRD_B) == n_fw ? copy(_I_FWRD_B) : nothing
             end
         end
         isnothing(fwrd_b) && return false, zeros(0,0), zeros(0,0), zeros(0,0)
