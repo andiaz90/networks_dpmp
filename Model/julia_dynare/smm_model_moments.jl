@@ -137,6 +137,67 @@ end
 
 
 # =========================================================================== #
+#  PARAMETER VALUES — loaded from params_jl.mod                               #
+# =========================================================================== #
+# context.work.params may be declared but uninitialized (UndefVarError) in
+# contexts deserialized from a stoch_simul run that failed on ARM Mac.
+# We maintain our OWN parameter vector _SMM_PARAMS, initialized from
+# params_jl.mod (written by main_SOE_gap.jl with full parameter values)
+# and updated by set_param! at each CMA-ES evaluation.
+
+const _SMM_PARAMS       = Ref{Vector{Float64}}(Float64[])
+const _SMM_PARAMS_READY = Ref(false)
+
+function _load_smm_params!(context)
+    _SMM_PARAMS_READY[] && return _SMM_PARAMS[]
+
+    # Try context.work.params first (works on uncorrupted contexts)
+    try
+        p = context.work.params
+        if length(p) > 100
+            _SMM_PARAMS[] = copy(Vector{Float64}(p))
+            _SMM_PARAMS_READY[] = true
+            @printf "  [SMM] Params loaded from context.work.params (%d params)\n" length(p)
+            return _SMM_PARAMS[]
+        end
+    catch; end
+
+    # Fall back to params_jl.mod — parse name=value; pairs, build ordered vector
+    mod_path = joinpath(_JDYN_DIR, "mod", "params_jl.mod")
+    isfile(mod_path) || error("params_jl.mod not found at $mod_path — run main_SOE_gap.jl first")
+
+    raw = read(mod_path, String)
+    val_dict = Dict{String,Float64}()
+    for m in eachmatch(r"^(\w+)\s*=\s*([-\d.eE+]+)\s*;", raw)
+        try val_dict[String(m.captures[1])] = parse(Float64, m.captures[2])
+        catch; end
+    end
+
+    # Build ordered params vector using modfile.json parameter ordering
+    p_start = findfirst("\"parameters\"", read(_MODFILE_PATH, String))
+    p_end   = findfirst("\"orig_endo_nbr\"", read(_MODFILE_PATH, String))
+    mf_raw  = read(_MODFILE_PATH, String)
+    chunk   = mf_raw[p_start[1] : p_end[1]-1]
+    names   = [String(m.captures[1]) for m in eachmatch(r"\"name\"\s*:\s*\"([^\"]+)\"", chunk)]
+
+    n_params = length(names)
+    params   = zeros(n_params)
+    found    = 0
+    for (j, nm) in enumerate(names)
+        if haskey(val_dict, nm)
+            params[j] = val_dict[nm]
+            found += 1
+        end
+    end
+
+    _SMM_PARAMS[] = params
+    _SMM_PARAMS_READY[] = true
+    @printf "  [SMM] Params loaded from params_jl.mod: %d/%d params found\n" found n_params
+    return _SMM_PARAMS[]
+end
+
+
+# =========================================================================== #
 #  PARAMETER ACCESS                                                            #
 # =========================================================================== #
 
@@ -205,12 +266,16 @@ end
 set_param!(ctx, name::String, val::Real) = begin
     idx = param_idx(ctx, name)
     idx === nothing && return
-    ctx.work.params[idx] = Float64(val)
+    p = _load_smm_params!(ctx)
+    isempty(p) && return
+    idx <= length(p) && (_SMM_PARAMS[][idx] = Float64(val))
 end
 
 get_param_val(ctx, name::String) = begin
     idx = param_idx(ctx, name)
-    idx === nothing ? NaN : ctx.work.params[idx]
+    idx === nothing && return NaN
+    p = _SMM_PARAMS_READY[] ? _SMM_PARAMS[] : _load_smm_params!(ctx)
+    (isempty(p) || idx > length(p)) ? NaN : p[idx]
 end
 
 
@@ -231,7 +296,10 @@ function _eval_dynamic_jacobian(context)
 
     ss     = context.results.model_results[1].trends.endogenous_steady_state
     n_endo = length(ss)
-    params = context.work.params
+    # Use _SMM_PARAMS (loaded from params_jl.mod) — robust against
+    # context.work.params being uninitialized (UndefVarError on ARM Mac)
+    params = _load_smm_params!(context)
+    isempty(params) && error("Parameter vector not available — run main_SOE_gap.jl first.")
     n_exo  = context.models[1].exogenous_nbr
 
     # y = [ss_lag; ss_now; ss_lead] — all 491 vars at each time period
@@ -444,11 +512,9 @@ function _klein_solve(context)
         return true, g1_1, g1_2, Σe
 
     catch e
-        # FieldError means i_fwrd_b / i_bkwrd_b field missing from context —
-        # expected for contexts built without stoch_simul.  Suppress the print
-        # to avoid flooding output during CMA-ES (115k evaluations).
-        # For any other exception type, print once for diagnostics.
-        if !(e isa FieldError)
+        # FieldError / UndefVarError from missing/uninitialized context fields
+        # are expected — suppress to avoid flooding 115k CMA-ES iterations.
+        if !(e isa FieldError || e isa UndefVarError)
             @printf "  [Klein] Exception type: %s\n" typeof(e)
         end
         return false, zeros(0,0), zeros(0,0), zeros(0,0)

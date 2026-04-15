@@ -125,11 +125,12 @@ function build_baseline(context::Dynare.Context,
                          endo_names::Vector{String},
                          d_std_Y, d_std_PH, d_std_L,
                          d_TBGDP, d_omG)
-    # Load calibration vectors from context.work.params
+    # Load calibration vectors from _SMM_PARAMS (robust against uninitialized work.params)
     function pvec(nm)
         idx = param_idx(context, nm)
         idx === nothing && return NaN
-        context.work.params[idx]
+        p = _SMM_PARAMS_READY[] ? _SMM_PARAMS[] : _load_smm_params!(context)
+        (isempty(p) || idx > length(p)) ? NaN : p[idx]
     end
 
     nsec  = NSEC
@@ -242,7 +243,13 @@ const UB = [100.0; 3.00; 1.50; log(1e16); 0.99;  0.50; 0.99;
 Build the initial parameter vector from the current Dynare context.
 """
 function default_theta0(context::Dynare.Context)
-    pv(nm) = let idx = param_idx(context, nm); idx === nothing ? 0.0 : context.work.params[idx]; end
+    pv(nm) = let idx = param_idx(context, nm)
+                 if idx === nothing; 0.0
+                 else
+                     p = _SMM_PARAMS_READY[] ? _SMM_PARAMS[] : _load_smm_params!(context)
+                     (isempty(p) || idx > length(p)) ? 0.0 : p[idx]
+                 end
+             end
     [
         pv("ilabcosts");
         pv("epsY_1");
