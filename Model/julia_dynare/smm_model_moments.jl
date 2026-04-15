@@ -24,7 +24,9 @@ JACOBIAN COLUMN LAYOUT (from dynamic.json):
 """
 
 using LinearAlgebra, SparseArrays, Statistics, StatsBase, NLsolve
-using GenericSchur   # pure Julia QZ + ordschur — no LAPACK callbacks
+# GenericSchur was used to avoid LAPACK gees callbacks on ARM Mac.
+# Julia's built-in LinearAlgebra.schur uses LAPACK dgges (no select callback)
+# which IS available via Apple Accelerate on ARM. We now use it directly.
 
 include("steady_ntwsoe_system.jl")
 include("steady_ntwsoe.jl")
@@ -230,42 +232,31 @@ function _klein_solve(context)
         # ---- 2. Identify backward and forward variable index sets -------- #
         bkwrd_b = collect(Int, context.models[1].i_bkwrd_b)  # 78 state rows
 
-        # i_fwrd_b may be absent/empty in a context created without stoch_simul.
-        # Fallback: derive forward-variable indices from the dynamic Jacobian.
-        # Columns 570:625 of G are ∂f/∂y_{fw,t+1} (lead variables at t+1).
-        # In Dynare the lead block uses the same variable ordering as the current
-        # block, so we scan column j of B (the "current" Jacobian, cols 79:569 of G)
-        # to identify which current-period variables also appear as lead variables.
-        # The safe approach: read i_fwrd_b if available, else use the state rows
-        # stored in dynare_state_rows.csv together with the Jacobian C-column norms.
-        fwrd_b = try
-            fb = collect(Int, context.models[1].i_fwrd_b)
-            length(fb) == n_fw || error("wrong length $(length(fb))")
-            fb
-        catch efwd
-            # Fallback 1: load from dynare_fwd_rows.csv (written by the subprocess)
+        # i_fwrd_b: forward-looking variable indices in 1:n_endo.
+        # Field name varies across Dynare.jl versions; try several alternatives.
+        # If none exist in the context, fall back to dynare_fwd_rows.csv.
+        fwrd_b = nothing
+        m1 = context.models[1]
+        for fname in (:i_fwrd_b, :i_fwrd, :i_lead_b, :i_nontemporal_b)
+            if isdefined(m1, fname)
+                v = getfield(m1, fname)
+                if !isempty(v) && length(v) == n_fw
+                    fwrd_b = collect(Int, v)
+                    break
+                end
+            end
+        end
+        if isnothing(fwrd_b)
             fwd_csv = joinpath(_JDYN_DIR, "mod", "dynare_fwd_rows.csv")
             if isfile(fwd_csv)
-                @printf "  [Klein] i_fwrd_b not in context (%s); loading from CSV\n" typeof(efwd)
                 df_fwd = CSV.read(fwd_csv, DataFrame)
                 fb2 = Int.(df_fwd.fwd_row)
                 if length(fb2) == n_fw
-                    fb2
-                else
-                    @printf "  [Klein] fwd_rows CSV has %d entries, expected %d\n" length(fb2) n_fw
-                    return false, zeros(0,0), zeros(0,0), zeros(0,0)
+                    fwrd_b = fb2
                 end
-            else
-                @printf "  [Klein] i_fwrd_b not in context and dynare_fwd_rows.csv missing.\n"
-                @printf "         Re-run main_SOE_gap.jl to regenerate the SMM context.\n"
-                return false, zeros(0,0), zeros(0,0), zeros(0,0)
             end
         end
-        if length(fwrd_b) != n_fw
-            @printf "  [Klein] fwrd_b length mismatch: %d ≠ %d — aborting\n" length(fwrd_b) n_fw
-            return false, zeros(0,0), zeros(0,0), zeros(0,0)
-        end
-        @printf "  [Klein] bkwrd_b: %d vars, fwrd_b: %d vars\n" length(bkwrd_b) length(fwrd_b)
+        isnothing(fwrd_b) && return false, zeros(0,0), zeros(0,0), zeros(0,0)
 
         # ---- 3. Static variable elimination ------------------------------ #
         # The full 491×491 QZ has only 56 finite eigenvalues (rank(C_pad)=56),
@@ -318,23 +309,18 @@ function _klein_solve(context)
         AA_qz = C_pad_134   # 134×134 leading  (coefficient of y_{t+1})
         BB_qz = -B_red       # 134×134 lagging  (coefficient of y_t)
 
-        F = GenericSchur.schur(AA_qz, BB_qz)
-        S = F.S; T = F.T
+        # Use Julia's built-in LinearAlgebra.schur (LAPACK dgges, no select callback).
+        # On ARM Mac, Apple Accelerate supports dgges without a select function,
+        # unlike gees (which has a Fortran callback and fails on Apple Silicon).
+        F = LinearAlgebra.schur(AA_qz, BB_qz)
+        # LinearAlgebra.GeneralizedSchur: F.S from AA, F.T from BB, eigenvalues = F.S/F.T
+        S_diag = abs.(diag(F.S))
+        T_diag = abs.(diag(F.T))
 
-        # GenericSchur convention: schur(A,B) → A = Q S Z*, B = Q T Z*
-        # Generalized eigenvalues = S[i,i] / T[i,i]  (S from AA, T from BB)
-        #
-        # In the 134×134 system with the correct S/T convention:
-        #   Backward positions (cols 1:78 of AA=C_pad_134 are zero):
-        #     S[i,i] ≈ 0, T[i,i] ≠ 0  →  λ = S/T ≈ 0  (stable, |λ|<1) ✓
-        #   Forward positions (cols 79:134 are C_red):
-        #     S[i,i] ≠ 0, T[i,i] ≠ 0  →  λ = S/T > 1  (explosive) ✓
-        # → n_stable = 78 = n_bk  satisfying Blanchard-Kahn ✓
-        #
-        # NOTE: T/S would invert all eigenvalues and give n_stable=56=n_fw (wrong).
-        λ = [let si = abs(S[i,i]), ti = abs(T[i,i])
-                 ti < 1e-14 ? Inf : si / ti   # S/T convention
-             end for i in 1:n_134]
+        # Eigenvalues λ = S/T (S from AA=C_pad_134, T from BB=-B_red).
+        # Backward positions (cols 1:78 of C_pad_134 = 0): S≈0 → λ≈0 (stable) ✓
+        # Forward positions (cols 79:134 = C_red): λ > 1 (explosive for DSGE) ✓
+        λ = [T_diag[i] < 1e-14 ? Inf : S_diag[i] / T_diag[i] for i in 1:n_134]
 
         n_stable = sum(λ .< 1.0)
         if n_stable != n_bk
@@ -342,9 +328,9 @@ function _klein_solve(context)
             return false, zeros(0,0), zeros(0,0), zeros(0,0)
         end
 
-        # Reorder: stable eigenvalues (backward vars) first
-        select = λ .< 1.0
-        F2 = GenericSchur.ordschur(F, select)
+        # Reorder: stable eigenvalues (backward vars) first using LinearAlgebra.ordschur!
+        select = BitVector(λ .< 1.0)
+        F2 = LinearAlgebra.ordschur!(F, select)
         Z  = real(F2.Z)   # 134×134
 
         # ---- 5. Extract decision rule from the reduced system ------------ #

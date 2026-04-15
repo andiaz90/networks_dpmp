@@ -120,12 +120,22 @@ state_rows = isdefined(context.models[1], :i_bkwrd_b) ?
              collect(1:size(g1_1, 2))
 
 # ---- Forward variable rows ----
-fwd_rows = if isdefined(context.models[1], :i_fwrd_b) && !isempty(context.models[1].i_fwrd_b)
-    @info "  i_fwrd_b found: $(length(context.models[1].i_fwrd_b)) forward vars"
-    Int.(context.models[1].i_fwrd_b)
-else
-    @warn "  i_fwrd_b not found or empty — saving empty fwd_rows"
-    Int[]
+# Try multiple field names across Dynare.jl versions
+fwd_rows = let m1 = context.models[1]
+    @info "  models[1] fields: $(fieldnames(typeof(m1)))"
+    found = Int[]
+    for fname in (:i_fwrd_b, :i_fwrd, :i_lead_b, :i_nontemporal_b)
+        if isdefined(m1, fname)
+            v = getfield(m1, fname)
+            if !isempty(v)
+                @info "  Forward vars from field :$fname — $(length(v)) entries"
+                found = Int.(v)
+                break
+            end
+        end
+    end
+    isempty(found) && @warn "  No forward variable field found in models[1]"
+    found
 end
 
 # =========================================================================== #
