@@ -434,8 +434,9 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         verbosity = 1,
     )
 
-    θ_hat = clamp.(minimizer(result), LB, UB)
-    @printf "\nCMA-ES done.  obj = %.6f  (BK/NaN failures: %d)\n\n" minimum(result) fail_count[]
+    # CMAEvolutionStrategy result fields: result.minimizer (best θ), result.minimum (best obj)
+    θ_hat = clamp.(result.minimizer, LB, UB)
+    @printf "\nCMA-ES done.  obj = %.6f  (BK/NaN failures: %d)\n\n" result.minimum fail_count[]
 
     # --- Final evaluation ---
     obj_hat, moments_hat = smm_objective(θ_hat, data_moments, W, context, baseline, endo_names)

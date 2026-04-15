@@ -391,8 +391,13 @@ function _klein_solve(context)
         return true, g1_1, g1_2, Σe
 
     catch e
-        # Print type only (no string(e) — Dynare exceptions can segfault on ARM)
-        @printf "  [Klein] Exception type: %s\n" typeof(e)
+        # FieldError means i_fwrd_b / i_bkwrd_b field missing from context —
+        # expected for contexts built without stoch_simul.  Suppress the print
+        # to avoid flooding output during CMA-ES (115k evaluations).
+        # For any other exception type, print once for diagnostics.
+        if !(e isa FieldError)
+            @printf "  [Klein] Exception type: %s\n" typeof(e)
+        end
         return false, zeros(0,0), zeros(0,0), zeros(0,0)
     end
 end
