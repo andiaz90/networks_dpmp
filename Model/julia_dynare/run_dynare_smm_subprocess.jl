@@ -114,10 +114,19 @@ Sigma_e = isdefined(context.models[1], :Sigma_e) ?
           Matrix{Float64}(context.models[1].Sigma_e) :
           Matrix{Float64}(I, size(g1_2, 2), size(g1_2, 2))
 
-# ---- State variable rows ----
+# ---- State variable rows (backward-looking) ----
 state_rows = isdefined(context.models[1], :i_bkwrd_b) ?
              Int.(context.models[1].i_bkwrd_b) :
              collect(1:size(g1_1, 2))
+
+# ---- Forward variable rows ----
+fwd_rows = if isdefined(context.models[1], :i_fwrd_b) && !isempty(context.models[1].i_fwrd_b)
+    @info "  i_fwrd_b found: $(length(context.models[1].i_fwrd_b)) forward vars"
+    Int.(context.models[1].i_fwrd_b)
+else
+    @warn "  i_fwrd_b not found or empty — saving empty fwd_rows"
+    Int[]
+end
 
 # =========================================================================== #
 #  Write CSV files                                                            #
@@ -137,6 +146,9 @@ CSV.write(joinpath(MOD_DIR, "dynare_g1_2.csv"),
 
 CSV.write(joinpath(MOD_DIR, "dynare_sigma_e.csv"),
     DataFrame(Sigma_e, [Symbol("c$i") for i in 1:size(Sigma_e,2)]))
+
+CSV.write(joinpath(MOD_DIR, "dynare_fwd_rows.csv"),
+    DataFrame(fwd_row = fwd_rows))
 
 CSV.write(joinpath(MOD_DIR, "dynare_state_rows.csv"),
     DataFrame(state_row = state_rows))

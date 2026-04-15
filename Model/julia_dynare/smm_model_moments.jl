@@ -229,7 +229,43 @@ function _klein_solve(context)
 
         # ---- 2. Identify backward and forward variable index sets -------- #
         bkwrd_b = collect(Int, context.models[1].i_bkwrd_b)  # 78 state rows
-        fwrd_b  = collect(Int, context.models[1].i_fwrd_b)   # 56 forward rows
+
+        # i_fwrd_b may be absent/empty in a context created without stoch_simul.
+        # Fallback: derive forward-variable indices from the dynamic Jacobian.
+        # Columns 570:625 of G are ∂f/∂y_{fw,t+1} (lead variables at t+1).
+        # In Dynare the lead block uses the same variable ordering as the current
+        # block, so we scan column j of B (the "current" Jacobian, cols 79:569 of G)
+        # to identify which current-period variables also appear as lead variables.
+        # The safe approach: read i_fwrd_b if available, else use the state rows
+        # stored in dynare_state_rows.csv together with the Jacobian C-column norms.
+        fwrd_b = try
+            fb = collect(Int, context.models[1].i_fwrd_b)
+            length(fb) == n_fw || error("wrong length $(length(fb))")
+            fb
+        catch efwd
+            # Fallback 1: load from dynare_fwd_rows.csv (written by the subprocess)
+            fwd_csv = joinpath(_JDYN_DIR, "mod", "dynare_fwd_rows.csv")
+            if isfile(fwd_csv)
+                @printf "  [Klein] i_fwrd_b not in context (%s); loading from CSV\n" typeof(efwd)
+                df_fwd = CSV.read(fwd_csv, DataFrame)
+                fb2 = Int.(df_fwd.fwd_row)
+                if length(fb2) == n_fw
+                    fb2
+                else
+                    @printf "  [Klein] fwd_rows CSV has %d entries, expected %d\n" length(fb2) n_fw
+                    return false, zeros(0,0), zeros(0,0), zeros(0,0)
+                end
+            else
+                @printf "  [Klein] i_fwrd_b not in context and dynare_fwd_rows.csv missing.\n"
+                @printf "         Re-run main_SOE_gap.jl to regenerate the SMM context.\n"
+                return false, zeros(0,0), zeros(0,0), zeros(0,0)
+            end
+        end
+        if length(fwrd_b) != n_fw
+            @printf "  [Klein] fwrd_b length mismatch: %d ≠ %d — aborting\n" length(fwrd_b) n_fw
+            return false, zeros(0,0), zeros(0,0), zeros(0,0)
+        end
+        @printf "  [Klein] bkwrd_b: %d vars, fwrd_b: %d vars\n" length(bkwrd_b) length(fwrd_b)
 
         # ---- 3. Static variable elimination ------------------------------ #
         # The full 491×491 QZ has only 56 finite eigenvalues (rank(C_pad)=56),
@@ -355,7 +391,8 @@ function _klein_solve(context)
         return true, g1_1, g1_2, Σe
 
     catch e
-        # Silent catch — Dynare exceptions must not be string-ified
+        # Print type only (no string(e) — Dynare exceptions can segfault on ARM)
+        @printf "  [Klein] Exception type: %s\n" typeof(e)
         return false, zeros(0,0), zeros(0,0), zeros(0,0)
     end
 end
