@@ -405,40 +405,58 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     @printf "=== PRE-FLIGHT PASSED — launching optimizer ===\n\n"
 
     # --- CMA-ES optimisation ---
-    # CMAEvolutionStrategy.jl: minimise f(θ) subject to LB ≤ θ ≤ UB.
-    # insigma = (UB - LB)/6 so ±3σ spans the full feasible range.
-    @printf "--- CMA-ES (blackbox, derivative-free) ---\n"
-    @printf "  %d parameters, %d moments, max %d evaluations\n\n" N_THETA 46 (5000*N_THETA)
+    # CMA-ES (Covariance Matrix Adaptation Evolution Strategy) is a state-of-the-art
+    # black-box derivative-free optimizer — the standard choice for SMM estimation.
+    max_evals = 5000 * N_THETA
+    @printf "--- CMA-ES (black-box, derivative-free) ---\n"
+    @printf "  %d parameters  |  %d moments  |  max %d evaluations\n" N_THETA 46 max_evals
+    @printf "  %-6s  %-14s  %-10s\n" "eval" "objective" "BK/NaN"
+    @printf "  %s\n" repeat("-", 36)
 
+    # Track best solution manually — robust across CMAEvolutionStrategy API versions.
+    best_θ   = Ref(clamp.(θ0, LB, UB))
+    best_obj = Ref(Inf)
     fail_count = Ref(0)
+    eval_count = Ref(0)
+
     obj_fn = θ -> begin
         obj, _ = smm_objective(θ, data_moments, W, context, baseline, endo_names)
+        eval_count[] += 1
+        if isfinite(obj) && obj < best_obj[]
+            best_obj[] = obj
+            best_θ[]   = copy(θ)
+        end
         obj >= 1e7 && (fail_count[] += 1)
+        # Print progress every 500 evaluations
+        if eval_count[] % 500 == 0
+            @printf "  %-6d  %-14.6f  %-10d\n" eval_count[] best_obj[] fail_count[]
+            flush(stdout)
+        end
         obj
     end
 
-    # CMAEvolutionStrategy.jl in this version requires a scalar σ0 (not a vector).
-    # Use mean of (UB-LB)/6 so the global step size spans ~1/6 of the feasible range.
+    # Scalar σ0: mean of (UB-LB)/6 spans ~1/6 of the feasible range.
     insigma = mean((UB .- LB) ./ 6)
 
-    result = CMAEvolutionStrategy.minimize(
+    CMAEvolutionStrategy.minimize(
         obj_fn,
         clamp.(θ0, LB, UB),
         insigma;
-        lower    = LB,
-        upper    = UB,
-        maxiter  = 5000 * N_THETA,
-        ftol     = 1e-6,
-        xtol     = 1e-6,
-        seed     = 42,
-        verbosity = 1,
+        lower     = LB,
+        upper     = UB,
+        maxiter   = max_evals,
+        ftol      = 1e-6,
+        xtol      = 1e-6,
+        seed      = 42,
+        verbosity = 0,   # suppress CMA-ES internal output; we print our own
     )
 
-    # CMAEvolutionStrategy result fields: result.minimizer (best θ), result.minimum (best obj)
-    θ_hat = clamp.(result.minimizer, LB, UB)
-    @printf "\nCMA-ES done.  obj = %.6f  (BK/NaN failures: %d)\n\n" result.minimum fail_count[]
+    θ_hat = clamp.(best_θ[], LB, UB)
+    @printf "  %s\n" repeat("-", 36)
+    @printf "  %-6d  %-14.6f  %-10d\n\n" eval_count[] best_obj[] fail_count[]
+    @printf "CMA-ES done after %d evaluations.  Best obj = %.6f\n\n" eval_count[] best_obj[]
 
-    # --- Final evaluation ---
+    # --- Final evaluation at best θ ---
     obj_hat, moments_hat = smm_objective(θ_hat, data_moments, W, context, baseline, endo_names)
     ψ_hat = data_moments .- moments_hat
 

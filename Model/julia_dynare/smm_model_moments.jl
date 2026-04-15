@@ -247,7 +247,6 @@ function resolve_first_order!(context)
         mr  = context.results.model_results[1]
         lre = mr.linearrationalexpectations
         if !isempty(lre.g1_1) && size(lre.g1_1, 1) >= 400
-            @printf "  [resolve] Using cached decision rule (approximate for changed params)\n"
             return true,
                    Matrix{Float64}(lre.g1_1),
                    Matrix{Float64}(lre.g1_2),
