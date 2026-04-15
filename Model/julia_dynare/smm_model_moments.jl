@@ -35,10 +35,11 @@ include("utils.jl")
 # =========================================================================== #
 #  PATHS TO COMPILED MODEL FILES                                               #
 # =========================================================================== #
-const _JDYN_DIR   = @__DIR__
-const _MODEL_BASE = joinpath(_JDYN_DIR, "mod", "NK_SOE_lev_gap2")
-const _JULIA_DIR  = joinpath(_MODEL_BASE, "model", "julia")
-const _JSON_PATH  = joinpath(_MODEL_BASE, "model", "json", "dynamic.json")
+const _JDYN_DIR    = @__DIR__
+const _MODEL_BASE  = joinpath(_JDYN_DIR, "mod", "NK_SOE_lev_gap2")
+const _JULIA_DIR   = joinpath(_MODEL_BASE, "model", "julia")
+const _JSON_PATH   = joinpath(_MODEL_BASE, "model", "json", "dynamic.json")
+const _MODFILE_PATH = joinpath(_MODEL_BASE, "model", "json", "modfile.json")
 
 # Include compiled Dynare model files at TOP LEVEL so they are in the same
 # Julia world as all calling code.  Including them inside a function creates
@@ -88,6 +89,50 @@ function _load_jacobian_structure!()
     end
     _JAC_LOADED[] = true
     @printf "  [SMM] Jacobian sparsity loaded: %d equations × %d cols, %d nnz\n" _N_EQ[] _N_COL[] _N_NZ[]
+end
+
+
+# =========================================================================== #
+#  FORWARD VARIABLE INDICES FROM modfile.json                                  #
+# =========================================================================== #
+# modfile.json contains model_info.lead_lag_incidence: a (n_endo × 3) matrix.
+# Row j, column 3 gives the Jacobian column of variable j's t+1 appearance
+# (0 if the variable has no lead). Variables with col-3 > 0 are forward-looking.
+# Their 1-based declaration-order indices form i_fwrd_b.
+# This is read once and cached — no context field needed.
+
+const _FWRD_LOADED = Ref(false)
+const _I_FWRD_B    = Int[]
+
+function _load_fwrd_indices!()
+    _FWRD_LOADED[] && return
+    isfile(_MODFILE_PATH) || error("modfile.json not found: $_MODFILE_PATH")
+
+    raw = read(_MODFILE_PATH, String)
+
+    # Locate "lead_lag_incidence" then scan forward for all [a, b, c] rows.
+    # Format in file: "lead_lag_incidence": [[ 1, 79, 0],[ 2, 80, 570], ...]
+    # Each row is exactly a 3-integer bracket: \[ \d+, \d+, \d+\]
+    idx = findfirst("lead_lag_incidence", raw)
+    idx === nothing && error("lead_lag_incidence not found in modfile.json")
+
+    # Read up to 100 KB from that point — enough for 491 rows × ~15 chars each
+    chunk_end = min(lastindex(raw), idx[end] + 100_000)
+    chunk = raw[idx[end]+1 : chunk_end]
+
+    # Each row: [ <lag>, <cur>, <lead>] — parse lead (3rd number)
+    rows = collect(eachmatch(r"\[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]", chunk))
+    isempty(rows) && error("Could not parse lead_lag_incidence rows from modfile.json")
+
+    # Forward-looking: declaration-order index j where lead column > 0
+    empty!(_I_FWRD_B)
+    for (j, row) in enumerate(rows)
+        lead_col = parse(Int, row.captures[3])
+        lead_col > 0 && push!(_I_FWRD_B, j)
+    end
+    length(rows) == 491 || @printf "  [SMM] Warning: parsed %d rows, expected 491\n" length(rows)
+    _FWRD_LOADED[] = true
+    @printf "  [SMM] Forward indices loaded from modfile.json: %d of %d vars are forward-looking\n" length(_I_FWRD_B) length(rows)
 end
 
 
@@ -232,18 +277,27 @@ function _klein_solve(context)
         # ---- 2. Identify backward and forward variable index sets -------- #
         bkwrd_b = collect(Int, context.models[1].i_bkwrd_b)  # 78 state rows
 
-        # i_fwrd_b: forward-looking variable indices in 1:n_endo.
-        # Field name varies across Dynare.jl versions; try several alternatives.
-        # If none exist in the context, fall back to dynare_fwd_rows.csv.
+        # i_fwrd_b: 1-based declaration-order indices of forward-looking variables.
+        # Priority 1: context field (various possible names across Dynare.jl versions).
+        # Priority 2: modfile.json lead_lag_incidence (deterministic, always available).
+        # Priority 3: dynare_fwd_rows.csv (written by updated subprocess).
         fwrd_b = nothing
         m1 = context.models[1]
         for fname in (:i_fwrd_b, :i_fwrd, :i_lead_b, :i_nontemporal_b)
             if isdefined(m1, fname)
                 v = getfield(m1, fname)
                 if !isempty(v) && length(v) == n_fw
-                    fwrd_b = collect(Int, v)
-                    break
+                    fwrd_b = collect(Int, v); break
                 end
+            end
+        end
+        if isnothing(fwrd_b)
+            # Load from modfile.json (lead_lag_incidence, col 3 > 0 → forward var)
+            _load_fwrd_indices!()
+            if length(_I_FWRD_B) == n_fw
+                fwrd_b = copy(_I_FWRD_B)
+            elseif !isempty(_I_FWRD_B)
+                @printf "  [Klein] modfile.json gave %d fwrd vars, expected %d\n" length(_I_FWRD_B) n_fw
             end
         end
         if isnothing(fwrd_b)
@@ -251,9 +305,7 @@ function _klein_solve(context)
             if isfile(fwd_csv)
                 df_fwd = CSV.read(fwd_csv, DataFrame)
                 fb2 = Int.(df_fwd.fwd_row)
-                if length(fb2) == n_fw
-                    fwrd_b = fb2
-                end
+                length(fb2) == n_fw && (fwrd_b = fb2)
             end
         end
         isnothing(fwrd_b) && return false, zeros(0,0), zeros(0,0), zeros(0,0)
