@@ -288,19 +288,20 @@ function smm_model_moments_v2(θ::AbstractVector{<:Real}, context, baseline, end
 
     # Build Σe in-place (zero and fill, no allocation)
     fill!(sc.Σe, 0.0)
-    sc.Σe[1, 1] = 1.0     # eps_om
-    sc.Σe[4, 4] = 1.0     # eps_pvstar
-    for i in 5:min(16, n_exo); sc.Σe[i, i] = 1.0; end
-    if n_exo >= 17; sc.Σe[17, 17] = 1.0; end
+    sc.Σe[1, 1] = 1.0     # eps_om   (goods-services demand)
+    sc.Σe[2, 2] = 1.0     # eps_i    (monetary policy) — was missing in v1
+    # sc.Σe[3, 3] = 0.0   # epschi   (labor supply, inactive)
+    sc.Σe[4, 4] = 1.0     # eps_pvstar (import price)
+    for i in 5:min(16, n_exo); sc.Σe[i, i] = 1.0; end   # epsA_1:12
+    if n_exo >= 17; sc.Σe[17, 17] = 1.0; end             # eps_xi
 
-    # Lyapunov: Q_lyap = R[sr,:] * Σe * R[sr,:]'
-    Tsr = T[sr, :]
-    Rsr = R[sr, :]
-    # Rsr is n_state × n_exo (78×17), Σe is n_exo × n_exo (17×17)
-    # Product Rsr * Σe is n_state × n_exo → use a temporary of that size
-    RΣ = Rsr * sc.Σe   # 78×17 (small, acceptable allocation)
-    mul!(sc.Q_lyap, RΣ, Rsr')   # 78×78 = (78×17) × (17×78)
-    # Symmetrize
+    # State-space matrices
+    Tsr = T[sr, :]       # A: state transition (78×78)
+    Rsr = R[sr, :]       # B: state shock impact (78×17)
+
+    # Q_lyap = B * Σe * B'
+    RΣ = Rsr * sc.Σe   # 78×17
+    mul!(sc.Q_lyap, RΣ, Rsr')   # 78×78
     n_s = n_state
     @inbounds for j in 1:n_s, i in 1:j-1
         avg = 0.5 * (sc.Q_lyap[i,j] + sc.Q_lyap[j,i])
@@ -312,10 +313,11 @@ function smm_model_moments_v2(θ::AbstractVector{<:Real}, context, baseline, end
                           tmp1=sc.tmp1, tmp2=sc.tmp2, Ak=sc.Ak)
     (any(diag(sc.P) .< -1e-10) || any(isnan.(sc.P))) && return NAN46, false
 
-    # Full covariance
-    Γ  = T * sc.P * T' + R * sc.Σe * R'
-    Γ  = (Γ + Γ') / 2
-    Γ1 = T * Tsr * (sc.P * T' + Rsr * sc.Σe * R')
+    # HP-filtered covariance (matches data HP-filtered log deviations, λ=1600)
+    R_Σ_Rt = R * sc.Σe * R'
+    R_Σ_Rt = (R_Σ_Rt + R_Σ_Rt') / 2
+    Γ  = hp_filtered_variance(Tsr, sc.Q_lyap, T, R_Σ_Rt; λ=1600.0, nfreq=256)
+    Γ1 = hp_filtered_lag1(Tsr, sc.Q_lyap, T, R_Σ_Rt; λ=1600.0, nfreq=256)
 
     # Extract moments using pre-computed index dict
     ys = context.results.model_results[1].trends.endogenous_steady_state
@@ -533,7 +535,7 @@ function smm_run_v2(context::Dynare.Context; endo_names_override=nothing)
         model  = moments_hat,
         diff   = ψ_hat,
     )
-    CSV.write(joinpath(DATA_DIR, "smm_results_v2.csv"), df_results)
+    CSV.write(joinpath(DATA_DIR, "smm_results.csv"), df_results)
 
     df_est = DataFrame(
         param = vcat(["ilabcosts","epsY","epsM","log_kappaV",

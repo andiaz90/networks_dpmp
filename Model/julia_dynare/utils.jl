@@ -218,3 +218,128 @@ end
 # =========================================================================== #
 
 ternary_str(cond::Bool, s_true::String, s_false::String) = cond ? s_true : s_false
+
+
+# =========================================================================== #
+#  HP-filtered variance from the state-space representation                    #
+#                                                                              #
+#  For a first-order solution y_t = T·s_t, s_t = A·s_{t-1} + B·ε_t,         #
+#  the unconditional spectral density of y_i is:                              #
+#    S_y(ω) = e_i' T (I - A e^{-iω})^{-1} B Σ B' (I - A' e^{iω})^{-1} T' e_i / 2π  #
+#  The HP filter removes trend by applying gain |1 - H(ω)|² where            #
+#    H(ω) = 1 / (1 + λ(2 - 2cos(ω))²)                                       #
+#  HP-filtered variance = ∫₀^π |1-H(ω)|² S_y(ω) dω / π  (real-valued)      #
+#                                                                              #
+#  References: Burnside (1998, JMCB); Uhlig (1999)                            #
+# =========================================================================== #
+
+"""
+    hp_filtered_variance(Γ_full, A, B_Σ_Bt, T, λ; nfreq=512) -> Matrix{Float64}
+
+Compute the HP-filtered variance-covariance matrix of the full endogenous
+vector y_t, given:
+  Γ_full  : unconditional covariance of y (n_endo × n_endo) [used only for size]
+  A       : state transition (n_state × n_state)
+  B_Σ_Bt  : B * Σe * B' (n_state × n_state)
+  T       : observation matrix (n_endo × n_state)
+  λ       : HP filter parameter (1600 for quarterly)
+  nfreq   : number of frequency grid points (default 512)
+
+Returns the HP-filtered covariance matrix (n_endo × n_endo).
+"""
+function hp_filtered_variance(A::AbstractMatrix{Float64},
+                               B_Σ_Bt::Matrix{Float64},
+                               T::AbstractMatrix{Float64},
+                               R_Σ_Rt::Matrix{Float64};
+                               λ::Float64=1600.0, nfreq::Int=512)
+    n_state = size(A, 1)
+    n_endo  = size(T, 1)
+    I_s     = Matrix{ComplexF64}(I, n_state, n_state)
+
+    # Frequency grid: ω ∈ (0, π] — exclude ω=0 (zero frequency = trend)
+    Γ_hp = zeros(n_endo, n_endo)
+
+    for k in 1:nfreq
+        ω = π * k / nfreq
+
+        # HP filter gain: 1 - H(ω) where H(ω) = 1/(1 + λ(2-2cos(ω))²)
+        hp_denom = 1.0 + λ * (2.0 - 2.0 * cos(ω))^2
+        hp_gain_sq = (1.0 - 1.0 / hp_denom)^2   # |1-H(ω)|²
+
+        # State-space transfer: (I - A e^{-iω})^{-1}
+        eiω = exp(-im * ω)
+        M   = I_s - A * eiω
+        Minv = M \ I_s   # (I - A e^{-iω})^{-1}
+
+        # Spectral density of states: Minv * B_Σ_Bt * Minv'
+        S_state = Minv * B_Σ_Bt * Minv'
+
+        # Spectral density of y: T * S_state * T' + cross terms with R
+        # Full: S_y(ω) = (T*Minv*B + R) * Σe * (T*Minv*B + R)'  / 2π
+        # But for variance we integrate, and the R*Σe*R' term is frequency-flat,
+        # so its HP-filtered contribution is simply hp_gain_sq * R_Σ_Rt * dω/π.
+        # We include it in the loop for correctness.
+        S_y = real.(T * S_state * T')  # state contribution to spectral density
+
+        # Accumulate HP-filtered variance (Riemann sum: Δω = π/nfreq)
+        Γ_hp .+= hp_gain_sq .* S_y .* (π / nfreq / π)
+    end
+
+    # Add the contemporaneous shock contribution (R*Σe*R'), also HP-filtered.
+    # This is the frequency-flat part: ∫ hp_gain² * R_Σ_Rt dω/π
+    hp_flat = 0.0
+    for k in 1:nfreq
+        ω = π * k / nfreq
+        hp_denom = 1.0 + λ * (2.0 - 2.0 * cos(ω))^2
+        hp_flat += (1.0 - 1.0 / hp_denom)^2 * (1.0 / nfreq)
+    end
+    Γ_hp .+= hp_flat .* R_Σ_Rt
+
+    return (Γ_hp .+ Γ_hp') ./ 2   # enforce symmetry
+end
+
+
+"""
+    hp_filtered_lag1(A, B_Σ_Bt, T, R_Σ_Rt; λ, nfreq) -> Matrix{Float64}
+
+Compute HP-filtered lag-1 autocovariance E_HP[y_t · y_{t-1}'].
+Used for autocorr(Q).
+"""
+function hp_filtered_lag1(A::AbstractMatrix{Float64},
+                           B_Σ_Bt::Matrix{Float64},
+                           T::AbstractMatrix{Float64},
+                           R_Σ_Rt::Matrix{Float64};
+                           λ::Float64=1600.0, nfreq::Int=512)
+    n_state = size(A, 1)
+    n_endo  = size(T, 1)
+    I_s     = Matrix{ComplexF64}(I, n_state, n_state)
+
+    Γ1_hp = zeros(n_endo, n_endo)
+
+    for k in 1:nfreq
+        ω = π * k / nfreq
+        hp_denom = 1.0 + λ * (2.0 - 2.0 * cos(ω))^2
+        hp_gain_sq = (1.0 - 1.0 / hp_denom)^2
+
+        eiω = exp(-im * ω)
+        M   = (Matrix{ComplexF64}(I, n_state, n_state) - A * eiω)
+        Minv = M \ I_s
+
+        S_state = Minv * B_Σ_Bt * Minv'
+        S_y = real.(T * S_state * T')
+
+        # Lag-1: multiply by e^{iω} to get cross-spectral at lag 1
+        Γ1_hp .+= hp_gain_sq .* S_y .* cos(ω) .* (1.0 / nfreq)
+    end
+
+    # Contemporaneous shock lag-1 contribution (flat spectrum × cos(ω))
+    hp_cos = 0.0
+    for k in 1:nfreq
+        ω = π * k / nfreq
+        hp_denom = 1.0 + λ * (2.0 - 2.0 * cos(ω))^2
+        hp_cos += (1.0 - 1.0 / hp_denom)^2 * cos(ω) * (1.0 / nfreq)
+    end
+    Γ1_hp .+= hp_cos .* R_Σ_Rt
+
+    return Γ1_hp
+end

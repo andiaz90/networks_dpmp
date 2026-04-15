@@ -705,33 +705,41 @@ function smm_model_moments(θ, context, baseline, endo_names)
     success, T, R = _resolve_cached!(context, θ)
     !success && return NAN46, false
 
-    # Build normalized Sigma_e from the 16 active shocks.
-    # The SMM context has Sigma_e = zeros(17,17) because stoch_simul was not
-    # run for the _smm mod file.  We CANNOT rely on mutating context.models[1].Sigma_e
-    # (may fail silently on ARM due to immutability in deserialized structs).
-    # Instead, construct Sigma_e locally: each active shock has unit variance;
-    # amplitude scaling is handled by the parameters in the model equations
-    # (sigma_om * eps_om, isigma_tfp_i * epsA_i, sigma_pvstar * eps_pvstar,
-    #  sigma_xi * eps_xi).
+    # Build normalized Sigma_e for all active shocks.
+    # Each active shock has unit variance; amplitude scaling is handled by
+    # parameters in the model equations (sigma_om * eps_om, etc.).
     #
-    # varexo order (from NK_SOE_lev_gap2_smm.mod):
-    #   1 = eps_om    2 = eps_i     3 = epschi (unused)  4 = eps_pvstar
+    # varexo order (from NK_SOE_lev_gap2.mod):
+    #   1 = eps_om    2 = eps_i     3 = epschi    4 = eps_pvstar
     #   5:16 = epsA_1:12             17 = eps_xi
     n_exo = size(R, 2)   # should be 17
     Σe = zeros(n_exo, n_exo)
-    Σe[1, 1]  = 1.0                        # eps_om
-    Σe[4, 4]  = 1.0                        # eps_pvstar
+    Σe[1, 1]  = 1.0                        # eps_om   (goods-services demand)
+    Σe[2, 2]  = 1.0                        # eps_i    (monetary policy) — FIX: was missing
+    # Σe[3, 3] = 0.0                       # epschi   (labor supply, inactive)
+    Σe[4, 4]  = 1.0                        # eps_pvstar (import price)
     for i in 5:min(16, n_exo)
-        Σe[i, i] = 1.0                     # epsA_1 through epsA_12
+        Σe[i, i] = 1.0                     # epsA_1 through epsA_12 (sectoral TFP)
     end
-    if n_exo >= 17; Σe[17, 17] = 1.0; end # eps_xi
+    if n_exo >= 17; Σe[17, 17] = 1.0; end # eps_xi   (preference/demand)
 
     sr = context.models[1].i_bkwrd_b
-    P  = local_dlyap(T[sr,:], R[sr,:]*Σe*R[sr,:]')
-    (any(diag(P).<-1e-10)||any(isnan.(P))) && return NAN46, false
-    P  = (P+P')/2
-    Γ  = T*P*T' + R*Σe*R'; Γ=(Γ+Γ')/2
-    Γ1 = T*T[sr,:]*( P*T' + R[sr,:]*Σe*R')
+    A_state = T[sr, :]       # n_state × n_state  (state transition)
+    B_state = R[sr, :]       # n_state × n_exo    (state shock impact)
+    B_Σ_Bt  = B_state * Σe * B_state'   # n_state × n_state
+    B_Σ_Bt  = (B_Σ_Bt + B_Σ_Bt') / 2
+
+    # Solve state covariance via Lyapunov: P = A·P·A' + B·Σ·B'
+    P = local_dlyap(A_state, B_Σ_Bt)
+    (any(diag(P) .< -1e-10) || any(isnan.(P))) && return NAN46, false
+    P = (P + P') / 2
+
+    # HP-filtered covariance (matches data moments computed on HP-filtered log deviations)
+    # Data uses λ=1600 (quarterly). Model moments must use the same filter.
+    R_Σ_Rt = R * Σe * R'
+    R_Σ_Rt = (R_Σ_Rt + R_Σ_Rt') / 2
+    Γ  = hp_filtered_variance(A_state, B_Σ_Bt, T, R_Σ_Rt; λ=1600.0, nfreq=256)
+    Γ1 = hp_filtered_lag1(A_state, B_Σ_Bt, T, R_Σ_Rt; λ=1600.0, nfreq=256)
 
     ys = context.results.model_results[1].trends.endogenous_steady_state
     ei = Dict(nm=>i for (i,nm) in enumerate(endo_names))
