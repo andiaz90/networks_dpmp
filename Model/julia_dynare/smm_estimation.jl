@@ -350,6 +350,18 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     baseline = build_baseline(context, endo_names,
                                y_d, p_d, l_d, d_TBGDP, d_omG)
 
+    # --- Create per-thread contexts for parallel CMA-ES evaluation ---
+    # Each thread gets its own deep copy to avoid race conditions.
+    # For single-threaded: just use the baseline context.
+    n_threads_active = Threads.nthreads()
+    contexts_th = if n_threads_active > 1
+        @printf "  Creating per-thread contexts for %d threads...\n" n_threads_active
+        [deepcopy(context) for _ in 1:n_threads_active]
+    else
+        [context]
+    end
+    baselines_th = [deepcopy(baseline) for _ in 1:length(contexts_th)]
+
     # --- Weighting matrix ---
     W = build_weighting_matrix(data_moments)
     @printf "  Weighting matrix built (%dx%d diagonal).\n\n" size(W,1) size(W,2)
@@ -434,23 +446,38 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     @printf "  %s\n" repeat("-", 58)
 
     # Track best solution manually — robust across CMAEvolutionStrategy API versions.
+    # Use thread-safe counters for parallel evaluation.
     best_θ      = Ref(clamp.(θ0, LB, UB))
     best_obj    = Ref(Inf)
-    fail_count  = Ref(0)
-    eval_count  = Ref(0)
+    best_lock   = ReentrantLock()
+    fail_count  = Threads.Atomic{Int}(0)
+    eval_count  = Threads.Atomic{Int}(0)
     t_start     = Ref(time())
     t_last_print = Ref(time())
 
+    _tid_cma() = min(Threads.threadid(), length(contexts_th))
+
     obj_fn = θ -> begin
-        obj, _ = smm_objective(θ, data_moments, W, context, baseline, endo_names)
-        eval_count[] += 1
+        tid = _tid_cma()
+        ctx_th = contexts_th[tid]
+        base_th = baselines_th[tid]
+        obj, _ = smm_objective(θ, data_moments, W, ctx_th, base_th, endo_names)
+
+        Threads.atomic_add!(eval_count, 1)
+
         if isfinite(obj) && obj < best_obj[]
-            best_obj[] = obj
-            best_θ[]   = copy(θ)
+            lock(best_lock) do
+                # Double-check after acquiring lock
+                if isfinite(obj) && obj < best_obj[]
+                    best_obj[] = obj
+                    best_θ[]   = copy(θ)
+                end
+            end
         end
-        obj >= 1e7 && (fail_count[] += 1)
-        # Print progress every 200 evaluations
-        if eval_count[] % 200 == 0
+        obj >= 1e7 && Threads.atomic_add!(fail_count, 1)
+
+        # Print progress every 200 evaluations (only from thread 1 to avoid garbled output)
+        if eval_count[] % 200 == 0 && tid == 1
             t_now   = time()
             ms_per  = 1000.0 * (t_now - t_last_print[]) / 200
             total   = _KLEIN_HITS[] + _KLEIN_MISSES[]
@@ -476,6 +503,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         xtol      = 1e-6,
         seed      = 42,
         verbosity = 0,   # suppress CMA-ES internal output; we print our own
+        multi_threading = Threads.nthreads() > 1,
     )
 
     θ_hat      = clamp.(best_θ[], LB, UB)

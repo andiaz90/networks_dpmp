@@ -33,6 +33,20 @@ include("steady_ntwsoe.jl")
 include("utils.jl")
 
 # =========================================================================== #
+#  THREAD SAFETY: PER-THREAD CONTEXT AND GLOBAL STATE                         #
+# =========================================================================== #
+
+const _N_THREADS = max(1, Threads.nthreads())
+
+"""
+    _tid()::Int
+
+Get safe thread ID for indexing: clamps to valid range [1, _N_THREADS].
+Used for all per-thread data structures.
+"""
+_tid() = min(Threads.threadid(), _N_THREADS)
+
+# =========================================================================== #
 #  PATHS TO COMPILED MODEL FILES                                               #
 # =========================================================================== #
 const _JDYN_DIR    = @__DIR__
@@ -102,7 +116,7 @@ end
 # This is read once and cached — no context field needed.
 
 # =========================================================================== #
-#  KLEIN RESULT CACHE                                                          #
+#  KLEIN RESULT CACHE (PER-THREAD)                                             #
 # =========================================================================== #
 # Shock-amplitude params (sigma_om, isigma_tfp_i, sigma_pvstar, sigma_xi)
 # enter the model as LINEAR coefficients in the model equations and hence
@@ -117,28 +131,29 @@ end
 const _KLEIN_STRUCT_IDX = [1, 2, 3, 4, 5, 7, 20, 22]
 const _KLEIN_THRESH     = 1e-5   # re-solve if any structural param moves > this
 
-const _KLEIN_CACHE_T    = Ref{Matrix{Float64}}(zeros(0,0))
-const _KLEIN_CACHE_R    = Ref{Matrix{Float64}}(zeros(0,0))
-const _KLEIN_CACHE_ΘSTR = Ref{Vector{Float64}}(Float64[])
-const _KLEIN_HITS       = Ref(0)
-const _KLEIN_MISSES     = Ref(0)
+const _KLEIN_CACHE_T    = [Ref{Matrix{Float64}}(zeros(0,0)) for _ in 1:_N_THREADS]
+const _KLEIN_CACHE_R    = [Ref{Matrix{Float64}}(zeros(0,0)) for _ in 1:_N_THREADS]
+const _KLEIN_CACHE_ΘSTR = [Ref{Vector{Float64}}(Float64[]) for _ in 1:_N_THREADS]
+const _KLEIN_HITS       = Threads.Atomic{Int}(0)
+const _KLEIN_MISSES     = Threads.Atomic{Int}(0)
 
 function _resolve_cached!(context, θ)
+    tid = _tid()
     θ_str = θ[_KLEIN_STRUCT_IDX]
-    cache_valid = !isempty(_KLEIN_CACHE_ΘSTR[]) &&
-                  maximum(abs.(_KLEIN_CACHE_ΘSTR[] .- θ_str)) < _KLEIN_THRESH
+    cache_valid = !isempty(_KLEIN_CACHE_ΘSTR[tid][]) &&
+                  maximum(abs.(_KLEIN_CACHE_ΘSTR[tid][] .- θ_str)) < _KLEIN_THRESH
 
     if cache_valid
-        _KLEIN_HITS[] += 1
-        return true, _KLEIN_CACHE_T[], _KLEIN_CACHE_R[]
+        Threads.atomic_add!(_KLEIN_HITS, 1)
+        return true, _KLEIN_CACHE_T[tid][], _KLEIN_CACHE_R[tid][]
     end
 
     ok, T, R, _ = resolve_first_order!(context)
     if ok && !isempty(T)
-        _KLEIN_CACHE_T[]    = T
-        _KLEIN_CACHE_R[]    = R
-        _KLEIN_CACHE_ΘSTR[] = copy(θ_str)
-        _KLEIN_MISSES[]    += 1
+        _KLEIN_CACHE_T[tid][]    = T
+        _KLEIN_CACHE_R[tid][]    = R
+        _KLEIN_CACHE_ΘSTR[tid][] = copy(θ_str)
+        Threads.atomic_add!(_KLEIN_MISSES, 1)
         return true, T, R
     end
     return false, zeros(0,0), zeros(0,0)
@@ -180,63 +195,72 @@ end
 
 
 # =========================================================================== #
-#  PARAMETER VALUES — loaded from params_jl.mod                               #
+#  PARAMETER VALUES — loaded from params_jl.mod (PER-THREAD)                   #
 # =========================================================================== #
 # context.work.params may be declared but uninitialized (UndefVarError) in
 # contexts deserialized from a stoch_simul run that failed on ARM Mac.
 # We maintain our OWN parameter vector _SMM_PARAMS, initialized from
 # params_jl.mod (written by main_SOE_gap.jl with full parameter values)
 # and updated by set_param! at each CMA-ES evaluation.
+# Per-thread vectors to avoid race conditions during parallel CMA-ES.
 
-const _SMM_PARAMS       = Ref{Vector{Float64}}(Float64[])
-const _SMM_PARAMS_READY = Ref(false)
+const _SMM_PARAMS       = [Ref{Vector{Float64}}(Float64[]) for _ in 1:_N_THREADS]
+const _SMM_PARAMS_READY = [Ref(false) for _ in 1:_N_THREADS]
+const _LOAD_PARAMS_LOCK = ReentrantLock()
 
 function _load_smm_params!(context)
-    _SMM_PARAMS_READY[] && return _SMM_PARAMS[]
+    tid = _tid()
+    _SMM_PARAMS_READY[tid][] && return _SMM_PARAMS[tid][]
 
-    # Try context.work.params first (works on uncorrupted contexts)
-    try
-        p = context.work.params
-        if length(p) > 100
-            _SMM_PARAMS[] = copy(Vector{Float64}(p))
-            _SMM_PARAMS_READY[] = true
-            @printf "  [SMM] Params loaded from context.work.params (%d params)\n" length(p)
-            return _SMM_PARAMS[]
-        end
-    catch; end
+    # Lock to prevent concurrent file reads during parallel initialization
+    lock(_LOAD_PARAMS_LOCK) do
+        # Double-check after acquiring lock
+        _SMM_PARAMS_READY[tid][] && return _SMM_PARAMS[tid][]
 
-    # Fall back to params_jl.mod — parse name=value; pairs, build ordered vector
-    mod_path = joinpath(_JDYN_DIR, "mod", "params_jl.mod")
-    isfile(mod_path) || error("params_jl.mod not found at $mod_path — run main_SOE_gap.jl first")
-
-    raw = read(mod_path, String)
-    val_dict = Dict{String,Float64}()
-    for m in eachmatch(r"^(\w+)\s*=\s*([-\d.eE+]+)\s*;", raw)
-        try val_dict[String(m.captures[1])] = parse(Float64, m.captures[2])
+        # Try context.work.params first (works on uncorrupted contexts)
+        try
+            p = context.work.params
+            if length(p) > 100
+                _SMM_PARAMS[tid][] = copy(Vector{Float64}(p))
+                _SMM_PARAMS_READY[tid][] = true
+                tid == 1 && @printf "  [SMM] Params loaded from context.work.params (%d params)\n" length(p)
+                return _SMM_PARAMS[tid][]
+            end
         catch; end
-    end
 
-    # Build ordered params vector using modfile.json parameter ordering
-    p_start = findfirst("\"parameters\"", read(_MODFILE_PATH, String))
-    p_end   = findfirst("\"orig_endo_nbr\"", read(_MODFILE_PATH, String))
-    mf_raw  = read(_MODFILE_PATH, String)
-    chunk   = mf_raw[p_start[1] : p_end[1]-1]
-    names   = [String(m.captures[1]) for m in eachmatch(r"\"name\"\s*:\s*\"([^\"]+)\"", chunk)]
+        # Fall back to params_jl.mod — parse name=value; pairs, build ordered vector
+        mod_path = joinpath(_JDYN_DIR, "mod", "params_jl.mod")
+        isfile(mod_path) || error("params_jl.mod not found at $mod_path — run main_SOE_gap.jl first")
 
-    n_params = length(names)
-    params   = zeros(n_params)
-    found    = 0
-    for (j, nm) in enumerate(names)
-        if haskey(val_dict, nm)
-            params[j] = val_dict[nm]
-            found += 1
+        raw = read(mod_path, String)
+        val_dict = Dict{String,Float64}()
+        for m in eachmatch(r"^(\w+)\s*=\s*([-\d.eE+]+)\s*;", raw)
+            try val_dict[String(m.captures[1])] = parse(Float64, m.captures[2])
+            catch; end
         end
-    end
 
-    _SMM_PARAMS[] = params
-    _SMM_PARAMS_READY[] = true
-    @printf "  [SMM] Params loaded from params_jl.mod: %d/%d params found\n" found n_params
-    return _SMM_PARAMS[]
+        # Build ordered params vector using modfile.json parameter ordering
+        p_start = findfirst("\"parameters\"", read(_MODFILE_PATH, String))
+        p_end   = findfirst("\"orig_endo_nbr\"", read(_MODFILE_PATH, String))
+        mf_raw  = read(_MODFILE_PATH, String)
+        chunk   = mf_raw[p_start[1] : p_end[1]-1]
+        names   = [String(m.captures[1]) for m in eachmatch(r"\"name\"\s*:\s*\"([^\"]+)\"", chunk)]
+
+        n_params = length(names)
+        params   = zeros(n_params)
+        found    = 0
+        for (j, nm) in enumerate(names)
+            if haskey(val_dict, nm)
+                params[j] = val_dict[nm]
+                found += 1
+            end
+        end
+
+        _SMM_PARAMS[tid][] = params
+        _SMM_PARAMS_READY[tid][] = true
+        tid == 1 && @printf "  [SMM] Params loaded from params_jl.mod: %d/%d params found\n" found n_params
+        return _SMM_PARAMS[tid][]
+    end
 end
 
 
@@ -307,17 +331,19 @@ function _build_param_cache(context)
 end
 
 set_param!(ctx, name::String, val::Real) = begin
+    tid = _tid()
     idx = param_idx(ctx, name)
     idx === nothing && return
     p = _load_smm_params!(ctx)
     isempty(p) && return
-    idx <= length(p) && (_SMM_PARAMS[][idx] = Float64(val))
+    idx <= length(p) && (_SMM_PARAMS[tid][][idx] = Float64(val))
 end
 
 get_param_val(ctx, name::String) = begin
+    tid = _tid()
     idx = param_idx(ctx, name)
     idx === nothing && return NaN
-    p = _SMM_PARAMS_READY[] ? _SMM_PARAMS[] : _load_smm_params!(ctx)
+    p = _SMM_PARAMS_READY[tid][] ? _SMM_PARAMS[tid][] : _load_smm_params!(ctx)
     (isempty(p) || idx > length(p)) ? NaN : p[idx]
 end
 
