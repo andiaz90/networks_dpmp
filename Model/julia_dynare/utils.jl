@@ -199,7 +199,7 @@ Solve  P = A P Aᵀ + Q  by the matrix-doubling algorithm.
 Equivalent to MATLAB's dlyap(A', Q).
 """
 function local_dlyap(A::AbstractMatrix{<:Real}, Q::AbstractMatrix{<:Real};
-                     maxiter::Int=500, tol::Real=1e-14)
+                     maxiter::Int=100, tol::Real=1e-12)
     P  = copy(Q)
     Ai = copy(A)
     for _ in 1:maxiter

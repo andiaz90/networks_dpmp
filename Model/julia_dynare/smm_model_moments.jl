@@ -101,6 +101,49 @@ end
 # Their 1-based declaration-order indices form i_fwrd_b.
 # This is read once and cached — no context field needed.
 
+# =========================================================================== #
+#  KLEIN RESULT CACHE                                                          #
+# =========================================================================== #
+# Shock-amplitude params (sigma_om, isigma_tfp_i, sigma_pvstar, sigma_xi)
+# enter the model as LINEAR coefficients in the model equations and hence
+# in g1_2.  When ONLY shock amplitudes change (structural params are
+# unchanged), g1_1 is identical and g1_2 scales proportionally.  We cache
+# the last Klein result and skip the 134×134 QZ when structural params
+# change by less than _KLEIN_THRESH.
+#
+# Structural params that DO require Klein re-solve (θ indices):
+#   1=ilabcosts, 2=epsY, 3=epsM, 4=log(kappaV), 5=rho_om, 7=rho_A,
+#   20=rho_pvstar, 22=rho_xi
+const _KLEIN_STRUCT_IDX = [1, 2, 3, 4, 5, 7, 20, 22]
+const _KLEIN_THRESH     = 1e-5   # re-solve if any structural param moves > this
+
+const _KLEIN_CACHE_T    = Ref{Matrix{Float64}}(zeros(0,0))
+const _KLEIN_CACHE_R    = Ref{Matrix{Float64}}(zeros(0,0))
+const _KLEIN_CACHE_ΘSTR = Ref{Vector{Float64}}(Float64[])
+const _KLEIN_HITS       = Ref(0)
+const _KLEIN_MISSES     = Ref(0)
+
+function _resolve_cached!(context, θ)
+    θ_str = θ[_KLEIN_STRUCT_IDX]
+    cache_valid = !isempty(_KLEIN_CACHE_ΘSTR[]) &&
+                  maximum(abs.(_KLEIN_CACHE_ΘSTR[] .- θ_str)) < _KLEIN_THRESH
+
+    if cache_valid
+        _KLEIN_HITS[] += 1
+        return true, _KLEIN_CACHE_T[], _KLEIN_CACHE_R[]
+    end
+
+    ok, T, R, _ = resolve_first_order!(context)
+    if ok && !isempty(T)
+        _KLEIN_CACHE_T[]    = T
+        _KLEIN_CACHE_R[]    = R
+        _KLEIN_CACHE_ΘSTR[] = copy(θ_str)
+        _KLEIN_MISSES[]    += 1
+        return true, T, R
+    end
+    return false, zeros(0,0), zeros(0,0)
+end
+
 const _FWRD_LOADED = Ref(false)
 const _I_FWRD_B    = Int[]
 
@@ -633,7 +676,7 @@ function smm_model_moments(θ, context, baseline, endo_names)
     for i in 1:nsec; set_param!(context,"epsY_$(i)",epsY); set_param!(context,"epsM_$(i)",epsM); end
     if need_ss; ok=recompute_ss!(context,epsY,epsM,baseline,endo_names); !ok&&return NAN46,false; end
 
-    success, T, R, Σe = resolve_first_order!(context)
+    success, T, R = _resolve_cached!(context, θ)
     !success && return NAN46, false
 
     # Build normalized Sigma_e from the 16 active shocks.

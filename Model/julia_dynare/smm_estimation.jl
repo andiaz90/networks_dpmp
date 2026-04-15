@@ -430,14 +430,16 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     max_evals = 30_000   # ~1300 generations for n=23; enough for convergence
     @printf "--- CMA-ES (black-box, derivative-free) ---\n"
     @printf "  %d parameters  |  %d moments  |  max %d evaluations\n" N_THETA 46 max_evals
-    @printf "  %-6s  %-14s  %-10s\n" "eval" "objective" "BK/NaN"
-    @printf "  %s\n" repeat("-", 36)
+    @printf "  %-6s  %-14s  %-10s  %-12s  %-8s\n" "eval" "objective" "BK/NaN" "ms/eval" "Klein%"
+    @printf "  %s\n" repeat("-", 58)
 
     # Track best solution manually — robust across CMAEvolutionStrategy API versions.
-    best_θ   = Ref(clamp.(θ0, LB, UB))
-    best_obj = Ref(Inf)
-    fail_count = Ref(0)
-    eval_count = Ref(0)
+    best_θ      = Ref(clamp.(θ0, LB, UB))
+    best_obj    = Ref(Inf)
+    fail_count  = Ref(0)
+    eval_count  = Ref(0)
+    t_start     = Ref(time())
+    t_last_print = Ref(time())
 
     obj_fn = θ -> begin
         obj, _ = smm_objective(θ, data_moments, W, context, baseline, endo_names)
@@ -449,8 +451,13 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         obj >= 1e7 && (fail_count[] += 1)
         # Print progress every 200 evaluations
         if eval_count[] % 200 == 0
-            @printf "  %-6d  %-14.6f  %-10d\n" eval_count[] best_obj[] fail_count[]
+            t_now   = time()
+            ms_per  = 1000.0 * (t_now - t_last_print[]) / 200
+            total   = _KLEIN_HITS[] + _KLEIN_MISSES[]
+            k_pct   = total > 0 ? round(Int, 100*_KLEIN_MISSES[]/total) : 100
+            @printf "  %-6d  %-14.6f  %-10d  %-12.1f  %-8d%%\n" eval_count[] best_obj[] fail_count[] ms_per k_pct
             flush(stdout)
+            t_last_print[] = t_now
         end
         obj
     end
@@ -471,10 +478,12 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         verbosity = 0,   # suppress CMA-ES internal output; we print our own
     )
 
-    θ_hat = clamp.(best_θ[], LB, UB)
-    @printf "  %s\n" repeat("-", 36)
+    θ_hat      = clamp.(best_θ[], LB, UB)
+    total_time = time() - t_start[]
+    total_kl   = _KLEIN_HITS[] + _KLEIN_MISSES[]
+    @printf "  %s\n" repeat("-", 58)
     @printf "  %-6d  %-14.6f  %-10d\n\n" eval_count[] best_obj[] fail_count[]
-    @printf "CMA-ES done after %d evaluations.  Best obj = %.6f\n\n" eval_count[] best_obj[]
+    @printf "CMA-ES done: %d evals | %.1fs total | %.0fms/eval | Klein %d%% cached\n\n" eval_count[] total_time (1000*total_time/max(1,eval_count[])) round(Int,100*_KLEIN_HITS[]/max(1,total_kl))
 
     # --- Final evaluation at best θ ---
     obj_hat, moments_hat = smm_objective(θ_hat, data_moments, W, context, baseline, endo_names)
