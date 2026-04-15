@@ -595,7 +595,7 @@ end
 #  STEADY STATE RECOMPUTATION  (when epsY or epsM change)                     #
 # =========================================================================== #
 
-function recompute_ss!(context, epsY, epsM, baseline, endo_names)
+function recompute_ss!(context, epsY, epsM, baseline, endo_names; etastar=nothing)
     nsec = baseline.nsec
     modepsY = fill(epsY, nsec); modepsM = fill(epsM, nsec)
     ss_vec = context.results.model_results[1].trends.endogenous_steady_state
@@ -630,8 +630,9 @@ function recompute_ss!(context, epsY, epsM, baseline, endo_names)
     C_si = baseline.modgammas .* (p_s./P_ss) .* C_s
     CHi = baseline.modvarrho .^ baseline.sigmaH_val .* (pH_ss./P_ss) .^ (-baseline.sigmaH_val) .* (C_gi.+C_si)
     CFi = (1 .- baseline.modvarrho) .^ baseline.sigmaH_val .* (PV_ss./P_ss) .^ (-baseline.sigmaH_val) .* (C_gi.+C_si)
+    etastar_eff = something(etastar, baseline.etastar_val)
     PX = prod(pH_ss .^ baseline.modchiX)
-    X  = baseline.omegaX_val * (PX/Q_ss)^(-baseline.etastar_val) * baseline.ystar_ss_val
+    X  = baseline.omegaX_val * (PX/Q_ss)^(-etastar_eff) * baseline.ystar_ss_val
     Xi = baseline.modchiX .* X .* PX ./ pH_ss
 
     inner = nlsolve(
@@ -652,6 +653,7 @@ function recompute_ss!(context, epsY, epsM, baseline, endo_names)
     set_param!(context, "bbar", Q_ss*Bstar/GDP)
     set_param!(context, "Y_ss", sum(Yi_ss))
     set_param!(context, "M_tot_ss", sum(M_ss))
+    etastar !== nothing && set_param!(context, "etastar", etastar_eff)
     for i in 1:nsec
         set_param!(context, "PL_ss$(i)", w_ss)
         set_param!(context, "epsY_$(i)", epsY)
@@ -685,22 +687,27 @@ function smm_model_moments(θ, context, baseline, endo_names)
     ilabcosts=θ[1]; epsY=θ[2]; epsM=θ[3]; kappaV=exp(θ[4])
     rho_om=θ[5]; sigma_om=θ[6]; rho_A=θ[7]; isigma_tfp=θ[8:19]
     rho_pvstar=θ[20]; sigma_pvstar=θ[21]; rho_xi=θ[22]; sigma_xi=θ[23]
+    etastar = length(θ) >= 24 ? θ[24] : baseline.etastar_val
 
     (!(0<epsY<5)||!(0<epsM<2)||ilabcosts<=0||kappaV<=0||abs(rho_om)>=1||
      sigma_om<0||abs(rho_A)>=1||any(isigma_tfp.<0)||abs(rho_pvstar)>=1||
-     sigma_pvstar<0||abs(rho_xi)>=1||sigma_xi<0) && return NAN46, false
+     sigma_pvstar<0||abs(rho_xi)>=1||sigma_xi<0||
+     !(0.1<etastar<8.0)) && return NAN46, false
 
     set_param!(context,"ilabcosts",ilabcosts); set_param!(context,"kappaV",kappaV)
     set_param!(context,"rho_om1",rho_om);      set_param!(context,"sigma_om",sigma_om)
     set_param!(context,"rho_tfp1",rho_A);      set_param!(context,"rho_pvstar",rho_pvstar)
     set_param!(context,"sigma_pvstar",sigma_pvstar); set_param!(context,"rho_xi",rho_xi)
     set_param!(context,"sigma_xi",sigma_xi)
+    set_param!(context,"etastar",etastar)
     for i in 1:nsec; set_param!(context,"isigma_tfp_$(i)",isigma_tfp[i]); end
 
-    epsY_prev = get_param_val(context,"epsY_1"); epsM_prev = get_param_val(context,"epsM_1")
-    need_ss = abs(epsY-epsY_prev)>1e-8 || abs(epsM-epsM_prev)>1e-8
+    epsY_prev    = get_param_val(context,"epsY_1"); epsM_prev = get_param_val(context,"epsM_1")
+    etastar_prev = get_param_val(context,"etastar")
+    need_ss = abs(epsY-epsY_prev)>1e-8 || abs(epsM-epsM_prev)>1e-8 ||
+              abs(etastar - (isnan(etastar_prev) ? baseline.etastar_val : etastar_prev)) > 1e-8
     for i in 1:nsec; set_param!(context,"epsY_$(i)",epsY); set_param!(context,"epsM_$(i)",epsM); end
-    if need_ss; ok=recompute_ss!(context,epsY,epsM,baseline,endo_names); !ok&&return NAN46,false; end
+    if need_ss; ok=recompute_ss!(context,epsY,epsM,baseline,endo_names;etastar=etastar); !ok&&return NAN46,false; end
 
     success, T, R = _resolve_cached!(context, θ)
     !success && return NAN46, false
@@ -726,7 +733,7 @@ function smm_model_moments(θ, context, baseline, endo_names)
     sr = context.models[1].i_bkwrd_b
     A_state = T[sr, :]       # n_state × n_state  (state transition)
     B_state = R[sr, :]       # n_state × n_exo    (state shock impact)
-    B_Σ_Bt  = B_state * Σe * B_state'   # n_state × n_state
+    B_Σ_Bt  = B_state * Σe * B_state'
     B_Σ_Bt  = (B_Σ_Bt + B_Σ_Bt') / 2
 
     # Solve state covariance via Lyapunov: P = A·P·A' + B·Σ·B'
@@ -734,32 +741,75 @@ function smm_model_moments(θ, context, baseline, endo_names)
     (any(diag(P) .< -1e-10) || any(isnan.(P))) && return NAN46, false
     P = (P + P') / 2
 
-    # HP-filtered covariance (matches data moments computed on HP-filtered log deviations)
-    # Data uses λ=1600 (quarterly). Model moments must use the same filter.
-    R_Σ_Rt = R * Σe * R'
-    R_Σ_Rt = (R_Σ_Rt + R_Σ_Rt') / 2
-    Γ  = hp_filtered_variance(A_state, B_Σ_Bt, T, R_Σ_Rt; λ=1600.0, nfreq=256)
-    Γ1 = hp_filtered_lag1(A_state, B_Σ_Bt, T, R_Σ_Rt; λ=1600.0, nfreq=256)
-
+    # Build endo_name → row index map
     ys = context.results.model_results[1].trends.endogenous_steady_state
-    ei = Dict(nm=>i for (i,nm) in enumerate(endo_names))
-    pstd(vn) = let idx=get(ei,vn,nothing); idx===nothing ? 0.0 :
-                   sqrt(max(Γ[idx,idx],0.0))/max(abs(ys[idx]),1e-12); end
-    xcorr(v1,v2) = let i1=get(ei,v1,nothing),i2=get(ei,v2,nothing)
-                       (i1===nothing||i2===nothing) ? NaN :
-                       let d=sqrt(max(Γ[i1,i1],0.0)*max(Γ[i2,i2],0.0))
-                           d<1e-15 ? 0.0 : clamp(Γ[i1,i2]/d,-1.0,1.0) end; end
-    i_Q = get(ei,"Q",nothing)
-    acQ = (i_Q!==nothing&&Γ[i_Q,i_Q]>1e-15) ? Γ1[i_Q,i_Q]/Γ[i_Q,i_Q] : NaN
+    ei = Dict(nm => i for (i,nm) in enumerate(endo_names))
 
-    std_Y=[pstd("Y_$(i)") for i in 1:nsec]; std_PH=[pstd("PH_$(i)") for i in 1:nsec]
-    std_L=[pstd("L_$(i)") for i in 1:nsec]
+    # Pre-extract only the ~39 rows of T and R we need for moments.
+    # This reduces the HP filter inner loop from 491×491 to 39×39 — 25× faster.
+    needed_names = vcat(
+        ["Y_$(i)"  for i in 1:nsec],
+        ["PH_$(i)" for i in 1:nsec],
+        ["L_$(i)"  for i in 1:nsec],
+        ["GDP", "pi", "Q", "TB"]
+    )
+    needed_idx = [get(ei, nm, 0) for nm in needed_names]   # 0 if missing
+    valid_mask = needed_idx .> 0
+    needed_idx_valid = needed_idx[valid_mask]
+
+    T_sub = Matrix{Float64}(T[needed_idx_valid, :])   # n_needed × n_state
+    R_sub = Matrix{Float64}(R[needed_idx_valid, :])   # n_needed × n_exo
+    R_sub_Σe_Rsub = R_sub * Σe * R_sub'
+    R_sub_Σe_Rsub = (R_sub_Σe_Rsub + R_sub_Σe_Rsub') / 2
+
+    # Pre-compute HP filter weights once and run a single frequency loop
+    w_var, w_lag1 = build_hp_weights(1600.0, 256)
+    Γ_sub, Γ1_sub = hp_filtered_cov_fast(
+        Matrix{Float64}(A_state), B_Σ_Bt, T_sub, R_sub_Σe_Rsub, w_var, w_lag1)
+
+    # Map sub-matrix results back to needed_names ordering (including missing vars)
+    n_needed = length(needed_names)
+    Γ_val  = zeros(n_needed, n_needed)
+    Γ1_val = zeros(n_needed, n_needed)
+    sub_positions = findall(valid_mask)
+    for (si, pi) in enumerate(sub_positions), (sj, pj) in enumerate(sub_positions)
+        Γ_val[pi, pj]  = Γ_sub[si, sj]
+        Γ1_val[pi, pj] = Γ1_sub[si, sj]
+    end
+
+    # Local name→position in needed_names (faster than repeated findfirst)
+    ei_sub = Dict(nm => i for (i, nm) in enumerate(needed_names))
+
+    pstd(vn) = let idx = get(ei_sub, vn, 0)
+        idx == 0 && return 0.0
+        sqrt(max(Γ_val[idx, idx], 0.0)) / max(abs(ys[needed_idx[idx]]), 1e-12)
+    end
+    xcorr(v1, v2) = let i1 = get(ei_sub, v1, 0), i2 = get(ei_sub, v2, 0)
+        (i1 == 0 || i2 == 0) && return NaN
+        d = sqrt(max(Γ_val[i1,i1], 0.0) * max(Γ_val[i2,i2], 0.0))
+        d < 1e-15 ? 0.0 : clamp(Γ_val[i1,i2] / d, -1.0, 1.0)
+    end
+
+    i_Q_sub  = get(ei_sub, "Q",  0)
+    i_TB_sub = get(ei_sub, "TB", 0)
+    acQ = (i_Q_sub > 0 && Γ_val[i_Q_sub, i_Q_sub] > 1e-15) ?
+          Γ1_val[i_Q_sub, i_Q_sub] / Γ_val[i_Q_sub, i_Q_sub] : NaN
+
+    GDP_ss = baseline.GDP_ss > 0 ? baseline.GDP_ss : 1.0
+    std_TBGDP = (i_TB_sub > 0) ? sqrt(max(Γ_val[i_TB_sub, i_TB_sub], 0.0)) / GDP_ss : 0.0
+
+    std_Y  = [pstd("Y_$(i)")  for i in 1:nsec]
+    std_PH = [pstd("PH_$(i)") for i in 1:nsec]
+    std_L  = [pstd("L_$(i)")  for i in 1:nsec]
+
     dY=baseline.data_std_Y; dPH=baseline.data_std_PH; dL=baseline.data_std_L
-    vy=isfinite.(std_Y).&isfinite.(dY); vp=isfinite.(std_PH).&isfinite.(dPH); vl=isfinite.(std_L).&isfinite.(dL)
+    vy=isfinite.(std_Y).&isfinite.(dY)
+    vp=isfinite.(std_PH).&isfinite.(dPH)
+    vl=isfinite.(std_L).&isfinite.(dL)
     rY=sum(vy)>=3 ? safe_spearman(std_Y[vy],dY[vy]) : 0.0
     rP=sum(vp)>=3 ? safe_spearman(std_PH[vp],dPH[vp]) : 0.0
     rL=sum(vl)>=3 ? safe_spearman(std_L[vl],dL[vl]) : 0.0
 
     return [std_Y;std_PH;std_L;pstd("GDP");pstd("pi");xcorr("GDP","pi");
-            baseline.ombar_val;pstd("Q");acQ;xcorr("GDP","Q");rY;rP;rL], true
+            std_TBGDP;pstd("Q");acQ;xcorr("GDP","Q");rY;rP;rL], true
 end

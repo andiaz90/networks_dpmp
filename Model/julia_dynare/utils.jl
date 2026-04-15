@@ -221,125 +221,114 @@ ternary_str(cond::Bool, s_true::String, s_false::String) = cond ? s_true : s_fal
 
 
 # =========================================================================== #
-#  HP-filtered variance from the state-space representation                    #
+#  HP-filtered covariance — fast sub-matrix version                           #
 #                                                                              #
-#  For a first-order solution y_t = T·s_t, s_t = A·s_{t-1} + B·ε_t,         #
-#  the unconditional spectral density of y_i is:                              #
-#    S_y(ω) = e_i' T (I - A e^{-iω})^{-1} B Σ B' (I - A' e^{iω})^{-1} T' e_i / 2π  #
-#  The HP filter removes trend by applying gain |1 - H(ω)|² where            #
-#    H(ω) = 1 / (1 + λ(2 - 2cos(ω))²)                                       #
-#  HP-filtered variance = ∫₀^π |1-H(ω)|² S_y(ω) dω / π  (real-valued)      #
+#  For the first-order state-space y_t = T·s_t, s_t = A·s_{t-1} + B·ε_t,   #
+#  the HP-filtered covariance is:                                              #
+#    Var_HP = ∫₀^π |1-H(ω)|² · G(ω)·B_Σ_Bt·G(ω)' · dω/π                   #
+#  where G(ω) = T·(I - A e^{-iω})^{-1}  and  H(ω) = 1/(1+λ(2-2cos(ω))²).  #
+#                                                                              #
+#  SPEED: pass only the rows of T needed for the moments (~39 of 491).        #
+#  Cost drops from ~25M flops/freq to ~1M flops/freq — a 25× speedup.        #
 #                                                                              #
 #  References: Burnside (1998, JMCB); Uhlig (1999)                            #
 # =========================================================================== #
 
 """
-    hp_filtered_variance(Γ_full, A, B_Σ_Bt, T, λ; nfreq=512) -> Matrix{Float64}
+    build_hp_weights(λ, nfreq) -> (w_var, w_lag1)
 
-Compute the HP-filtered variance-covariance matrix of the full endogenous
-vector y_t, given:
-  Γ_full  : unconditional covariance of y (n_endo × n_endo) [used only for size]
-  A       : state transition (n_state × n_state)
-  B_Σ_Bt  : B * Σe * B' (n_state × n_state)
-  T       : observation matrix (n_endo × n_state)
-  λ       : HP filter parameter (1600 for quarterly)
-  nfreq   : number of frequency grid points (default 512)
+Pre-compute scalar HP-filter integration weights for variance and lag-1
+autocovariance. Call once per estimation; reuse across evaluations.
 
-Returns the HP-filtered covariance matrix (n_endo × n_endo).
+  w_var[k]  = |1-H(ω_k)|² / nfreq   (variance accumulation weight)
+  w_lag1[k] = w_var[k] * cos(ω_k)   (lag-1 autocovariance weight)
 """
-function hp_filtered_variance(A::AbstractMatrix{Float64},
-                               B_Σ_Bt::Matrix{Float64},
-                               T::AbstractMatrix{Float64},
-                               R_Σ_Rt::Matrix{Float64};
-                               λ::Float64=1600.0, nfreq::Int=512)
-    n_state = size(A, 1)
-    n_endo  = size(T, 1)
-    I_s     = Matrix{ComplexF64}(I, n_state, n_state)
-
-    # Frequency grid: ω ∈ (0, π] — exclude ω=0 (zero frequency = trend)
-    Γ_hp = zeros(n_endo, n_endo)
-
+function build_hp_weights(λ::Float64=1600.0, nfreq::Int=256)
+    w_var  = Vector{Float64}(undef, nfreq)
+    w_lag1 = Vector{Float64}(undef, nfreq)
     for k in 1:nfreq
         ω = π * k / nfreq
-
-        # HP filter gain: 1 - H(ω) where H(ω) = 1/(1 + λ(2-2cos(ω))²)
-        hp_denom = 1.0 + λ * (2.0 - 2.0 * cos(ω))^2
-        hp_gain_sq = (1.0 - 1.0 / hp_denom)^2   # |1-H(ω)|²
-
-        # State-space transfer: (I - A e^{-iω})^{-1}
-        eiω = exp(-im * ω)
-        M   = I_s - A * eiω
-        Minv = M \ I_s   # (I - A e^{-iω})^{-1}
-
-        # Spectral density of states: Minv * B_Σ_Bt * Minv'
-        S_state = Minv * B_Σ_Bt * Minv'
-
-        # Spectral density of y: T * S_state * T' + cross terms with R
-        # Full: S_y(ω) = (T*Minv*B + R) * Σe * (T*Minv*B + R)'  / 2π
-        # But for variance we integrate, and the R*Σe*R' term is frequency-flat,
-        # so its HP-filtered contribution is simply hp_gain_sq * R_Σ_Rt * dω/π.
-        # We include it in the loop for correctness.
-        S_y = real.(T * S_state * T')  # state contribution to spectral density
-
-        # Accumulate HP-filtered variance (Riemann sum: Δω = π/nfreq)
-        Γ_hp .+= hp_gain_sq .* S_y .* (π / nfreq / π)
+        gain_sq = (1.0 - 1.0 / (1.0 + λ * (2.0 - 2.0 * cos(ω))^2))^2
+        w_var[k]  = gain_sq / nfreq
+        w_lag1[k] = gain_sq * cos(ω) / nfreq
     end
-
-    # Add the contemporaneous shock contribution (R*Σe*R'), also HP-filtered.
-    # This is the frequency-flat part: ∫ hp_gain² * R_Σ_Rt dω/π
-    hp_flat = 0.0
-    for k in 1:nfreq
-        ω = π * k / nfreq
-        hp_denom = 1.0 + λ * (2.0 - 2.0 * cos(ω))^2
-        hp_flat += (1.0 - 1.0 / hp_denom)^2 * (1.0 / nfreq)
-    end
-    Γ_hp .+= hp_flat .* R_Σ_Rt
-
-    return (Γ_hp .+ Γ_hp') ./ 2   # enforce symmetry
+    return w_var, w_lag1
 end
 
-
 """
-    hp_filtered_lag1(A, B_Σ_Bt, T, R_Σ_Rt; λ, nfreq) -> Matrix{Float64}
+    hp_filtered_cov_fast(A, B_Σ_Bt, T_sub, R_sub_Σe_Rsub, w_var, w_lag1)
+      -> (Γ_hp, Γ1_hp)
 
-Compute HP-filtered lag-1 autocovariance E_HP[y_t · y_{t-1}'].
-Used for autocorr(Q).
+Compute HP-filtered variance and lag-1 autocovariance for a SUB-SET of
+endogenous variables in a single frequency loop.
+
+Arguments:
+  A             : state transition (n_state × n_state)
+  B_Σ_Bt        : B·Σe·B' (n_state × n_state)
+  T_sub         : observation rows for needed variables (n_needed × n_state)
+  R_sub_Σe_Rsub : R[needed,:]·Σe·R[needed,:]' (n_needed × n_needed)
+  w_var, w_lag1 : pre-computed HP weights from build_hp_weights()
+
+Returns:
+  Γ_hp  (n_needed × n_needed) — HP-filtered variance-covariance
+  Γ1_hp (n_needed × n_needed) — HP-filtered lag-1 autocovariance
 """
-function hp_filtered_lag1(A::AbstractMatrix{Float64},
-                           B_Σ_Bt::Matrix{Float64},
-                           T::AbstractMatrix{Float64},
-                           R_Σ_Rt::Matrix{Float64};
-                           λ::Float64=1600.0, nfreq::Int=512)
-    n_state = size(A, 1)
-    n_endo  = size(T, 1)
-    I_s     = Matrix{ComplexF64}(I, n_state, n_state)
+function hp_filtered_cov_fast(A::AbstractMatrix{Float64},
+                               B_Σ_Bt::Matrix{Float64},
+                               T_sub::Matrix{Float64},
+                               R_sub_Σe_Rsub::Matrix{Float64},
+                               w_var::Vector{Float64},
+                               w_lag1::Vector{Float64})
+    n_state  = size(A, 1)
+    n_needed = size(T_sub, 1)
+    nfreq    = length(w_var)
 
-    Γ1_hp = zeros(n_endo, n_endo)
+    I_s = Matrix{ComplexF64}(I, n_state, n_state)
+    A_c = Matrix{ComplexF64}(A)     # complex copy, reused each frequency
+
+    Γ_hp  = zeros(n_needed, n_needed)
+    Γ1_hp = zeros(n_needed, n_needed)
+
+    # Pre-allocate complex workspace to avoid allocations in the loop
+    M     = Matrix{ComplexF64}(undef, n_state, n_state)
+    G     = Matrix{ComplexF64}(undef, n_needed, n_state)   # T_sub * Minv
+    GB    = Matrix{ComplexF64}(undef, n_needed, n_state)   # G * B_Σ_Bt
+    S_y_c = Matrix{ComplexF64}(undef, n_needed, n_needed)  # GB * G'
 
     for k in 1:nfreq
-        ω = π * k / nfreq
-        hp_denom = 1.0 + λ * (2.0 - 2.0 * cos(ω))^2
-        hp_gain_sq = (1.0 - 1.0 / hp_denom)^2
-
+        ω   = π * k / nfreq
         eiω = exp(-im * ω)
-        M   = (Matrix{ComplexF64}(I, n_state, n_state) - A * eiω)
-        Minv = M \ I_s
 
-        S_state = Minv * B_Σ_Bt * Minv'
-        S_y = real.(T * S_state * T')
+        # M = I - A * e^{-iω}
+        @inbounds for j in 1:n_state, i in 1:n_state
+            M[i, j] = I_s[i, j] - A_c[i, j] * eiω
+        end
+        Minv = M \ I_s   # 78×78 complex linear solve
 
-        # Lag-1: multiply by e^{iω} to get cross-spectral at lag 1
-        Γ1_hp .+= hp_gain_sq .* S_y .* cos(ω) .* (1.0 / nfreq)
+        # G = T_sub * Minv  (n_needed × n_state)
+        mul!(G, T_sub, Minv)
+
+        # S_y = G * B_Σ_Bt * G'  (n_needed × n_needed)
+        mul!(GB, G, B_Σ_Bt)
+        mul!(S_y_c, GB, G')
+        S_y = real.(S_y_c)   # discard imaginary noise
+
+        # Accumulate weighted contributions
+        @inbounds for j in 1:n_needed, i in 1:n_needed
+            Γ_hp[i, j]  += w_var[k]  * S_y[i, j]
+            Γ1_hp[i, j] += w_lag1[k] * S_y[i, j]
+        end
     end
 
-    # Contemporaneous shock lag-1 contribution (flat spectrum × cos(ω))
-    hp_cos = 0.0
-    for k in 1:nfreq
-        ω = π * k / nfreq
-        hp_denom = 1.0 + λ * (2.0 - 2.0 * cos(ω))^2
-        hp_cos += (1.0 - 1.0 / hp_denom)^2 * cos(ω) * (1.0 / nfreq)
+    # Frequency-flat contemporaneous contribution (R·Σe·R')
+    hp_flat  = sum(w_var)
+    hp_flat1 = sum(w_lag1)
+    @inbounds for j in 1:n_needed, i in 1:n_needed
+        Γ_hp[i, j]  += hp_flat  * R_sub_Σe_Rsub[i, j]
+        Γ1_hp[i, j] += hp_flat1 * R_sub_Σe_Rsub[i, j]
     end
-    Γ1_hp .+= hp_cos .* R_Σ_Rt
 
-    return Γ1_hp
+    Γ_hp  = (Γ_hp  .+ Γ_hp')  ./ 2
+    Γ1_hp = (Γ1_hp .+ Γ1_hp') ./ 2
+    return Γ_hp, Γ1_hp
 end

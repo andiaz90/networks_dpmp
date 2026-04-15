@@ -384,6 +384,7 @@ if isfile(smm_est_file)
     sigma_pvstar_val = est["sigma_pvstar"]
     haskey(est, "rho_xi")   && (rho_xi_val   = est["rho_xi"])
     haskey(est, "sigma_xi") && (sigma_xi_val = est["sigma_xi"])
+    haskey(est, "etastar")  && (etastar_val  = est["etastar"])
     smm_param_source = "smm_estimates.csv"
 end
 
@@ -458,7 +459,7 @@ ss_result = nlsolve(
 )
 
 if !converged(ss_result)
-    @warn "Outer steady-state solver did not converge (residual=$(norm(ss_result.residual, Inf))). Proceeding anyway — results may be inaccurate."
+    @warn "Outer steady-state solver did not converge (residual_norm=$(ss_result.residual_norm)). Proceeding anyway — results may be inaccurate."
 end
 
 pH_ss = ss_result.zero[1:nsec]
@@ -777,87 +778,130 @@ endo_idx = Dict(nm => i for (i, nm) in enumerate(endo_names))
 
 
 # =========================================================================== #
-#  RANK CORRELATIONS (Lyapunov-based, mirrors smm_model_moments.m)            #
+#  HP-FILTERED MOMENTS  (replicates smm_estimation.jl / smm_model_moments.jl)#
 # =========================================================================== #
 
-@printf "--- Rank correlations (model vs data, Spearman) ---\n"
+@printf "--- Computing HP-filtered moments (matching SMM estimation) ---\n"
 
 std_Y_m  = fill(NaN, nsec)
 std_PH_m = fill(NaN, nsec)
 std_L_m  = fill(NaN, nsec)
 
-# =========================================================================== #
-#  LYAPUNOV VARIANCE-COVARIANCE  (pure Julia, works on ARM/aarch64)          #
-# =========================================================================== #
-
-Γ_rc = fill(NaN, length(endo_names), length(endo_names))
-Γ_1  = fill(NaN, length(endo_names), length(endo_names))   # lag-1 cross-cov
-P_st = nothing
-
 rc_lyap_ok = false
+m_std_GDP    = NaN
+m_std_pi     = NaN
+m_std_Q      = NaN
+m_corr_GDPpi = NaN
+m_corr_GDPQ  = NaN
+m_omG        = ombar_val   # fixed by calibration
+m_autocorr_Q = NaN
+rho_y = 0.0; rho_p = 0.0; rho_l = 0.0
+
 try
-    A_rc = ghx_jl[state_rows, :]   # n_states × n_states
-    B_rc = ghu_jl[state_rows, :]   # n_states × n_shocks
-    P_st = local_dlyap(A_rc, B_rc * Σe_jl * B_rc')
-    Γ_rc = ghx_jl * P_st * ghx_jl' + ghu_jl * Σe_jl * ghu_jl'
-    Γ_rc = (Γ_rc + Γ_rc') / 2
-    # Lag-1 cross-covariance: Γ_1(i,j) = Cov(y_t(i), y_{t-1}(j))
-    Γ_1  = ghx_jl * A_rc * (P_st * ghx_jl' + B_rc * Σe_jl * ghu_jl')
+    n_exo   = size(ghu_jl, 2)
+    n_state = length(state_rows)
+
+    # Shock covariance: activate all shocks = 1.0, matching smm_estimation.jl
+    Σe_smm = zeros(n_exo, n_exo)
+    Σe_smm[1,1] = 1.0                                  # eps_om
+    Σe_smm[2,2] = 1.0                                  # eps_i
+    Σe_smm[4,4] = 1.0                                  # eps_pvstar
+    for i in 5:min(16, n_exo); Σe_smm[i,i] = 1.0; end  # epsA_1:12
+    n_exo >= 17 && (Σe_smm[17,17] = 1.0)               # eps_xi
+
+    # State-space matrices
+    Tsr = ghx_jl[state_rows, :]   # n_state × n_state
+    Rsr = ghu_jl[state_rows, :]   # n_state × n_exo
+    B_Σ_Bt = Rsr * Σe_smm * Rsr'
+    B_Σ_Bt = (B_Σ_Bt + B_Σ_Bt') / 2
+
+    # Solve state covariance via Lyapunov
+    P_st = local_dlyap(Tsr, B_Σ_Bt)
+    P_st = (P_st + P_st') / 2
+
+    # Sub-matrix for the ~39 needed variables (25× faster HP filter)
+    needed_names = vcat(
+        ["Y_$(i)"  for i in 1:nsec],
+        ["PH_$(i)" for i in 1:nsec],
+        ["L_$(i)"  for i in 1:nsec],
+        ["GDP", "pi", "Q", "TB"]
+    )
+    needed_idx  = [get(endo_idx, nm, 0) for nm in needed_names]
+    valid_mask  = needed_idx .> 0
+    nidx_valid  = needed_idx[valid_mask]
+
+    T_sub = Matrix{Float64}(ghx_jl[nidx_valid, :])   # n_needed × n_state
+    R_sub = Matrix{Float64}(ghu_jl[nidx_valid, :])   # n_needed × n_exo
+    RsubΣRsub = R_sub * Σe_smm * R_sub'
+    RsubΣRsub = (RsubΣRsub + RsubΣRsub') / 2
+
+    # HP-filtered covariance (spectral, λ=1600, 256 frequencies)
+    w_var, w_lag1 = build_hp_weights(1600.0, 256)
+    Γ_sub, Γ1_sub = hp_filtered_cov_fast(
+        Matrix{Float64}(Tsr), B_Σ_Bt, T_sub, RsubΣRsub, w_var, w_lag1)
+
+    # Map sub-matrix results back to needed_names ordering
+    n_needed = length(needed_names)
+    Γ_val  = zeros(n_needed, n_needed)
+    Γ1_val = zeros(n_needed, n_needed)
+    sub_positions = findall(valid_mask)
+    for (si, pi) in enumerate(sub_positions), (sj, pj) in enumerate(sub_positions)
+        Γ_val[pi, pj]  = Γ_sub[si, sj]
+        Γ1_val[pi, pj] = Γ1_sub[si, sj]
+    end
+
+    # Local index lookup for needed_names
+    ei_sub = Dict(nm => i for (i, nm) in enumerate(needed_names))
+
+    # Helpers matching smm_estimation.jl exactly
+    _pstd_hp(vn) = let k = get(ei_sub, vn, 0)
+        k == 0 ? 0.0 : sqrt(max(Γ_val[k, k], 0.0)) / max(abs(ss_vec[needed_idx[k]]), 1e-12)
+    end
+    _xcorr_hp(v1, v2) = let i1 = get(ei_sub, v1, 0), i2 = get(ei_sub, v2, 0)
+        (i1 == 0 || i2 == 0) ? NaN :
+        let d = sqrt(max(Γ_val[i1,i1], 0.0) * max(Γ_val[i2,i2], 0.0))
+            d < 1e-15 ? 0.0 : clamp(Γ_val[i1,i2] / d, -1.0, 1.0)
+        end
+    end
+
+    # Sectoral moments
+    for i in 1:nsec
+        std_Y_m[i]  = _pstd_hp("Y_$(i)")
+        std_PH_m[i] = _pstd_hp("PH_$(i)")
+        std_L_m[i]  = _pstd_hp("L_$(i)")
+    end
+
+    # Aggregate moments
+    m_std_GDP    = _pstd_hp("GDP")
+    m_std_pi     = _pstd_hp("pi")
+    m_std_Q      = _pstd_hp("Q")
+    m_corr_GDPpi = _xcorr_hp("GDP", "pi")
+    m_corr_GDPQ  = _xcorr_hp("GDP", "Q")
+
+    # std(TB/GDP): normalize by steady-state GDP (TB is a level variable)
+    i_TB_sub = get(ei_sub, "TB", 0)
+    GDP_ss_val = abs(ss_vec[get(endo_idx, "GDP", 1)])
+    GDP_ss_val = GDP_ss_val > 1e-12 ? GDP_ss_val : 1.0
+    m_std_TBGDP = (i_TB_sub > 0) ?
+        sqrt(max(Γ_val[i_TB_sub, i_TB_sub], 0.0)) / GDP_ss_val : NaN
+
+    # Autocorrelation of Q
+    i_Q_sub = get(ei_sub, "Q", 0)
+    m_autocorr_Q = (i_Q_sub > 0 && Γ_val[i_Q_sub, i_Q_sub] > 1e-15) ?
+        Γ1_val[i_Q_sub, i_Q_sub] / Γ_val[i_Q_sub, i_Q_sub] : NaN
+
+    # Rank correlations (default 0.0, matching estimation)
+    vy = isfinite.(std_Y_m)  .& isfinite.(y_d)
+    vp = isfinite.(std_PH_m) .& isfinite.(p_d)
+    vl = isfinite.(std_L_m)  .& isfinite.(l_d)
+    rho_y = sum(vy) >= 3 ? safe_spearman(std_Y_m[vy],  y_d[vy])  : 0.0
+    rho_p = sum(vp) >= 3 ? safe_spearman(std_PH_m[vp], p_d[vp])  : 0.0
+    rho_l = sum(vl) >= 3 ? safe_spearman(std_L_m[vl],  l_d[vl])  : 0.0
+
     rc_lyap_ok = true
 catch e
-    @printf "  [Lyapunov] failed (%s)\n" string(e)
+    @printf "  [HP-filtered moments] failed (%s)\n" string(e)
 end
-
-# Helper: percentage std dev from Γ
-function _pstd(idx, Γ, ss)
-    (idx === nothing || !rc_lyap_ok) && return NaN
-    ss_val = abs(ss[idx]); ss_val < 1e-12 && (ss_val = 1.0)
-    return sqrt(max(Γ[idx, idx], 0.0)) / ss_val
-end
-# Helper: contemporaneous correlation
-function _corr_ab(ia, ib, Γ)
-    (ia === nothing || ib === nothing || !rc_lyap_ok) && return NaN
-    denom = sqrt(max(Γ[ia,ia], 0.0) * max(Γ[ib,ib], 0.0))
-    denom < 1e-15 && return NaN
-    return clamp(Γ[ia, ib] / denom, -1.0, 1.0)
-end
-
-for i in 1:nsec
-    for (kv, vn) in enumerate(["Y_$(i)", "PH_$(i)", "L_$(i)"])
-        idx = get(endo_idx, vn, nothing)
-        pstd = _pstd(idx, Γ_rc, ss_vec)
-        kv == 1 && (std_Y_m[i]  = pstd)
-        kv == 2 && (std_PH_m[i] = pstd)
-        kv == 3 && (std_L_m[i]  = pstd)
-    end
-end
-
-# Aggregate model moments
-i_GDP = get(endo_idx, "GDP", nothing)
-i_pi  = get(endo_idx, "pi",  nothing)
-i_Q   = get(endo_idx, "Q",   nothing)
-
-m_std_GDP    = _pstd(i_GDP, Γ_rc, ss_vec)
-m_std_pi     = _pstd(i_pi,  Γ_rc, ss_vec)
-m_std_Q      = _pstd(i_Q,   Γ_rc, ss_vec)
-m_corr_GDPpi = _corr_ab(i_GDP, i_pi, Γ_rc)
-m_corr_GDPQ  = _corr_ab(i_GDP, i_Q,  Γ_rc)
-m_omG        = ombar_val   # fixed by calibration
-
-m_autocorr_Q = if rc_lyap_ok && i_Q !== nothing && Γ_rc[i_Q, i_Q] > 1e-15
-    Γ_1[i_Q, i_Q] / Γ_rc[i_Q, i_Q]
-else
-    NaN
-end
-
-# Rank correlations
-valid_y = isfinite.(std_Y_m)  .& isfinite.(y_d)
-valid_p = isfinite.(std_PH_m) .& isfinite.(p_d)
-valid_l = isfinite.(std_L_m)  .& isfinite.(l_d)
-
-rho_y = sum(valid_y) >= 3 ? safe_spearman(std_Y_m[valid_y],  y_d[valid_y])  : NaN
-rho_p = sum(valid_p) >= 3 ? safe_spearman(std_PH_m[valid_p], p_d[valid_p])  : NaN
-rho_l = sum(valid_l) >= 3 ? safe_spearman(std_L_m[valid_l],  l_d[valid_l])  : NaN
 
 @printf "\n--- Rank correlations (Spearman) ---\n"
 @printf "  Output (Y) :   %7.4f\n" rho_y
@@ -874,6 +918,7 @@ sec_mom_path = joinpath(DATA_DIR, "sectoral_moments.csv")
 
 d_std_GDP = NaN; d_std_pi = NaN; d_corr_GDPpi = NaN; d_omG = 0.57
 d_std_Q = NaN; d_autocorr_Q = NaN; d_corr_GDPQ = NaN; d_TBGDP = NaN
+d_std_TBGDP = NaN   # std of HP-filtered TB/GDP — add "std_TBGDP" to aggregate_moments.csv
 y_d_tab = y_d; p_d_tab = p_d; l_d_tab = l_d
 
 if isfile(agg_mom_path)
@@ -887,38 +932,64 @@ if isfile(agg_mom_path)
     d_autocorr_Q = get(agg_d, "autocorr_Q", NaN)
     d_corr_GDPQ  = get(agg_d, "corr_GDPQ",  NaN)
     d_TBGDP      = get(agg_d, "TBGDP",      NaN)
+    d_std_TBGDP  = get(agg_d, "std_TBGDP",  NaN)
 end
 
 # Build 46-element data and model vectors
+# Position 40: std(TB/GDP) replaces omG (which was always 0 loss, calibrated externally)
 data_vec = [y_d_tab; p_d_tab; l_d_tab;
-            d_std_GDP; d_std_pi; d_corr_GDPpi; d_omG;
+            d_std_GDP; d_std_pi; d_corr_GDPpi; d_std_TBGDP;
             d_std_Q; d_autocorr_Q; d_corr_GDPQ;
             1.0; 1.0; 1.0]   # rank corr targets = 1
 
 model_vec = [std_Y_m; std_PH_m; std_L_m;
-             m_std_GDP; m_std_pi; m_corr_GDPpi; m_omG;
+             m_std_GDP; m_std_pi; m_corr_GDPpi; m_std_TBGDP;
              m_std_Q; m_autocorr_Q; m_corr_GDPQ;
              rho_y; rho_p; rho_l]
 
-# Weighting matrix (diagonal) — matches smm_estimation.jl build_weighting_matrix
-W_diag = 1.0 ./ max.(abs.(data_vec), 0.01) .^ 2
-W_diag[39] *= 0.02   # corr(GDP,pi): supply model can't match
-W_diag[40] *= 0.10   # omG: passive
-W_diag[43] *= 0.50   # corr(GDP,Q): over-identified
-W_diag[44] *= 0.50; W_diag[45] *= 0.50; W_diag[46] *= 0.50  # rank corrs
+# Weighting matrix (diagonal) — replicates smm_estimation.jl build_weighting_matrix exactly
+W_diag = ones(46)
+for k in vcat(1:36, [37, 38, 40, 41])   # 40 = std(TB/GDP), now gets inverse-variance weight
+    d = abs(data_vec[k]); W_diag[k] = d > 1e-4 ? 1.0/d^2 : 1.0/0.01^2
+end
+W_diag[39] *= 0.20     # corr(GDP,π): structurally hard for supply-shock model
+W_diag[42]  = 2.0      # autocorr(Q): identifies rho_pvstar
+W_diag[44]  = 5.0; W_diag[45] = 5.0; W_diag[46] = 5.0   # rank correlations: HIGH
 
 moment_labels = vcat(
     ["std(Y_$i)"  for i in 1:nsec],
     ["std(PH_$i)" for i in 1:nsec],
     ["std(L_$i)"  for i in 1:nsec],
-    ["std(GDP)", "std(pi)", "corr(GDP, pi)", "mean goods expenditure share",
+    ["std(GDP)", "std(pi)", "corr(GDP, pi)", "std(TB/GDP)",
      "std(Q)", "autocorr(Q)", "corr(GDP, Q)",
      "rank corr: output (model vs data)",
      "rank corr: prices (model vs data)",
      "rank corr: labor  (model vs data)"]
 )
 
-@printf "\n--- Moment fit (SMM) ---\n"
+# =========================================================================== #
+#  LOAD SMM-REPORTED MOMENTS (authoritative, from smm_results.csv)            #
+#  The estimation uses Klein's method for decision rules; Dynare's QZ can     #
+#  produce numerically different T,R → different moments.  When available,    #
+#  use the estimation's own moments so the loss matches exactly.              #
+# =========================================================================== #
+
+smm_res_file = joinpath(DATA_DIR, "smm_results.csv")
+smm_model_vec = nothing   # will hold 46-element model moments from estimation
+
+if isfile(smm_res_file) && smm_param_source == "smm_estimates.csv"
+    smm_res = CSV.read(smm_res_file, DataFrame)
+    if hasproperty(smm_res, :model) && nrow(smm_res) == 46
+        smm_model_vec = Float64.(smm_res.model)
+        @printf "\n--- Loaded SMM-reported moments from smm_results.csv ---\n"
+    end
+end
+
+# Use estimation moments when available, otherwise fall back to Dynare-based
+model_vec_final = something(smm_model_vec, model_vec)
+model_source    = smm_model_vec !== nothing ? "SMM (Klein)" : "Dynare (QZ)"
+
+@printf "\n--- Moment fit (%s) ---\n" model_source
 @printf "%-38s  %9s  %9s  %9s  %11s\n" "Moment" "Data" "Model" "Diff" "W*Diff^2"
 @printf "%s\n" repeat("-", 82)
 
@@ -926,12 +997,12 @@ total_loss = 0.0
 # Also write to tables/moment_fit_<tag>.txt
 mom_table_path = joinpath(TABLES_DIR, "moment_fit_$(tag).txt")
 open(mom_table_path, "w") do f_mom
-    write(f_mom, "NK-SOE Chile — Moment fit (Exercise: $(exercise_labels[EXERCISE+1]))\n")
+    write(f_mom, "NK-SOE Chile — Moment fit (Exercise: $(exercise_labels[EXERCISE+1]), source: $model_source)\n")
     write(f_mom, repeat("=", 82) * "\n")
     @printf(f_mom, "%-38s  %9s  %9s  %9s  %11s\n", "Moment", "Data", "Model", "Diff", "W*Diff^2")
     write(f_mom, repeat("-", 82) * "\n")
     for k in 1:46
-        d = data_vec[k]; m = model_vec[k]
+        d = data_vec[k]; m = model_vec_final[k]
         diff = isfinite(d) && isfinite(m) ? d - m : NaN
         wdiff2 = isfinite(diff) ? W_diag[k] * diff^2 : NaN
         isfinite(wdiff2) && (total_loss += wdiff2)
@@ -946,14 +1017,29 @@ open(mom_table_path, "w") do f_mom
 end
 @printf "  → saved to: %s\n" mom_table_path
 
+# If using SMM moments, also show Dynare-based moments for diagnostic comparison
+if smm_model_vec !== nothing
+    @printf "\n--- Dynare (QZ) diagnostic comparison ---\n"
+    dynare_loss = 0.0
+    for k in 1:46
+        d = data_vec[k]; m = model_vec[k]
+        diff = isfinite(d) && isfinite(m) ? d - m : NaN
+        wdiff2 = isfinite(diff) ? W_diag[k] * diff^2 : NaN
+        isfinite(wdiff2) && (dynare_loss += wdiff2)
+    end
+    @printf "  Dynare QZ loss:  %11.6f\n" dynare_loss
+    @printf "  SMM Klein loss:  %11.6f\n" total_loss
+    @printf "  Difference:      %11.6f  (numerical: Klein vs QZ decomposition)\n" abs(dynare_loss - total_loss)
+end
+
 # Also save moment fit as CSV for easy analysis
 df_mom = DataFrame(
     moment   = moment_labels,
     data     = data_vec,
-    model    = model_vec,
-    diff     = data_vec .- model_vec,
+    model    = model_vec_final,
+    diff     = data_vec .- model_vec_final,
     W_diag   = W_diag,
-    wdiff2   = W_diag .* (data_vec .- model_vec) .^ 2,
+    wdiff2   = W_diag .* (data_vec .- model_vec_final) .^ 2,
 )
 CSV.write(joinpath(TABLES_DIR, "moment_fit_$(tag).csv"), df_mom)
 
