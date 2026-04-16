@@ -58,6 +58,7 @@ if isfile(sec_mom_file) && isfile(agg_mom_file)
     y_d          = Float64.(sec.std_Y)
     p_d          = Float64.(sec.std_PH)
     l_d          = Float64.(sec.std_L)
+    corr_YPH_d   = hasproperty(sec, :corr_YPH) ? Float64.(sec.corr_YPH) : fill(0.0, NSEC)
     d_std_GDP    = agg_dict["std_GDP"]
     d_std_pi     = agg_dict["std_pi"]
     d_corr_GDPpi = agg_dict["corr_GDPpi"]
@@ -74,6 +75,7 @@ if isfile(sec_mom_file) && isfile(agg_mom_file)
 else
     @printf "  CSV not found in %s — using placeholder values.\n\n" DATA_DIR
     y_d = fill(0.04, NSEC); p_d = fill(0.02, NSEC); l_d = fill(0.03, NSEC)
+    corr_YPH_d = fill(0.0, NSEC)
     d_std_GDP=0.0215; d_std_pi=0.0041; d_corr_GDPpi=-0.15
     d_omG=0.57; d_std_Q=0.0520; d_autocorr_Q=0.75
     d_corr_GDPQ=-0.15; d_TBGDP=-0.02; d_std_TBGDP=0.025
@@ -82,9 +84,11 @@ end
 # omG (goods expenditure share) is pinned by SS calibration → contributes 0 to the
 # loss and carries no information for estimation.  Replaced by std(TB/GDP), which
 # directly identifies the export and import elasticities.
+# corr(Y_i,PH_i): negative under TFP shocks, positive under demand shocks — key identifier
+# for supply vs demand decomposition per sector (12 new moments, Option-A).
 data_moments = [y_d; p_d; l_d; d_std_GDP; d_std_pi; d_corr_GDPpi;
-                d_std_TBGDP; d_std_Q; d_autocorr_Q; d_corr_GDPQ; 1.0; 1.0; 1.0]
-@assert length(data_moments) == 46 "Expected 46 data moments, got $(length(data_moments))"
+                d_std_TBGDP; d_std_Q; d_autocorr_Q; d_corr_GDPQ; 1.0; 1.0; 1.0; corr_YPH_d]
+@assert length(data_moments) == 58 "Expected 58 data moments, got $(length(data_moments))"
 
 # GUARD: NaN anywhere in data_moments poisons the objective for ALL evaluations
 # (best_obj initialises to NaN and is never updated). Catch this immediately.
@@ -107,7 +111,8 @@ const MOMENT_NAMES = vcat(
     ["std(GDP)", "std(pi)", "corr(GDP,pi)", "std(TB/GDP)",
      "std(Q)", "autocorr(Q)", "corr(GDP,Q)",
      "rank corr: output (model vs data)", "rank corr: prices (model vs data)",
-     "rank corr: labor  (model vs data)"])
+     "rank corr: labor  (model vs data)"],
+    ["corr(Y_$(i),PH_$(i))" for i in 1:12])
 
 
 # =========================================================================== #
@@ -115,17 +120,29 @@ const MOMENT_NAMES = vcat(
 # =========================================================================== #
 
 const PARAM_LABELS = vcat(
-    ["ilabcosts", "epsY", "epsM", "log(kappaV)", "rho_om", "sigma_om", "rho_A"],
+    # Option-A layout: 35 parameters total
+    # θ[1]    = ilabcosts      θ[2]    = epsY         θ[3]    = epsM
+    # θ[4]    = log(kappaV)    θ[5]    = rho_om       θ[6]    = rho_A
+    # θ[7:18] = isigma_tfp_1:12
+    # θ[19:30]= sigma_om_1:12  (sectoral demand shock std devs)
+    # θ[31]   = rho_pvstar     θ[32]   = sigma_pvstar
+    # θ[33]   = rho_xi         θ[34]   = sigma_xi     θ[35]   = etastar
+    ["ilabcosts", "epsY", "epsM", "log(kappaV)", "rho_om", "rho_A"],
     ["isigma_tfp_$(i)" for i in 1:12],
+    ["sigma_om_$(i)" for i in 1:12],
     ["rho_pvstar", "sigma_pvstar", "rho_xi", "sigma_xi"],
     ["etastar"],   # export demand elasticity η*; identifies std(TB/GDP)
 )
-const N_THETA = length(PARAM_LABELS)   # 24
+const N_THETA = length(PARAM_LABELS)   # 35
 
-const LB = [1e-3; 0.30; 0.05; log(1e3);  -0.95; 1e-5;  0.10;
-            fill(1e-4, 12); 0.50;  0.005; 0.00; 0.0;  0.50]
-const UB = [50.0; 1.50; 0.50; log(1e8);   0.95; 0.20;  0.95;
-            fill(0.10, 12); 0.99;  0.20;  0.95; 0.05; 6.00]
+const LB = [1e-3; 0.30; 0.05; log(1e3);  -0.95;  0.10;
+            fill(1e-4, 12);
+            fill(1e-5, 12);
+            0.50;  0.005; 0.00; 0.0;  0.50]
+const UB = [50.0; 1.50; 0.50; log(1e8);   0.95;  0.95;
+            fill(0.10, 12);
+            fill(0.20, 12);
+            0.99;  0.20;  0.95; 0.05; 6.00]
 
 
 # =========================================================================== #
@@ -133,17 +150,24 @@ const UB = [50.0; 1.50; 0.50; log(1e8);   0.95; 0.20;  0.95;
 # =========================================================================== #
 
 function build_weighting_matrix(dm::Vector{<:Real})
-    w = ones(46)
-    # Standard inverse-variance weight for: sectoral stds (1-36), std(GDP) (37),
-    # std(pi) (38), std(TB/GDP) (40), std(Q) (41).
-    # Indices 39,42,43,44,45,46 start at w=1.0 and are overridden below.
+    w = ones(58)
+    # Moment layout (58 total):
+    #   1:12   = std(Y_i)       13:24  = std(PH_i)     25:36  = std(L_i)
+    #   37     = std(GDP)       38     = std(pi)        39     = corr(GDP,pi)
+    #   40     = std(TB/GDP)    41     = std(Q)         42     = autocorr(Q)
+    #   43     = corr(GDP,Q)    44     = rank Y         45     = rank PH
+    #   46     = rank L         47:58  = corr(Y_i,PH_i)
     for k in vcat(1:36, [37, 38, 40, 41])
         d = abs(dm[k]); w[k] = d > 1e-4 ? 1.0/d^2 : 1.0/0.01^2
     end
     w[39] *= 0.20     # corr(GDP,π): structurally hard for supply-shock model
     # w[40]: std(TB/GDP) — now gets standard inverse-variance weight (no override)
     w[42]  = 2.0      # autocorr(Q): identifies rho_pvstar
-    w[44]  = 2.0; w[45] = 2.0; w[46] = 2.0   # rank correlations: moderate (reduced from 5× to avoid dominating loss)
+    w[44]  = 2.0; w[45] = 2.0; w[46] = 2.0   # rank correlations: moderate
+    # corr(Y_i,PH_i): key identifier for supply vs demand decomposition
+    for k in 47:58
+        d = abs(dm[k]); w[k] = (d > 1e-4 ? 1.0/d^2 : 1.0/0.5^2) * 1.5
+    end
     return Diagonal(w) |> Matrix
 end
 
@@ -202,9 +226,11 @@ function default_theta0(context::Dynare.Context)
             (isempty(p) || idx > length(p)) ? 0.0 : p[idx]
         end
     end
+    # Option-A layout: 35 params
     [pv("ilabcosts"); pv("epsY_1"); pv("epsM_1"); log(pv("kappaV"));
-     pv("rho_om1"); pv("sigma_om"); pv("rho_tfp1");
+     pv("rho_om1"); pv("rho_tfp1");
      [pv("isigma_tfp_$(i)") for i in 1:12];
+     [max(pv("sigma_om_$(i)"), 0.01) for i in 1:12];
      pv("rho_pvstar"); pv("sigma_pvstar"); pv("rho_xi"); pv("sigma_xi");
      pv("etastar")]
 end
@@ -340,25 +366,36 @@ end
 # =========================================================================== #
 
 function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_names)
-    nsec = baseline.nsec; NAN46 = fill(NaN, 46)
+    nsec = baseline.nsec; NAN58 = fill(NaN, 58)
+    # Option-A layout (35 params):
+    #   θ[1:4]  = ilabcosts, epsY, epsM, log(kappaV)
+    #   θ[5]    = rho_om (common persistence for all 12 sectoral demand shocks)
+    #   θ[6]    = rho_A
+    #   θ[7:18] = isigma_tfp_1:12
+    #   θ[19:30]= sigma_om_1:12
+    #   θ[31:35]= rho_pvstar, sigma_pvstar, rho_xi, sigma_xi, etastar
     ilabcosts=θ[1]; epsY=θ[2]; epsM=θ[3]; kappaV=exp(θ[4])
-    rho_om=θ[5]; sigma_om=θ[6]; rho_A=θ[7]
-    isigma_tfp = @view θ[8:19]
-    rho_pvstar=θ[20]; sigma_pvstar=θ[21]; rho_xi=θ[22]; sigma_xi=θ[23]
-    etastar = length(θ) >= 24 ? θ[24] : baseline.etastar_val   # export demand elasticity η*
+    rho_om=θ[5]; rho_A=θ[6]
+    isigma_tfp  = @view θ[7:18]
+    sigma_om_vec= @view θ[19:30]
+    rho_pvstar=θ[31]; sigma_pvstar=θ[32]; rho_xi=θ[33]; sigma_xi=θ[34]
+    etastar = length(θ) >= 35 ? θ[35] : baseline.etastar_val
 
     (!(0<epsY<5)||!(0<epsM<2)||ilabcosts<=0||kappaV<=0||abs(rho_om)>=1||
-     sigma_om<0||abs(rho_A)>=1||any(<(0),isigma_tfp)||abs(rho_pvstar)>=1||
+     any(<(0),sigma_om_vec)||abs(rho_A)>=1||any(<(0),isigma_tfp)||abs(rho_pvstar)>=1||
      sigma_pvstar<0||abs(rho_xi)>=1||sigma_xi<0||
-     !(0.1<etastar<8.0)) && return NAN46, false
+     !(0.1<etastar<8.0)) && return NAN58, false
 
     set_param!(context,"ilabcosts",ilabcosts); set_param!(context,"kappaV",kappaV)
-    set_param!(context,"rho_om1",rho_om);      set_param!(context,"sigma_om",sigma_om)
+    set_param!(context,"rho_om1",rho_om)
     set_param!(context,"etastar",etastar)
     set_param!(context,"rho_tfp1",rho_A);      set_param!(context,"rho_pvstar",rho_pvstar)
     set_param!(context,"sigma_pvstar",sigma_pvstar); set_param!(context,"rho_xi",rho_xi)
     set_param!(context,"sigma_xi",sigma_xi)
-    for i in 1:nsec; set_param!(context,"isigma_tfp_$(i)",isigma_tfp[i]); end
+    for i in 1:nsec
+        set_param!(context,"isigma_tfp_$(i)",isigma_tfp[i])
+        set_param!(context,"sigma_om_$(i)",sigma_om_vec[i])
+    end
 
     epsY_prev    = get_param_val(context,"epsY_1"); epsM_prev = get_param_val(context,"epsM_1")
     etastar_prev = get_param_val(context,"etastar")
@@ -367,22 +404,25 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
     for i in 1:nsec; set_param!(context,"epsY_$(i)",epsY); set_param!(context,"epsM_$(i)",epsM); end
     if need_ss
         ok = recompute_ss_cached!(context, epsY, epsM, baseline, endo_names; etastar=etastar)
-        !ok && return NAN46, false
+        !ok && return NAN58, false
     end
 
     success, T, R = _resolve_cached!(context, θ)
-    !success && return NAN46, false
+    !success && return NAN58, false
 
-    n_exo   = size(R, 2)
+    n_exo   = size(R, 2)   # should be 28 after Option-A mod recompile
     sr      = context.models[1].i_bkwrd_b
     n_state = length(sr)
     sc      = _get_scratch!(n_exo, n_state, endo_names)
 
     # Σe: activate all shocks except epschi (unused labor supply shock)
+    # varexo order (Option-A): 1=eps_i, 2=epschi(off), 3=eps_pvstar,
+    #                           4:15=epsA_1:12, 16=eps_xi, 17:28=eps_om_1:12
     fill!(sc.Σe, 0.0)
-    sc.Σe[1,1]=1.0; sc.Σe[2,2]=1.0; sc.Σe[4,4]=1.0   # eps_om, eps_i, eps_pvstar
-    for i in 5:min(16,n_exo); sc.Σe[i,i]=1.0; end     # epsA_1:12
-    n_exo>=17 && (sc.Σe[17,17]=1.0)                    # eps_xi
+    sc.Σe[1,1]=1.0; sc.Σe[3,3]=1.0                    # eps_i, eps_pvstar
+    for i in 4:min(15,n_exo); sc.Σe[i,i]=1.0; end     # epsA_1:12
+    n_exo>=16 && (sc.Σe[16,16]=1.0)                   # eps_xi
+    for i in 17:min(28,n_exo); sc.Σe[i,i]=1.0; end    # eps_om_1:12
 
     Tsr = T[sr,:]; Rsr = R[sr,:]
     RΣ  = Rsr * sc.Σe   # 78×17
@@ -392,7 +432,7 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
     end
 
     dlyap_inplace!(sc.P, Tsr, sc.Q_lyap; tmp1=sc.tmp1, tmp2=sc.tmp2, Ak=sc.Ak)
-    (any(diag(sc.P).<-1e-10) || any(isnan.(sc.P))) && return NAN46, false
+    (any(diag(sc.P).<-1e-10) || any(isnan.(sc.P))) && return NAN58, false
 
     # HP-filtered covariance on the ~40 needed variables only (25× faster)
     needed_names = vcat(["Y_$(i)" for i in 1:nsec], ["PH_$(i)" for i in 1:nsec],
@@ -446,6 +486,9 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
     std_PH = [pstd("PH_$(i)") for i in 1:nsec]
     std_L  = [pstd("L_$(i)")  for i in 1:nsec]
 
+    # corr(Y_i, PH_i): negative under TFP shocks, positive under demand shocks
+    corr_YPH = [xcorr("Y_$(i)", "PH_$(i)") for i in 1:nsec]
+
     dY=baseline.data_std_Y; dPH=baseline.data_std_PH; dL=baseline.data_std_L
     vy=isfinite.(std_Y).&isfinite.(dY)
     vp=isfinite.(std_PH).&isfinite.(dPH)
@@ -454,8 +497,9 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
     rP = sum(vp)>=3 ? safe_spearman(std_PH[vp],dPH[vp]) : 0.0
     rL = sum(vl)>=3 ? safe_spearman(std_L[vl],dL[vl]) : 0.0
 
+    # Return 58 moments: 12×std_Y + 12×std_PH + 12×std_L + 10×aggregate + 12×corr(Y_i,PH_i)
     return [std_Y;std_PH;std_L;pstd("GDP");pstd("pi");xcorr("GDP","pi");
-            std_TBGDP;pstd("Q");acQ;xcorr("GDP","Q");rY;rP;rL], true
+            std_TBGDP;pstd("Q");acQ;xcorr("GDP","Q");rY;rP;rL;corr_YPH], true
 end
 
 
@@ -484,11 +528,14 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     @printf "  Weighting: proportional std devs + 5× rank correlations.\n\n"
 
     # Initial θ: data-informed starting values for shock parameters
+    # Option-A layout: θ[7:18]=isigma_tfp, θ[19:30]=sigma_om, θ[32]=sigma_pvstar, θ[34]=sigma_xi
     θ0 = default_theta0(context)
-    θ0[6]  = max(θ0[6],  0.05)
-    for i in 1:12; θ0[7+i] = max(θ0[7+i], clamp(y_d[i]*0.4, LB[7+i], UB[7+i])); end
-    θ0[21] = max(θ0[21], 0.05)
-    θ0[23] = max(θ0[23], 0.02)
+    for i in 1:12
+        θ0[6+i]  = max(θ0[6+i],  clamp(y_d[i]*0.4, LB[6+i], UB[6+i]))  # isigma_tfp_i
+        θ0[18+i] = max(θ0[18+i], clamp(y_d[i]*0.3, LB[18+i], UB[18+i])) # sigma_om_i
+    end
+    θ0[32] = max(θ0[32], 0.05)   # sigma_pvstar
+    θ0[34] = max(θ0[34], 0.02)   # sigma_xi
     θ_warm = load_warm_start(N_THETA)
     θ0 = clamp.(something(θ_warm, θ0), LB, UB)
 
@@ -510,7 +557,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     @printf "  obj(θ₀) = %.6f\n" obj_test
 
     ψ0 = data_moments .- m_test
-    @printf "  Decomp: Y=%.3f PH=%.3f L=%.3f Agg=%.3f Rank=%.3f\n" dot(ψ0[1:12],W[1:12,1:12]*ψ0[1:12]) dot(ψ0[13:24],W[13:24,13:24]*ψ0[13:24]) dot(ψ0[25:36],W[25:36,25:36]*ψ0[25:36]) dot(ψ0[37:43],W[37:43,37:43]*ψ0[37:43]) dot(ψ0[44:46],W[44:46,44:46]*ψ0[44:46])
+    @printf "  Decomp: Y=%.3f PH=%.3f L=%.3f Agg=%.3f Rank=%.3f CorrYP=%.3f\n" dot(ψ0[1:12],W[1:12,1:12]*ψ0[1:12]) dot(ψ0[13:24],W[13:24,13:24]*ψ0[13:24]) dot(ψ0[25:36],W[25:36,25:36]*ψ0[25:36]) dot(ψ0[37:43],W[37:43,37:43]*ψ0[37:43]) dot(ψ0[44:46],W[44:46,44:46]*ψ0[44:46]) dot(ψ0[47:58],W[47:58,47:58]*ψ0[47:58])
 
     @printf "\n  %-34s  %9s  %9s\n" "Moment" "Data" "Model"
     @printf "  %s\n" repeat("-",56)
@@ -522,8 +569,8 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     # CMA-ES
     max_evals = 300_000
     @printf "--- CMA-ES ---\n"
-    @printf "  %d params | %d moments | max %d evals | %d threads\n" N_THETA 46 max_evals n_threads_active
-    @printf "  %-6s  %-10s  %-44s  %-7s  %-8s  %-8s\n" "eval" "best_obj" "[Y    PH    L     Agg   Rank ]" "fail" "ms/eval" "Klein%"
+    @printf "  %d params | %d moments | max %d evals | %d threads\n" N_THETA 58 max_evals n_threads_active
+    @printf "  %-6s  %-10s  %-54s  %-7s  %-8s  %-8s\n" "eval" "best_obj" "[Y    PH    L     Agg   Rank  CorrYP]" "fail" "ms/eval" "Klein%"
     @printf "  %s\n" repeat("-",90)
 
     best_θ        = Ref(clamp.(θ0, LB, UB))   # stored in original parameter space
@@ -651,17 +698,18 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         re = abs(data_moments[i])>1e-6 ? abs(ψ_hat[i])/abs(data_moments[i])*100 : 0.0
         @printf "  %-36s  %9.5f  %9.5f  %+9.5f  %5.1f%%\n" nm data_moments[i] m_hat[i] ψ_hat[i] re
     end
-    @printf "\n  Decomp: Y=%.3f PH=%.3f L=%.3f Agg=%.3f Rank=%.3f\n\n" dot(ψ_hat[1:12],W[1:12,1:12]*ψ_hat[1:12]) dot(ψ_hat[13:24],W[13:24,13:24]*ψ_hat[13:24]) dot(ψ_hat[25:36],W[25:36,25:36]*ψ_hat[25:36]) dot(ψ_hat[37:43],W[37:43,37:43]*ψ_hat[37:43]) dot(ψ_hat[44:46],W[44:46,44:46]*ψ_hat[44:46])
+    @printf "\n  Decomp: Y=%.3f PH=%.3f L=%.3f Agg=%.3f Rank=%.3f CorrYP=%.3f\n\n" dot(ψ_hat[1:12],W[1:12,1:12]*ψ_hat[1:12]) dot(ψ_hat[13:24],W[13:24,13:24]*ψ_hat[13:24]) dot(ψ_hat[25:36],W[25:36,25:36]*ψ_hat[25:36]) dot(ψ_hat[37:43],W[37:43,37:43]*ψ_hat[37:43]) dot(ψ_hat[44:46],W[44:46,44:46]*ψ_hat[44:46]) dot(ψ_hat[47:58],W[47:58,47:58]*ψ_hat[47:58])
 
     # Save
-    df_res = DataFrame(param=vcat(PARAM_LABELS,fill("",46-N_THETA)),
-                        theta=vcat(θ_hat,fill(NaN,46-N_THETA)),
+    df_res = DataFrame(param=vcat(PARAM_LABELS,fill("",58-N_THETA)),
+                        theta=vcat(θ_hat,fill(NaN,58-N_THETA)),
                         moment=MOMENT_NAMES, data=data_moments, model=m_hat, diff=ψ_hat)
     CSV.write(joinpath(DATA_DIR,"smm_results.csv"), df_res)
 
     df_est = DataFrame(
-        param=vcat(["ilabcosts","epsY","epsM","log_kappaV","rho_om","sigma_om","rho_A"],
+        param=vcat(["ilabcosts","epsY","epsM","log_kappaV","rho_om","rho_A"],
                    ["isigma_tfp_$(i)" for i in 1:NSEC],
+                   ["sigma_om_$(i)" for i in 1:NSEC],
                    ["rho_pvstar","sigma_pvstar","rho_xi","sigma_xi","etastar"]),
         value=θ_hat, obj_hat=vcat([obj_hat],fill(NaN,N_THETA-1)))
     CSV.write(joinpath(DATA_DIR,"smm_estimates.csv"), df_est)

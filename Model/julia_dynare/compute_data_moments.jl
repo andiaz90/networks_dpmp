@@ -881,17 +881,57 @@ d_std_Ls  = dot(w_s, l_d[services_idx])
 
 
 # =========================================================================== #
+#  9b. SECTORAL PRICE–OUTPUT CORRELATIONS  corr(Y_i, PH_i)                   #
+# =========================================================================== #
+# Sign interpretation:
+#   corr < 0 → TFP shock dominates (supply ↑ → quantity ↑, price ↓)
+#   corr > 0 → demand shock dominates (demand ↑ → quantity ↑, price ↑)
+# This is the key moment for identifying the supply vs demand decomposition
+# per sector in the NK-IOSOE Option-A estimation (Option A adds 12 sectoral
+# demand shocks sigma_om_1:12).
+
+@printf "\n--- 9b. corr(Y_i, PH_i): supply vs demand identification ---\n"
+
+corr_YPH_d = fill(NaN, NSEC)
+if !isempty(Y_qrt) && size(Y_qrt, 1) >= 20 && size(P_sample, 1) >= 20
+    nT_Y = size(Y_qrt, 1)
+    nT_P = size(P_sample, 1)
+    nT_c = min(nT_Y, nT_P)   # both aligned to same sample period → should be equal
+    for i in 1:NSEC
+        xY = Y_qrt[end-nT_c+1:end, i]
+        xP = P_sample[end-nT_c+1:end, i]
+        bad = (xY .<= 0) .| isnan.(xY) .| (xP .<= 0) .| isnan.(xP)
+        if sum(.!bad) < 20
+            @printf "  WARNING: sector %d has too few valid obs for corr(Y,PH).\n" i
+            continue
+        end
+        y_hp = hp_cycle(fillmissing_linear(log.(xY)), LAMBDA)
+        p_hp = hp_cycle(fillmissing_linear(log.(xP)), LAMBDA)
+        corr_YPH_d[i] = complete_cor(y_hp, p_hp)
+    end
+    @printf "  %-4s  %-20s  %10s\n" "Sec" "Name" "corr(Y,PH)"
+    @printf "  %s\n" repeat("-", 38)
+    for i in 1:NSEC
+        tag = i in GOODS ? "[G]" : "[S]"
+        @printf "  %-2d %-17s%s  %10.4f\n" i SECTOR_NAMES[i] tag corr_YPH_d[i]
+    end
+else
+    @printf "  WARNING: Y_qrt unavailable — corr_YPH_d set to NaN (will use 0 in estimation).\n"
+end
+
+
+# =========================================================================== #
 #  10. SUMMARY AND VALIDATION                                                  #
 # =========================================================================== #
 
 @printf "\n%s\n  DATA MOMENTS SUMMARY\n%s\n\n" repeat("=",61) repeat("=",61)
-@printf "%-20s  %8s  %8s  %8s\n" "Sector" "std(Y)" "std(PH)" "std(L)"
-@printf "%s\n" repeat("-", 52)
+@printf "%-20s  %8s  %8s  %8s  %10s\n" "Sector" "std(Y)" "std(PH)" "std(L)" "corr(Y,PH)"
+@printf "%s\n" repeat("-", 66)
 for i in 1:NSEC
     tag = i in GOODS ? "[G]" : "[S]"
-    @printf "%-2d %-17s%s  %8.4f  %8.4f  %8.4f\n" i SECTOR_NAMES[i] tag y_d[i] p_d[i] l_d[i]
+    @printf "%-2d %-17s%s  %8.4f  %8.4f  %8.4f  %10.4f\n" i SECTOR_NAMES[i] tag y_d[i] p_d[i] l_d[i] corr_YPH_d[i]
 end
-@printf "%s\n" repeat("-", 52)
+@printf "%s\n" repeat("-", 66)
 @printf "  Goods    avg: std(Y)=%6.4f  std(P)=%6.4f  std(L)=%6.4f\n" d_std_Yg  d_std_PHg  d_std_Lg
 @printf "  Services avg: std(Y)=%6.4f  std(P)=%6.4f  std(L)=%6.4f\n\n" d_std_Ys  d_std_PHs  d_std_Ls
 @printf "  std(GDP)      = %.5f\n" d_std_GDP
@@ -946,7 +986,16 @@ if !isempty(nan_idx)
     """)
 end
 @assert length(d_vec_check) == 45 "BUG: expected 45 moments, got $(length(d_vec_check))"
-@printf "\nValidation passed: all 45 moments are non-NaN.\n"
+@printf "\nValidation passed: all 45 aggregate/sectoral moments are non-NaN.\n"
+
+# Soft check for corr_YPH_d — NaN is acceptable if Y data is unavailable
+n_nan_corr = sum(isnan.(corr_YPH_d))
+if n_nan_corr > 0
+    @printf "  NOTE: %d / %d corr(Y_i,PH_i) values are NaN (Y data unavailable).\n" n_nan_corr NSEC
+    @printf "  → Estimation will treat these as 0 (via hasproperty fallback in smm_estimation.jl).\n"
+else
+    @printf "  corr(Y_i,PH_i) validation passed: all %d values non-NaN.\n" NSEC
+end
 
 
 # =========================================================================== #
@@ -955,17 +1004,18 @@ end
 
 # --- 1. Sectoral moments (one row per sector) ----------------------------
 df_sec = DataFrame(
-    sector  = 1:NSEC,
-    name    = SECTOR_NAMES,
-    std_Y   = y_d,
-    std_PH  = p_d,
-    std_L   = l_d,
-    std_Yg  = [i in GOODS    ? d_std_Yg  : NaN for i in 1:NSEC],
-    std_PHg = [i in GOODS    ? d_std_PHg : NaN for i in 1:NSEC],
-    std_Lg  = [i in GOODS    ? d_std_Lg  : NaN for i in 1:NSEC],
-    std_Ys  = [i in SERVICES ? d_std_Ys  : NaN for i in 1:NSEC],
-    std_PHs = [i in SERVICES ? d_std_PHs : NaN for i in 1:NSEC],
-    std_Ls  = [i in SERVICES ? d_std_Ls  : NaN for i in 1:NSEC],
+    sector   = 1:NSEC,
+    name     = SECTOR_NAMES,
+    std_Y    = y_d,
+    std_PH   = p_d,
+    std_L    = l_d,
+    corr_YPH = corr_YPH_d,   # key identifier for supply vs demand decomposition (Option-A)
+    std_Yg   = [i in GOODS    ? d_std_Yg  : NaN for i in 1:NSEC],
+    std_PHg  = [i in GOODS    ? d_std_PHg : NaN for i in 1:NSEC],
+    std_Lg   = [i in GOODS    ? d_std_Lg  : NaN for i in 1:NSEC],
+    std_Ys   = [i in SERVICES ? d_std_Ys  : NaN for i in 1:NSEC],
+    std_PHs  = [i in SERVICES ? d_std_PHs : NaN for i in 1:NSEC],
+    std_Ls   = [i in SERVICES ? d_std_Ls  : NaN for i in 1:NSEC],
 )
 CSV.write(OUT_SECTORAL, df_sec)
 

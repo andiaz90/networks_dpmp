@@ -125,10 +125,10 @@ end
 # the last Klein result and skip the 134×134 QZ when structural params
 # change by less than _KLEIN_THRESH.
 #
-# Structural params that DO require Klein re-solve (θ indices):
-#   1=ilabcosts, 2=epsY, 3=epsM, 4=log(kappaV), 5=rho_om, 7=rho_A,
-#   20=rho_pvstar, 22=rho_xi
-const _KLEIN_STRUCT_IDX = [1, 2, 3, 4, 5, 7, 20, 22]
+# Structural params that DO require Klein re-solve (θ indices, Option-A layout):
+#   1=ilabcosts, 2=epsY, 3=epsM, 4=log(kappaV), 5=rho_om, 6=rho_A,
+#   31=rho_pvstar, 33=rho_xi
+const _KLEIN_STRUCT_IDX = [1, 2, 3, 4, 5, 6, 31, 33]
 const _KLEIN_THRESH     = 1e-5   # re-solve if any structural param moves > this
 
 const _KLEIN_CACHE_T    = [Ref{Matrix{Float64}}(zeros(0,0)) for _ in 1:_N_THREADS]
@@ -683,52 +683,72 @@ const MOMENT_NAMES = vcat(
 # =========================================================================== #
 
 function smm_model_moments(θ, context, baseline, endo_names)
-    nsec = baseline.nsec; NAN46 = fill(NaN, 46)
+    nsec = baseline.nsec; NAN58 = fill(NaN, 58)
+    # Option-A parameter layout (35 params):
+    #   θ[1]    = ilabcosts
+    #   θ[2]    = epsY
+    #   θ[3]    = epsM
+    #   θ[4]    = log(kappaV)
+    #   θ[5]    = rho_om   (common persistence for all 12 sectoral demand shocks)
+    #   θ[6]    = rho_A    (common TFP persistence)
+    #   θ[7:18] = isigma_tfp_1:12
+    #   θ[19:30]= sigma_om_1:12  (sectoral demand shock std devs)
+    #   θ[31]   = rho_pvstar
+    #   θ[32]   = sigma_pvstar
+    #   θ[33]   = rho_xi
+    #   θ[34]   = sigma_xi
+    #   θ[35]   = etastar
     ilabcosts=θ[1]; epsY=θ[2]; epsM=θ[3]; kappaV=exp(θ[4])
-    rho_om=θ[5]; sigma_om=θ[6]; rho_A=θ[7]; isigma_tfp=θ[8:19]
-    rho_pvstar=θ[20]; sigma_pvstar=θ[21]; rho_xi=θ[22]; sigma_xi=θ[23]
-    etastar = length(θ) >= 24 ? θ[24] : baseline.etastar_val
+    rho_om=θ[5]; rho_A=θ[6]; isigma_tfp=θ[7:18]
+    sigma_om_vec=θ[19:30]
+    rho_pvstar=θ[31]; sigma_pvstar=θ[32]; rho_xi=θ[33]; sigma_xi=θ[34]
+    etastar = length(θ) >= 35 ? θ[35] : baseline.etastar_val
 
     (!(0<epsY<5)||!(0<epsM<2)||ilabcosts<=0||kappaV<=0||abs(rho_om)>=1||
-     sigma_om<0||abs(rho_A)>=1||any(isigma_tfp.<0)||abs(rho_pvstar)>=1||
+     any(sigma_om_vec.<0)||abs(rho_A)>=1||any(isigma_tfp.<0)||abs(rho_pvstar)>=1||
      sigma_pvstar<0||abs(rho_xi)>=1||sigma_xi<0||
-     !(0.1<etastar<8.0)) && return NAN46, false
+     !(0.1<etastar<8.0)) && return NAN58, false
 
     set_param!(context,"ilabcosts",ilabcosts); set_param!(context,"kappaV",kappaV)
-    set_param!(context,"rho_om1",rho_om);      set_param!(context,"sigma_om",sigma_om)
+    set_param!(context,"rho_om1",rho_om)
     set_param!(context,"rho_tfp1",rho_A);      set_param!(context,"rho_pvstar",rho_pvstar)
     set_param!(context,"sigma_pvstar",sigma_pvstar); set_param!(context,"rho_xi",rho_xi)
     set_param!(context,"sigma_xi",sigma_xi)
     set_param!(context,"etastar",etastar)
-    for i in 1:nsec; set_param!(context,"isigma_tfp_$(i)",isigma_tfp[i]); end
+    for i in 1:nsec
+        set_param!(context,"isigma_tfp_$(i)",isigma_tfp[i])
+        set_param!(context,"sigma_om_$(i)",sigma_om_vec[i])
+    end
 
     epsY_prev    = get_param_val(context,"epsY_1"); epsM_prev = get_param_val(context,"epsM_1")
     etastar_prev = get_param_val(context,"etastar")
     need_ss = abs(epsY-epsY_prev)>1e-8 || abs(epsM-epsM_prev)>1e-8 ||
               abs(etastar - (isnan(etastar_prev) ? baseline.etastar_val : etastar_prev)) > 1e-8
     for i in 1:nsec; set_param!(context,"epsY_$(i)",epsY); set_param!(context,"epsM_$(i)",epsM); end
-    if need_ss; ok=recompute_ss!(context,epsY,epsM,baseline,endo_names;etastar=etastar); !ok&&return NAN46,false; end
+    if need_ss; ok=recompute_ss!(context,epsY,epsM,baseline,endo_names;etastar=etastar); !ok&&return NAN58,false; end
 
     success, T, R = _resolve_cached!(context, θ)
-    !success && return NAN46, false
+    !success && return NAN58, false
 
     # Build normalized Sigma_e for all active shocks.
     # Each active shock has unit variance; amplitude scaling is handled by
-    # parameters in the model equations (sigma_om * eps_om, etc.).
+    # parameters in the model equations (sigma_om_i * eps_om_i, etc.).
     #
-    # varexo order (from NK_SOE_lev_gap2.mod):
-    #   1 = eps_om    2 = eps_i     3 = epschi    4 = eps_pvstar
-    #   5:16 = epsA_1:12             17 = eps_xi
-    n_exo = size(R, 2)   # should be 17
+    # varexo order (from NK_SOE_lev_gap2_smm.mod, Option-A layout):
+    #   1 = eps_i    2 = epschi(inactive)    3 = eps_pvstar
+    #   4:15 = epsA_1:12    16 = eps_xi    17:28 = eps_om_1:12
+    n_exo = size(R, 2)   # should be 28 after Option-A mod recompile
     Σe = zeros(n_exo, n_exo)
-    Σe[1, 1]  = 1.0                        # eps_om   (goods-services demand)
-    Σe[2, 2]  = 1.0                        # eps_i    (monetary policy) — FIX: was missing
-    # Σe[3, 3] = 0.0                       # epschi   (labor supply, inactive)
-    Σe[4, 4]  = 1.0                        # eps_pvstar (import price)
-    for i in 5:min(16, n_exo)
+    Σe[1, 1]  = 1.0                        # eps_i    (monetary policy)
+    # Σe[2, 2] = 0.0                       # epschi   (labor supply, inactive)
+    Σe[3, 3]  = 1.0                        # eps_pvstar (import price)
+    for i in 4:min(15, n_exo)
         Σe[i, i] = 1.0                     # epsA_1 through epsA_12 (sectoral TFP)
     end
-    if n_exo >= 17; Σe[17, 17] = 1.0; end # eps_xi   (preference/demand)
+    if n_exo >= 16; Σe[16, 16] = 1.0; end # eps_xi   (aggregate demand)
+    for i in 17:min(28, n_exo)
+        Σe[i, i] = 1.0                     # eps_om_1 through eps_om_12 (sectoral demand)
+    end
 
     sr = context.models[1].i_bkwrd_b
     A_state = T[sr, :]       # n_state × n_state  (state transition)
@@ -738,7 +758,7 @@ function smm_model_moments(θ, context, baseline, endo_names)
 
     # Solve state covariance via Lyapunov: P = A·P·A' + B·Σ·B'
     P = local_dlyap(A_state, B_Σ_Bt)
-    (any(diag(P) .< -1e-10) || any(isnan.(P))) && return NAN46, false
+    (any(diag(P) .< -1e-10) || any(isnan.(P))) && return NAN58, false
     P = (P + P') / 2
 
     # Build endo_name → row index map
@@ -802,6 +822,10 @@ function smm_model_moments(θ, context, baseline, endo_names)
     std_PH = [pstd("PH_$(i)") for i in 1:nsec]
     std_L  = [pstd("L_$(i)")  for i in 1:nsec]
 
+    # corr(Y_i, PH_i): negative under TFP shocks, positive under demand shocks
+    # Key identifier for supply vs demand decomposition per sector
+    corr_YPH = [xcorr("Y_$(i)", "PH_$(i)") for i in 1:nsec]
+
     dY=baseline.data_std_Y; dPH=baseline.data_std_PH; dL=baseline.data_std_L
     vy=isfinite.(std_Y).&isfinite.(dY)
     vp=isfinite.(std_PH).&isfinite.(dPH)
@@ -810,6 +834,7 @@ function smm_model_moments(θ, context, baseline, endo_names)
     rP=sum(vp)>=3 ? safe_spearman(std_PH[vp],dPH[vp]) : 0.0
     rL=sum(vl)>=3 ? safe_spearman(std_L[vl],dL[vl]) : 0.0
 
+    # Return 58 moments: 12×std_Y + 12×std_PH + 12×std_L + 10×aggregate + 12×corr(Y_i,PH_i)
     return [std_Y;std_PH;std_L;pstd("GDP");pstd("pi");xcorr("GDP","pi");
-            std_TBGDP;pstd("Q");acQ;xcorr("GDP","Q");rY;rP;rL], true
+            std_TBGDP;pstd("Q");acQ;xcorr("GDP","Q");rY;rP;rL;corr_YPH], true
 end
