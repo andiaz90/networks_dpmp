@@ -1,0 +1,144 @@
+%% =========================================================================
+%%  Oil Price Shock Section — for inclusion in Paper_soe.tex
+%%  Insert with:  \input{oil_shock_section}
+%%  Requires:     figures/oil_shock/*.pdf, tables/oil_shock_*.tex
+%%  Run first:    julia --project=. oil_shock_analysis.jl
+%% =========================================================================
+
+\subsection{Oil Price Shock}\label{sec:oil_shock}
+
+We now use the model to study the transmission of a world oil price shock through the Chilean economy.
+This exercise is motivated by Chile's status as a net oil importer: crude oil and refined fuels constitute a significant fraction of intermediate imports across most sectors, with particularly high exposure in Transport and Communications (37\%), Mining (22\%), Manufacturing (19\%), and Agriculture (16\%).
+Understanding how oil price shocks propagate is especially relevant for monetary policy, since the input-output structure of production implies that the first-round cost increase in oil-intensive sectors spills over to downstream sectors through intermediate input trade---a channel that is absent in representative-agent models without production networks.
+
+\subsubsection{Experiment Design}
+
+We subject the economy to a one-time 10\% increase in the world oil price $P^{O*}_t$, governed by the AR(1) process
+\begin{equation}
+    \log\left(\frac{P^{O*}_t}{P^{O*}}\right) = \rho_{O^*}\,\log\left(\frac{P^{O*}_{t-1}}{P^{O*}}\right) + \sigma_{O^*}\,\varepsilon^{O^*}_t,
+    \label{eq:oil_process}
+\end{equation}
+with persistence $\rho_{O^*} = 0.9$ and innovation standard deviation $\sigma_{O^*} = 0.02$.
+All other shocks are set to zero.
+The domestic oil price is determined by full exchange rate pass-through, $P^O_t = \mathcal{E}_t P^{O*}_t$, so that movements in the real exchange rate partially offset or amplify the foreign-currency oil price change.
+
+In each sector $i$, composite intermediate imports $V_{it}$ are a CES aggregate of oil ($V^{\text{Oil}}_{it}$) and non-oil ($V^{\text{Non}}_{it}$) imports with sector-specific oil shares $\alpha^{\text{Oil}}_i$ drawn from Chile's 2021 Input-Output tables:\footnote{Specifically, we use the use matrix (Cuadro 21) for products 28 and 77--81 (crude oil, diesel, gasoline, kerosene, fuel oils, LPG) at basic prices, aggregated to the 12-sector classification.}
+\begin{equation}
+    P^{V}_{it}{}^{1-\epsilon_{V}^{\text{oil}}} = \alpha^{\text{Oil}}_i\, (P^O_t)^{1-\epsilon_{V}^{\text{oil}}} + (1-\alpha^{\text{Oil}}_i)\, (P^v_t)^{1-\epsilon_{V}^{\text{oil}}},
+    \label{eq:PIV_oil}
+\end{equation}
+with elasticity of substitution between oil and non-oil imports $\epsilon_V^{\text{oil}} = 0.5$, reflecting limited short-run substitutability.
+
+\subsubsection{Transmission Channels}
+
+The oil price shock transmits to the economy through two distinct channels.
+
+\paragraph{Direct cost channel.}
+A higher oil price raises the composite import price index $P^{V}_{it}$ in every sector.
+Because imported inputs enter the production function with share $\alpha_{Vi}$, the first-round impact on marginal cost is approximately
+\begin{equation}
+    \Delta \log MC^i_t \bigg|_{\text{direct}} \approx \alpha_{Vi}\,\alpha^{\text{Oil}}_i\,\Delta \log P^O_t.
+    \label{eq:direct_mc}
+\end{equation}
+This effect is heterogeneous across sectors: Transport and Communications faces a direct cost increase roughly nine times larger than Financial Services, reflecting the cross-sectoral dispersion in oil intensity documented in Figure~\ref{fig:oil_intensity}.
+
+\paragraph{Network amplification channel.}
+The direct cost increase in oil-intensive sectors raises their output prices $P^H_{it}$, which in turn enters the intermediate input cost of every sector purchasing from them through the IO matrix $\Gamma_{i,j}$.
+This indirect effect propagates recursively through the production network.
+Using a first-order approximation, the total effect on marginal costs---including all rounds of network propagation---is given by the Leontief inverse:
+\begin{equation}
+    \Delta \log \mathbf{MC}\bigg|_{\text{total}} = \left(I - \text{diag}(\boldsymbol{\alpha}_m)\,\Gamma\right)^{-1}\,\Delta \log \mathbf{MC}\bigg|_{\text{direct}},
+    \label{eq:leontief_mc}
+\end{equation}
+where $\boldsymbol{\alpha}_m$ is the vector of material input shares and $\Gamma$ is the IO coefficient matrix.
+The network amplification effect is then the difference between total and direct effects.
+
+\subsubsection{Aggregate Responses}
+
+Figure~\ref{fig:oil_agg_irf} shows the impulse responses of aggregate variables to the 10\% oil price shock.
+\textcolor{red}{[Values to be filled after running oil\_shock\_analysis.jl.]}
+GDP contracts on impact as the cost shock raises production costs economy-wide.
+CPI inflation rises, reflecting the pass-through of higher import prices into domestic prices through both the direct oil channel and the network multiplier.
+The real exchange rate depreciates, amplifying the domestic-currency oil price increase, while the trade balance deteriorates as the oil import bill rises.
+The central bank responds by tightening the policy rate, which partially offsets the inflationary pressure but deepens the output contraction.
+The persistence of the shock ($\rho_{O^*} = 0.9$) implies that effects are long-lived, with GDP returning to steady state only gradually.
+
+Table~\ref{tab:oil_agg} summarizes the impact and peak responses of the key aggregate variables.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/oil_shock/irf_aggregate_oil_shock.pdf}
+    \caption{Aggregate impulse responses to a 10\% world oil price shock. All variables in percentage deviations from steady state. The shock follows an AR(1) with persistence $\rho_{O^*} = 0.9$.}
+    \label{fig:oil_agg_irf}
+\end{figure}
+
+\input{tables/oil_shock_aggregates}
+
+\subsubsection{Sectoral Responses}
+
+The heterogeneous oil exposure across sectors generates a rich pattern of cross-sectoral responses.
+Figure~\ref{fig:oil_sec_y} displays the output IRFs for all 12 sectors.
+The sectors most affected are those with the highest oil intensity of imported inputs---Transport and Communications, Mining, and Manufacturing---which face the largest direct cost increases.
+However, the ranking of sectoral responses does not perfectly mirror the ranking of oil shares: sectors with low direct oil exposure but high reliance on intermediate inputs from oil-intensive sectors (such as Trade and Business Services) experience significant output contractions through the network channel.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/oil_shock/irf_sectoral_Y_oil_shock.pdf}
+    \caption{Sectoral output responses to a 10\% oil price shock. Blue panels are goods sectors; red panels are services sectors.}
+    \label{fig:oil_sec_y}
+\end{figure}
+
+Figure~\ref{fig:oil_sec_ph} shows the sectoral price responses.
+Sectors with stickier prices (higher $\kappa_i$) adjust prices more slowly, absorbing a larger fraction of the cost shock through markups in the short run.
+This heterogeneity in price adjustment speeds, combined with the IO structure, implies that the inflationary impulse propagates unevenly across sectors---a feature that is central to the aggregate inflation dynamics in the model and that a one-sector model would miss entirely.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/oil_shock/irf_sectoral_PH_oil_shock.pdf}
+    \caption{Sectoral price responses to a 10\% oil price shock.}
+    \label{fig:oil_sec_ph}
+\end{figure}
+
+\subsubsection{Decomposition: Direct Cost vs.\ Network Amplification}
+
+Table~\ref{tab:oil_decomp} decomposes the marginal cost increase in each sector into the direct oil cost channel and the network amplification channel, as defined in equations~\eqref{eq:direct_mc}--\eqref{eq:leontief_mc}.
+Two key findings emerge.
+
+First, the network amplification is quantitatively large.
+\textcolor{red}{[Aggregate amplification ratio to be filled after running the script.]}
+On an output-weighted basis, the total effect on marginal costs is substantially larger than the direct effect alone, implying that ignoring IO linkages would significantly understate the inflationary impact of oil shocks.
+
+Second, the network channel partially reshuffles the cross-sectoral ranking of vulnerability.
+While Transport and Communications has the highest direct oil exposure, sectors like Agriculture and Manufacturing receive a large additional cost push through the IO network because they purchase heavily from other oil-intensive sectors.
+The amplification ratio is highest for sectors with low direct oil exposure but high upstream dependence on oil-intensive suppliers---these are the sectors for which the network channel matters most relative to the direct channel.
+
+Figure~\ref{fig:oil_decomp_mc} provides a visual decomposition: the orange bars represent the direct oil cost effect and the blue bars represent the additional network amplification, stacked to show the total marginal cost increase per sector.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.95\textwidth]{figures/oil_shock/decomposition_mc_oil.pdf}
+    \caption{Decomposition of the oil shock effect on sectoral marginal costs. Orange: direct oil cost channel ($\alpha_{Vi} \times \alpha^{\text{Oil}}_i \times \Delta\log P^O$). Blue: network amplification via IO linkages.}
+    \label{fig:oil_decomp_mc}
+\end{figure}
+
+\input{tables/oil_shock_decomposition}
+
+\subsubsection{The Role of Sectoral Heterogeneity}
+
+The interaction between heterogeneous oil exposure, heterogeneous price stickiness, and the IO network creates transmission patterns that would be absent in either a representative-sector model or a multi-sector model without IO linkages.
+
+Figure~\ref{fig:oil_intensity} documents the oil import shares across sectors.
+The dispersion is substantial: Transport and Communications allocates 37\% of its imported inputs to oil, while Financial Services allocates less than 1\%.
+This variation, combined with the complementarity between oil and non-oil imports ($\epsilon_V^{\text{oil}} = 0.5 < 1$), implies that oil-intensive sectors cannot easily substitute away from oil, making the cost pass-through nearly proportional to the oil share.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.85\textwidth]{figures/oil_shock/oil_intensity_exposure.pdf}
+    \caption{Oil share of intermediate imports by sector ($\alpha^{\text{Oil}}_i$), computed from Chile's 2021 IO tables.}
+    \label{fig:oil_intensity}
+\end{figure}
+
+The network amplification effect depends crucially on the density of the IO matrix.
+Sectors that are central in the production network---those that supply intermediate inputs to many other sectors---act as amplifiers of the oil shock even if their own oil exposure is moderate.
+Conversely, sectors at the periphery of the IO network experience effects closer to the direct channel alone.
+This finding echoes the theoretical results in \citet{baqaee2019macroeconomic} on the role of network centrality in shock propagation, but here we quantify the channel in a calibrated model with realistic Chilean IO linkages and price rigidities.

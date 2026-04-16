@@ -8,6 +8,7 @@
 // Define variables
 var chi xi Lab_costs Price_costs w VA C Ctot Ctotg Ctots M C_g C_s p_g p_s N pi pi_g pi_s r om_g om_s vi Y
 PV r_star Rworld pi_e Bstar Pipstar Q TB PX X Ystar V PVstar GDP IMP mkupV CFs CFg
+POstar PO VOil VNon
 
     @#for i in 1:nsec
         PH_@{i}
@@ -41,21 +42,26 @@ PV r_star Rworld pi_e Bstar Pipstar Q TB PX X Ystar V PVstar GDP IMP mkupV CFs C
         V_@{i}
     @#endfor
     @#for i in 1:nsec
-    CHg_@{i} 
-    CFg_@{i} 
-    CHs_@{i} 
-    CFs_@{i} 
-    Cg_@{i} 
+    CHg_@{i}
+    CFg_@{i}
+    CHs_@{i}
+    CFs_@{i}
+    Cg_@{i}
     Cs_@{i}
+    @#endfor
+    @#for i in 1:nsec
+    PIV_@{i}
+    VOil_@{i}
+    VNon_@{i}
     @#endfor
     ;
 
 var C_f C_g_f C_s_f CFs_f CFg_f PV_f p_g_f p_s_f r_f N_f Lab_costs_f
 w_f Y_f  Ctot_f Ctots_f Ctotg_f VA_f GDP_f TB_f M_f r_star_f pi_e_f Q_f Bstar_f
-PX_f X_f IMP_f V_f Y_g_f Y_s_f
+PX_f X_f IMP_f V_f Y_g_f Y_s_f PO_f VOil_f VNon_f
 
-@#for j in 1:nsec   
-    P_f_@{j} 
+@#for j in 1:nsec
+    P_f_@{j}
     PM_f_@{j}
     PH_f_@{j}
     Cg_f_@{j}
@@ -70,6 +76,9 @@ PX_f X_f IMP_f V_f Y_g_f Y_s_f
     V_f_@{j}
     MC_f_@{j}
     PL_f_@{j}
+    PIV_f_@{j}
+    VOil_f_@{j}
+    VNon_f_@{j}
   @#endfor
   ;
 
@@ -85,7 +94,7 @@ var Ygap Ngap GDPgap
     ;
 
 
-varexo eps_om eps_i epschi eps_pvstar
+varexo eps_om eps_i epschi eps_pvstar eps_postar
     @#for i in 1:nsec
         epsA_@{i}
     @#endfor
@@ -97,6 +106,8 @@ parameters gamma psi beta phi epsilon rho rho_om1 rho_tfp1 rho_om2 rho_tfp2 omba
 rhoi rhoirule ilabcosts sigma_i sigma_om sigma_L_agg Rworld_ss
 bbar chii_b omegaX epsilonX ystar_ss etastar kappaV epsilonV sigmaH Pistar_ss PVstar_ss
 rho_pvstar sigma_pvstar rho_xi sigma_xi
+// Oil sector parameters
+epsilonV_oil rho_postar sigma_postar POstar_ss shock_eps_postar
 Ctot_ss Ctotg_ss Ctots_ss VA_ss M_tot_ss Y_ss IMP_ss
 // Shock activation parameters (set by params_jl.mod; 0=off, 1=on)
 shock_eps_om shock_eps_i shock_eps_pvstar shock_eps_xi
@@ -125,6 +136,8 @@ Bstar_ss Q_ss TB_ss PX_ss V_ss CF_ss CFg_total_ss CFs_total_ss
         isigma_tfp_@{i}
         PL_ss@{i}
         shock_epsA_@{i}
+        alphaOilShare_@{i}
+        PIV_ss@{i}
         // Sectoral SS values used in initval block
         PH_ss@{i}
         MC_ss@{i}
@@ -431,10 +444,21 @@ Price_costs = (
     //% Intermediates Demand
         MC_f_@{i}*(alpha_@{i}*Y_f_@{i}/M_f_@{i})^(1/epsY_@{i}) = PM_f_@{i};
 
-    //% Demand for imports
-        MC_@{i}*(alphaV_@{i}*Y_@{i}/V_@{i})^(1/epsY_@{i}) = PV;    
-    //% Demand for imports
-        MC_f_@{i}*(alphaV_@{i}*Y_f_@{i}/V_f_@{i})^(1/epsY_@{i}) = PV_f;    
+    //% Demand for imports (composite intermediate imports V_@{i} at sector-specific price PIV_@{i})
+        MC_@{i}*(alphaV_@{i}*Y_@{i}/V_@{i})^(1/epsY_@{i}) = PIV_@{i};
+    //% Demand for imports (flex-price)
+        MC_f_@{i}*(alphaV_@{i}*Y_f_@{i}/V_f_@{i})^(1/epsY_@{i}) = PIV_f_@{i};
+
+    //% Sector-specific composite import price index (CES between oil and non-oil imports)
+    //% PIV^(1-eps) = alphaOil * PO^(1-eps) + (1-alphaOil) * PV^(1-eps)
+    PIV_@{i}^(1-epsilonV_oil) = alphaOilShare_@{i}*PO^(1-epsilonV_oil) + (1-alphaOilShare_@{i})*PV^(1-epsilonV_oil);
+    PIV_f_@{i}^(1-epsilonV_oil) = alphaOilShare_@{i}*PO_f^(1-epsilonV_oil) + (1-alphaOilShare_@{i})*PV_f^(1-epsilonV_oil);
+
+    //% Oil and non-oil import demands (CES factor demands within composite V_@{i})
+    VOil_@{i} = alphaOilShare_@{i}*(PIV_@{i}/PO)^epsilonV_oil*V_@{i};
+    VNon_@{i} = (1-alphaOilShare_@{i})*(PIV_@{i}/PV)^epsilonV_oil*V_@{i};
+    VOil_f_@{i} = alphaOilShare_@{i}*(PIV_f_@{i}/PO_f)^epsilonV_oil*V_f_@{i};
+    VNon_f_@{i} = (1-alphaOilShare_@{i})*(PIV_f_@{i}/PV_f)^epsilonV_oil*V_f_@{i};
 
     //% Labor Demand
         MC_@{i}*((1-alpha_@{i}-alphaV_@{i})*Y_@{i}/L_@{i})^(1/epsY_@{i}) = PL_@{i};
@@ -472,10 +496,13 @@ Price_costs = (
 
 
     //% Rotemberg Pricing FOC
+    //% Derivation: adjustment cost (kappa/2)*(Pi_H - 1)^2 * Y, where Pi_H = pi*PH/PH(-1)
+    //% FOC with respect to PH_@{i} yields the standard Rotemberg NKPC:
+    //% 1 - eps + eps*MC/PH - kappa*(Pi_H-1)*Pi_H + beta*M_{t+1}*kappa*(Pi_H(+1)-1)*Pi_H(+1)*Y(+1)/Y = 0
     1 - epsilon + epsilon*MC_@{i}/PH_@{i}
-    - kappa_@{i}*(pi*PH_@{i}/PH_@{i}(-1)-1)*pi*PH_@{i}/PH_@{i}(-1) 
+    - kappa_@{i}*(pi*PH_@{i}/PH_@{i}(-1)-1)*pi*PH_@{i}/PH_@{i}(-1)
     + beta*(C(+1)/C)^(-gamma)*kappa_@{i}*(pi(+1)*PH_@{i}(+1)/PH_@{i}-1)
-    *(pi(+1)*PH_@{i}(+1)/PH_@{i})^2/pi(+1)*Y_@{i}(+1)/Y_@{i} =0; 
+    *(pi(+1)*PH_@{i}(+1)/PH_@{i})*Y_@{i}(+1)/Y_@{i} =0;
 
     //% Rotemberg Pricing FOC
     1 - epsilon + epsilon*MC_f_@{i}/PH_f_@{i}=0; 
@@ -485,8 +512,30 @@ Price_costs = (
     @#endfor
 
 
+//% Aggregate oil and non-oil intermediate imports
+VOil = (0
+@#for i in 1:nsec
+    + VOil_@{i}
+@#endfor
+);
+VNon = (0
+@#for i in 1:nsec
+    + VNon_@{i}
+@#endfor
+);
+VOil_f = (0
+@#for i in 1:nsec
+    + VOil_f_@{i}
+@#endfor
+);
+VNon_f = (0
+@#for i in 1:nsec
+    + VNon_f_@{i}
+@#endfor
+);
+
 //% Taylor Rule
-r = (1-rhoirule)*(1/beta) + rhoirule*r(-1) 
+r = (1-rhoirule)*(1/beta) + rhoirule*r(-1)
 + (1-rhoirule)*phi*(pi-1) + vi;
 
 //% Shock processes
@@ -541,8 +590,10 @@ PX_f=(1
     @#endfor
     );
 
-TB = PX*X-PV*IMP;
-TB_f = PX_f*X_f-PV_f*IMP_f;
+//% Trade balance: exports minus oil imports (at PO) and non-oil imports (at PV)
+//% Consumer imports (CFs, CFg) priced at PV (non-oil)
+TB = PX*X - PO*VOil - PV*(VNon+CFs+CFg);
+TB_f = PX_f*X_f - PO_f*VOil_f - PV_f*(VNon_f+CFs_f+CFg_f);
 
 X = omegaX*(PX/Q)^(-etastar)*Ystar;
 X_f = omegaX*(PX_f/Q_f)^(-etastar)*Ystar;
@@ -603,6 +654,11 @@ CFg_f=(0
 Pipstar= Pistar_ss;
 log(PVstar/PVstar_ss) = rho_pvstar*log(PVstar(-1)/PVstar_ss) + sigma_pvstar*eps_pvstar;
 
+//% Oil price process (world oil price in foreign currency, pass-through via exchange rate)
+PO = Q*POstar;
+PO_f = Q_f*POstar;
+log(POstar/POstar_ss) = rho_postar*log(POstar(-1)/POstar_ss) + sigma_postar*eps_postar;
+
 //% Output and Employment Gaps (log-deviations from flex-price equilibrium)
 Ygap    = log(Y)   - log(Y_f);
 Ngap    = log(N)   - log(N_f);
@@ -662,8 +718,8 @@ r = r_ss;
 r_f = r_ss;
 vi = 0;
 
-om_g=ombar;
-om_s=1-ombar;
+om_g=log(ombar);     // SS: exp(om_g) = ombar, so om_g = log(ombar)
+om_s=log(1-ombar);  // SS: exp(om_s) = 1-ombar
 
 r_star=Rworld_ss; 
 r_star_f=Rworld_ss; 
@@ -761,8 +817,32 @@ V_f = V_ss;
 PV = Q*PVstar*mkupV;
 PV_f = Q_f*PVstar*mkupV;
 
-TB = PX*X-PV*(CF_ss+V_ss);
-TB_f = PX_f*X_f-PV_f*(CF_ss+V_ss);
+POstar = POstar_ss;
+PO = Q_ss*POstar_ss;
+PO_f = Q_ss*POstar_ss;
+
+//% Oil/non-oil split at SS: since POstar_ss = PVstar_ss = 1, PO_ss = PV_ss,
+//% so PIV_i_ss = PV_ss for all i (independent of alphaOilShare_i).
+//% Initial values for VOil/VNon are starting guesses; Dynare's steady; will compute exact SS.
+//% TB_ss = PX*X - PO_ss*VOil_ss - PV_ss*VNon_ss - PV_ss*CF_ss
+//%       = PX*X - PV_ss*(VOil_ss+VNon_ss+CF_ss) = PX*X - PV*(V_ss+CF_ss)  [since PO_ss=PV_ss]
+VOil = 0;
+VNon = V_ss;
+VOil_f = 0;
+VNon_f = V_ss;
+
+@#for i in 1:nsec
+    PIV_@{i}   = PIV_ss@{i};
+    PIV_f_@{i} = PIV_ss@{i};
+    VOil_@{i}  = 0;
+    VNon_@{i}  = Vi_ss@{i};
+    VOil_f_@{i} = 0;
+    VNon_f_@{i} = Vi_ss@{i};
+@#endfor
+
+//% TB_ss value is PX*X - PV*(V_ss+CF_ss) because PO_ss = PV_ss (see above)
+TB = PX*X - PV*(V_ss+CF_ss);
+TB_f = PX_f*X_f - PV_f*(V_ss+CF_ss);
 
 w  = w_ss;
 w_f  = w_ss;
@@ -838,6 +918,7 @@ var eps_om=shock_eps_om;
 var eps_i=shock_eps_i;
 var epschi=0.0;
 var eps_pvstar=shock_eps_pvstar;
+var eps_postar=shock_eps_postar;
 var eps_xi=shock_eps_xi;
 @#for z in 1:nsec
    var epsA_@{z}=shock_epsA_@{z};

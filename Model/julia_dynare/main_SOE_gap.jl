@@ -304,6 +304,31 @@ sigma_L_het      = zeros(nsec)
 rho_pvstar_val   = 0.9
 sigma_pvstar_val = 0.03
 
+# Oil price (POstar) shock
+# alphaOilShare: fraction of each sector's composite imports V_i that is oil/refined fuels.
+# Source: Cuadro 21 (intermediate imported use at basic prices), MIP Chile 2021,
+#         products 28,77-81 (crude oil + diesel, gasoline, kerosene, fuel oils, LPG).
+#         Verified against 2021_Cuadros_12x12.xlsx.
+# Sector order: 1=Agro/Fishing, 2=Mining, 3=Manufacturing, 4=Utilities,
+#               5=Construction, 6=Trade/Hotels, 7=Transport/Comms, 8=Finance,
+#               9=Real Estate, 10=Business Svcs, 11=Personal Svcs, 12=Public Admin
+modalphaOil = [0.1635,   # 1  Agropecuario-silvícola y Pesca
+               0.2164,   # 2  Minería
+               0.1890,   # 3  Industria manufacturera
+               0.0871,   # 4  Electricidad, gas, agua y gestión de desechos
+               0.0417,   # 5  Construcción
+               0.0793,   # 6  Comercio, hoteles y restaurantes
+               0.3734,   # 7  Transporte, comunicaciones y servicios de información
+               0.0043,   # 8  Intermediación financiera
+               0.0449,   # 9  Servicios inmobiliarios y de vivienda
+               0.0633,   # 10 Servicios empresariales
+               0.0391,   # 11 Servicios personales
+               0.0447]   # 12 Administración pública
+epsilonV_oil_val  = 0.5           # CES elasticity between oil and non-oil imports
+rho_postar_val    = 0.9           # AR(1) persistence of world oil price
+sigma_postar_val  = 0.02          # std dev of oil price innovation
+POstar_ss_val     = 1.0           # SS world oil price (normalized, same as PVstar_ss)
+
 # Preference (xi) shock
 rho_xi_val   = 0.80
 sigma_xi_val = 0.005
@@ -314,18 +339,18 @@ sigma_xi_val = 0.005
 # =========================================================================== #
 
 if EXERCISE == 0
-    # --- Baseline: all shocks active ---
+    # --- Baseline: all shocks active (Option-A: 12 sectoral demand shocks) ---
     sigma_i_val    = 0.001
-    rho_om1_val    = 0.1;   rho_om2_val = 0.0
-    sigma_om_val   = 0.0001
+    rho_om1_val    = 0.1;   rho_tfp2_val = 0.0
+    sigma_om_vec   = fill(0.03, nsec)   # uniform initial amplitude
     rho_tfp1_val   = 0.5;   rho_tfp2_val = 0.0
     isigma_tfp_val = fill(0.05, nsec)
 
 elseif EXERCISE == 1
-    # --- Exercise 1: preference shock only ---
+    # --- Exercise 1: sectoral demand shocks only ---
     sigma_i_val    = 0.0
-    rho_om1_val    = 0.95;  rho_om2_val = 0.0
-    sigma_om_val   = 0.01
+    rho_om1_val    = 0.95
+    sigma_om_vec   = fill(0.01, nsec)
     rho_tfp1_val   = 0.5;   rho_tfp2_val = 0.0
     isigma_tfp_val = zeros(nsec)
 
@@ -333,8 +358,8 @@ elseif EXERCISE == 2
     # --- Exercise 2: manufacturing TFP shock only ---
     mfg = 3   # sector 3 = Manufacturing
     sigma_i_val    = 0.0
-    rho_om1_val    = 0.1;   rho_om2_val = 0.0
-    sigma_om_val   = 0.0
+    rho_om1_val    = 0.1
+    sigma_om_vec   = zeros(nsec)
     rho_tfp1_val   = 0.95;  rho_tfp2_val = 0.0
     isigma_tfp_val = zeros(nsec)
     isigma_tfp_val[mfg] = 0.01
@@ -342,17 +367,18 @@ elseif EXERCISE == 2
 elseif EXERCISE == 3
     # --- Exercise 3: monetary policy shock only ---
     sigma_i_val    = 0.01
-    rho_om1_val    = 0.1;   rho_om2_val = 0.0
-    sigma_om_val   = 0.0
+    rho_om1_val    = 0.1
+    sigma_om_vec   = zeros(nsec)
     rho_tfp1_val   = 0.5;   rho_tfp2_val = 0.0
     isigma_tfp_val = zeros(nsec)
 end
 
 # Shock variance indicators for Dynare shocks block
-shock_eps_om_val     = Float64(sigma_om_val > 0)
+shock_eps_om_vec     = Float64.(sigma_om_vec .> 0)
 shock_eps_i_val      = Float64(sigma_i_val  > 0)
 shock_eps_pvstar_val = Float64(EXERCISE == 0 && sigma_pvstar_val > 0)
 shock_eps_xi_val     = Float64(EXERCISE == 0 && sigma_xi_val > 0)
+shock_eps_postar_val = Float64(EXERCISE == 0 && sigma_postar_val > 0 && any(modalphaOil .> 0))
 shock_epsA_val       = ones(nsec)
 
 
@@ -363,8 +389,8 @@ shock_epsA_val       = ones(nsec)
 # SMM estimates are written as CSV by smm_estimation.jl
 smm_est_file = joinpath(DATA_DIR, "smm_estimates.csv")
 
-param_names = ["ilabcosts", "epsY", "epsM", "kappaV", "rho_om1", "sigma_om",
-               "rho_tfp1", "isigma_tfp(1)", "rho_pvstar", "sigma_pvstar"]
+param_names = ["ilabcosts", "epsY", "epsM", "kappaV", "rho_om1",
+               "rho_tfp1", "isigma_tfp(1)", "sigma_om(avg)", "rho_pvstar", "sigma_pvstar"]
 
 smm_param_source = "hard-coded defaults"
 
@@ -377,20 +403,22 @@ if isfile(smm_est_file)
     modepsM          = fill(est["epsM"], nsec)
     kappaV_val       = exp(est["log_kappaV"])
     rho_om1_val      = est["rho_om"]
-    sigma_om_val     = est["sigma_om"]
     rho_tfp1_val     = est["rho_A"]
     isigma_tfp_val   = [est["isigma_tfp_$(i)"] for i in 1:nsec]
+    # Option-A: 12 sectoral demand shock amplitudes
+    sigma_om_vec     = [haskey(est, "sigma_om_$(i)") ? est["sigma_om_$(i)"] : 0.03 for i in 1:nsec]
     rho_pvstar_val   = est["rho_pvstar"]
     sigma_pvstar_val = est["sigma_pvstar"]
     haskey(est, "rho_xi")   && (rho_xi_val   = est["rho_xi"])
     haskey(est, "sigma_xi") && (sigma_xi_val = est["sigma_xi"])
     haskey(est, "etastar")  && (etastar_val  = est["etastar"])
+    shock_eps_om_vec = Float64.(sigma_om_vec .> 0)   # recompute flags from loaded values
     smm_param_source = "smm_estimates.csv"
 end
 
 @printf "--- Parameters (%s) ---\n" smm_param_source
 param_vals = [ilabcosts_val, modepsY[1], modepsM[1], kappaV_val,
-              rho_om1_val, sigma_om_val, rho_tfp1_val, isigma_tfp_val[1],
+              rho_om1_val, rho_tfp1_val, isigma_tfp_val[1], mean(sigma_om_vec),
               rho_pvstar_val, sigma_pvstar_val]
 for (nm, vl) in zip(param_names, param_vals)
     @printf "  %-18s %g\n" nm vl
@@ -571,6 +599,17 @@ Pistar_ss_val  = Pistar_ss
 Rworld_ss_val  = Rworld_ss
 PVstar_ss_val  = PVstar_ss
 
+# Oil sector SS: PO_ss = Q_ss * POstar_ss; with POstar_ss = PVstar_ss = 1 -> PO_ss = PV_ss
+PO_ss     = Q_ss * POstar_ss_val
+# Sector-specific composite import price index at SS:
+# PIV_i^(1-eps) = alphaOil_i * PO^(1-eps) + (1-alphaOil_i) * PV^(1-eps)
+# When POstar_ss = PVstar_ss = 1 -> PO_ss = PV_ss -> PIV_i_ss = PV_ss for all i
+PIV_ss_vec = [
+    (modalphaOil[i] * PO_ss^(1 - epsilonV_oil_val)
+     + (1 - modalphaOil[i]) * PV_ss^(1 - epsilonV_oil_val))^(1 / (1 - epsilonV_oil_val))
+    for i in 1:nsec
+]
+
 # Foreign demand shock params (kept for smm_estimates.mat compatibility)
 rho_psi_val   = 0.5
 sigma_psi_val = 0.001
@@ -592,14 +631,12 @@ params_nt = (
     # Shock scalars
     sigma_i_val    = sigma_i_val,
     sigma_L_agg_val= sigma_L_agg_val,
-    sigma_om_val   = sigma_om_val,
     ilabcosts_val  = ilabcosts_val,
     gamma_val      = gamma,
     beta_val       = beta_val,
     phi_val        = phi_val,
     rho_val        = rho_val,
     rho_om1_val    = rho_om1_val,
-    rho_om2_val    = rho_om2_val,
     rho_tfp1_val   = rho_tfp1_val,
     rho_tfp2_val   = rho_tfp2_val,
     rhoi_val       = rhoi_val,
@@ -621,6 +658,14 @@ params_nt = (
     sigma_pvstar_val=sigma_pvstar_val,
     rho_xi_val     = rho_xi_val,
     sigma_xi_val   = sigma_xi_val,
+    # Oil sector
+    modalphaOil         = modalphaOil,
+    epsilonV_oil_val    = epsilonV_oil_val,
+    rho_postar_val      = rho_postar_val,
+    sigma_postar_val    = sigma_postar_val,
+    POstar_ss_val       = POstar_ss_val,
+    shock_eps_postar_val = shock_eps_postar_val,
+    PIV_ss_vec          = PIV_ss_vec,
     # Steady state scalars
     w_ss           = w_ss,
     C_ss           = C_ss,
@@ -646,11 +691,13 @@ params_nt = (
     M_tot_ss       = M_tot_ss,
     Y_tot_ss       = Y_tot_ss,
     # Shock flags
-    shock_eps_om_val     = shock_eps_om_val,
     shock_eps_i_val      = shock_eps_i_val,
     shock_eps_pvstar_val = shock_eps_pvstar_val,
     shock_eps_xi_val     = shock_eps_xi_val,
     shock_epsA_val       = shock_epsA_val,
+    # Option-A: 12 sectoral demand shock parameters
+    sigma_om_vec         = sigma_om_vec,
+    shock_eps_om_vec     = shock_eps_om_vec,
     # Sectoral vectors
     modgammag    = modgammag,
     modgammas    = modgammas,

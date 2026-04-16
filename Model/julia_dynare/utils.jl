@@ -46,7 +46,6 @@ function write_params_mod(mod_dir::String, p::NamedTuple)
         # ---- Scalar structural parameters -------------------------------- #
         _wp(io, "sigma_i",      p.sigma_i_val)
         _wp(io, "sigma_L_agg",  p.sigma_L_agg_val)
-        _wp(io, "sigma_om",     p.sigma_om_val)
         _wp(io, "ilabcosts",    p.ilabcosts_val)
         _wp(io, "gamma",        p.gamma_val)
         _wp(io, "psi",          1.0)
@@ -55,7 +54,6 @@ function write_params_mod(mod_dir::String, p::NamedTuple)
         _wp(io, "epsilon",      10.0)
         _wp(io, "rho",          p.rho_val)
         _wp(io, "rho_om1",      p.rho_om1_val)
-        _wp(io, "rho_om2",      p.rho_om2_val)
         _wp(io, "rho_tfp1",     p.rho_tfp1_val)
         _wp(io, "rho_tfp2",     p.rho_tfp2_val)
         _wp(io, "rhoi",         0.5)          # rhoi = 0.5 + 0*rhoi_val
@@ -77,6 +75,12 @@ function write_params_mod(mod_dir::String, p::NamedTuple)
         _wp(io, "rho_xi",       p.rho_xi_val)
         _wp(io, "sigma_xi",     p.sigma_xi_val)
         _wp(io, "Rworld_ss",    p.Rworld_ss_val)
+        # Oil sector scalar parameters
+        _wp(io, "epsilonV_oil",    p.epsilonV_oil_val)
+        _wp(io, "rho_postar",      p.rho_postar_val)
+        _wp(io, "sigma_postar",    p.sigma_postar_val)
+        _wp(io, "POstar_ss",       p.POstar_ss_val)
+        _wp(io, "shock_eps_postar",p.shock_eps_postar_val)
         println(io)
 
         # ---- Steady-state scalars ---------------------------------------- #
@@ -111,10 +115,19 @@ function write_params_mod(mod_dir::String, p::NamedTuple)
 
         # ---- Shock activation flags ------------------------------------- #
         println(io, "// Shock variances (0 = off, 1 = on; amplitude inside model equations)")
-        _wp(io, "shock_eps_om",     p.shock_eps_om_val)
         _wp(io, "shock_eps_i",      p.shock_eps_i_val)
         _wp(io, "shock_eps_pvstar", p.shock_eps_pvstar_val)
         _wp(io, "shock_eps_xi",     p.shock_eps_xi_val)
+        println(io)
+
+        # ---- Option-A: 12 sectoral demand shock parameters -------------- #
+        println(io, "// Option-A: sectoral demand shock std devs and activation flags")
+        for i in 1:nsec
+            _wp(io, "sigma_om_$(i)",     p.sigma_om_vec[i])
+        end
+        for i in 1:nsec
+            _wp(io, "shock_eps_om_$(i)", p.shock_eps_om_vec[i])
+        end
         println(io)
 
         # ---- Sectoral parameters (i = 1..nsec) -------------------------- #
@@ -136,6 +149,8 @@ function write_params_mod(mod_dir::String, p::NamedTuple)
             _wp(io, "varrho_$(i)",       p.modvarrho[i])
             _wp(io, "isigma_tfp_$(i)",   p.isigma_tfp_val[i])
             _wp(io, "shock_epsA_$(i)",   p.shock_epsA_val[i])
+            _wp(io, "alphaOilShare_$(i)", p.modalphaOil[i])
+            _wp(io, "PIV_ss$(i)",         p.PIV_ss_vec[i])
             # Sectoral steady-state scalars (indexed, referenced in initval block)
             _wp(io, "PL_ss$(i)",  p.PL_ss[i])
             _wp(io, "CFg_ss$(i)", p.CFg_ss[i])
