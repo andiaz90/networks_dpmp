@@ -112,12 +112,14 @@ else
     show(df_sec); println("\n")
 
     # ---- aggregate moments ------------------------------------------------
+    # d_std_TBGDP may not exist in older .mat files; fall back to 0.025
+    _std_tbgdp = haskey(dm, "d_std_TBGDP") ? Float64(dm["d_std_TBGDP"]) : 0.025
     agg_keys = ["std_GDP","std_pi","corr_GDPpi","omG",
-                "std_Q","autocorr_Q","corr_GDPQ","TBGDP"]
+                "std_Q","autocorr_Q","corr_GDPQ","TBGDP","std_TBGDP"]
     agg_vals = Float64[
         dm["d_std_GDP"], dm["d_std_pi"], dm["d_corr_GDPpi"],
         dm["d_omG"],     dm["d_std_Q"],  dm["d_autocorr_Q"],
-        dm["d_corr_GDPQ"], dm["d_TBGDP"],
+        dm["d_corr_GDPQ"], dm["d_TBGDP"], _std_tbgdp,
     ]
     df_agg = DataFrame(moment=agg_keys, value=agg_vals)
     out2 = joinpath(DATA_DIR, "aggregate_moments.csv")

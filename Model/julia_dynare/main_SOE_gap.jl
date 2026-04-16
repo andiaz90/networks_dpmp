@@ -795,6 +795,7 @@ m_corr_GDPpi = NaN
 m_corr_GDPQ  = NaN
 m_omG        = ombar_val   # fixed by calibration
 m_autocorr_Q = NaN
+m_std_TBGDP  = NaN
 rho_y = 0.0; rho_p = 0.0; rho_l = 0.0
 
 try

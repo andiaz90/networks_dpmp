@@ -67,8 +67,9 @@ if isfile(sec_mom_file) && isfile(agg_mom_file)
     d_corr_GDPQ  = agg_dict["corr_GDPQ"]
     d_TBGDP      = agg_dict["TBGDP"]
     # std(TB/GDP): HP-filtered std dev of trade-balance-to-GDP ratio.
-    # Add "std_TBGDP" to aggregate_moments.csv if not yet present.
-    d_std_TBGDP  = get(agg_dict, "std_TBGDP", NaN)
+    # Computed by compute_data_moments.jl (section 7b) and saved to aggregate_moments.csv.
+    # Fallback to 0.025 (≈ Chilean historical estimate) so the optimiser never sees NaN.
+    d_std_TBGDP  = get(agg_dict, "std_TBGDP", 0.025)
     @printf "  Loaded sectoral_moments.csv + aggregate_moments.csv\n\n"
 else
     @printf "  CSV not found in %s — using placeholder values.\n\n" DATA_DIR
@@ -84,6 +85,21 @@ end
 data_moments = [y_d; p_d; l_d; d_std_GDP; d_std_pi; d_corr_GDPpi;
                 d_std_TBGDP; d_std_Q; d_autocorr_Q; d_corr_GDPQ; 1.0; 1.0; 1.0]
 @assert length(data_moments) == 46 "Expected 46 data moments, got $(length(data_moments))"
+
+# GUARD: NaN anywhere in data_moments poisons the objective for ALL evaluations
+# (best_obj initialises to NaN and is never updated). Catch this immediately.
+let nan_dm = findall(isnan, data_moments)
+    if !isempty(nan_dm)
+        nan_names = [MOMENT_NAMES[k] for k in nan_dm]
+        error("""
+        NaN detected in data_moments at positions $(nan_dm):
+          $(join(nan_names, ", "))
+
+        The most common cause is a missing row in aggregate_moments.csv.
+        Run  julia --project=. compute_data_moments.jl  to regenerate it.
+        """)
+    end
+end
 
 const MOMENT_NAMES = vcat(
     ["std(Y_$(i))"  for i in 1:12], ["std(PH_$(i))" for i in 1:12],
@@ -127,7 +143,7 @@ function build_weighting_matrix(dm::Vector{<:Real})
     w[39] *= 0.20     # corr(GDP,π): structurally hard for supply-shock model
     # w[40]: std(TB/GDP) — now gets standard inverse-variance weight (no override)
     w[42]  = 2.0      # autocorr(Q): identifies rho_pvstar
-    w[44]  = 5.0; w[45] = 5.0; w[46] = 5.0   # rank correlations: HIGH
+    w[44]  = 2.0; w[45] = 2.0; w[46] = 2.0   # rank correlations: moderate (reduced from 5× to avoid dominating loss)
     return Diagonal(w) |> Matrix
 end
 
@@ -507,8 +523,8 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     max_evals = 300_000
     @printf "--- CMA-ES ---\n"
     @printf "  %d params | %d moments | max %d evals | %d threads\n" N_THETA 46 max_evals n_threads_active
-    @printf "  %-6s  %-12s  %-8s  %-10s  %-8s\n" "eval" "best obj" "fail" "ms/eval" "Klein%"
-    @printf "  %s\n" repeat("-",52)
+    @printf "  %-6s  %-10s  %-44s  %-7s  %-8s  %-8s\n" "eval" "best_obj" "[Y    PH    L     Agg   Rank ]" "fail" "ms/eval" "Klein%"
+    @printf "  %s\n" repeat("-",90)
 
     best_θ        = Ref(clamp.(θ0, LB, UB))   # stored in original parameter space
     best_obj      = Ref(obj_test)              # initialise with pre-flight result
@@ -549,12 +565,21 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
             if trylock(print_lock)
                 try
                     if n - last_printed[] >= PRINT_EVERY   # re-check inside lock
-                        t_now = time()
-                        dt    = t_now - t_last_print[]
-                        ms    = dt > 0 ? 1000.0 * dt / max(n - last_printed[], 1) : 0.0
-                        tot   = _KLEIN_HITS[] + _KLEIN_MISSES[]
-                        kpct  = tot > 0 ? round(Int, 100*_KLEIN_HITS[]/tot) : 0
-                        @printf "  %-6d  %-12.6f  %-8d  %-10.1f  %-8d%%\n" n best_obj[] fail_count[] ms kpct
+                        t_now  = time()
+                        dt     = t_now - t_last_print[]
+                        ms     = dt > 0 ? 1000.0 * dt / max(n - last_printed[], 1) : 0.0
+                        tot    = _KLEIN_HITS[] + _KLEIN_MISSES[]
+                        kpct   = tot > 0 ? round(Int, 100*_KLEIN_HITS[]/tot) : 0
+                        b_obj  = best_obj[]
+                        # Snapshot best moments for decomposition (brief lock, no alloc in hot path)
+                        b_mom  = lock(best_lock) do; copy(best_moments[]); end
+                        ψ_now  = data_moments .- b_mom
+                        dY  = dot(ψ_now[1:12],  W[1:12,1:12]   * ψ_now[1:12])
+                        dPH = dot(ψ_now[13:24], W[13:24,13:24] * ψ_now[13:24])
+                        dL  = dot(ψ_now[25:36], W[25:36,25:36] * ψ_now[25:36])
+                        dAg = dot(ψ_now[37:43], W[37:43,37:43] * ψ_now[37:43])
+                        dRk = dot(ψ_now[44:46], W[44:46,44:46] * ψ_now[44:46])
+                        @printf "  %-6d  %-10.4f  [Y=%.2f PH=%.2f L=%.2f Agg=%.2f Rk=%.2f]  fail=%-5d  %.1fms  Klein=%d%%\n" n b_obj dY dPH dL dAg dRk fail_count[] ms kpct
                         flush(stdout)
                         last_printed[] = n
                         t_last_print[] = t_now
@@ -574,7 +599,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     # hundreds of evaluations on infeasible or uninformative candidates.
     # CMAEvolutionStrategy.jl takes scalar sigma — pass the mean, but
     # pre-scale the parameter space so all dimensions have unit range.
-    insigma = 0.15   # 15% of [0,1] after rescaling below
+    insigma = 0.08   # 8% of [0,1] after rescaling — tighter start prevents premature step-size collapse
 
     # Rescale θ to [0,1] so CMA-ES works in a unit hypercube.
     # The objective wrapper maps back to the original scale.

@@ -740,7 +740,8 @@ d_corr_GDPQ = NaN
 
 @printf "\n--- 7b. Trade balance (TB/GDP) ---\n"
 
-d_TBGDP    = NaN
+d_TBGDP     = NaN
+d_std_TBGDP = NaN
 fname_ccnn = joinpath(DATA_DIR, "datos_CCNN_mayo2025.xlsx")
 
 if isfile(fname_ccnn)
@@ -803,8 +804,12 @@ if isfile(fname_ccnn)
         ok_tb = mask_tb .& (!isnan).(X_tb) .& (!isnan).(M_tb) .& G_tb .> 0
 
         if sum(ok_tb) >= 20
-            d_TBGDP = mean((X_tb[ok_tb] .- M_tb[ok_tb]) ./ G_tb[ok_tb])
-            @printf "  TB/GDP = %.4f  (BCCh CCNN, %d quarterly obs)\n" d_TBGDP sum(ok_tb)
+            tb_gdp_series = (X_tb[ok_tb] .- M_tb[ok_tb]) ./ G_tb[ok_tb]
+            d_TBGDP     = mean(tb_gdp_series)
+            # HP-filter the TB/GDP ratio (level, not log — can be negative) and take std dev
+            d_std_TBGDP = std(hp_cycle(tb_gdp_series, LAMBDA))
+            @printf "  TB/GDP      = %.4f  (BCCh CCNN, %d quarterly obs)\n" d_TBGDP sum(ok_tb)
+            @printf "  std(TB/GDP) = %.5f  (HP-filtered)\n" d_std_TBGDP
         else
             @printf "  WARNING: insufficient CCNN obs for TB/GDP.\n"
         end
@@ -815,7 +820,8 @@ else
     @printf "  File not found: %s\n" fname_ccnn
 end
 
-isnan(d_TBGDP) && (d_TBGDP = -0.02; @printf "  TB/GDP: using fallback %.4f\n" d_TBGDP)
+isnan(d_TBGDP)     && (d_TBGDP = -0.02;  @printf "  TB/GDP: using fallback %.4f\n" d_TBGDP)
+isnan(d_std_TBGDP) && (d_std_TBGDP = 0.025; @printf "  std(TB/GDP): using fallback %.4f\n" d_std_TBGDP)
 
 
 # =========================================================================== #
@@ -896,17 +902,18 @@ end
 @printf "  autocorr(Q)   = %.4f\n" d_autocorr_Q
 @printf "  corr(GDP,Q)   = %.4f\n" d_corr_GDPQ
 @printf "  TB/GDP        = %.4f\n" d_TBGDP
+@printf "  std(TB/GDP)   = %.5f\n" d_std_TBGDP
 
-# Validate: all 44 moments must be non-NaN
+# Validate: all 45 moments must be non-NaN
 d_vec_check = [y_d; p_d; l_d; d_std_GDP; d_std_pi; d_corr_GDPpi;
-               d_omG; d_std_Q; d_TBGDP; d_autocorr_Q; d_corr_GDPQ]
+               d_omG; d_std_Q; d_TBGDP; d_std_TBGDP; d_autocorr_Q; d_corr_GDPQ]
 nan_idx = findall(isnan, d_vec_check)
 if !isempty(nan_idx)
     moment_labels = [["std(Y_$i)" for i in 1:NSEC];
                      ["std(PH_$i)" for i in 1:NSEC];
                      ["std(L_$i)"  for i in 1:NSEC];
                      ["std(GDP)","std(pi)","corr(GDP,pi)","omG",
-                      "std(Q)","TB/GDP","autocorr(Q)","corr(GDP,Q)"]]
+                      "std(Q)","TB/GDP","std(TB/GDP)","autocorr(Q)","corr(GDP,Q)"]]
 
     # Build a readable list — included directly in the error() so it appears
     # in the exception message even when stdout has scrolled past.
@@ -918,7 +925,8 @@ if !isempty(nan_idx)
     any(isnan, p_d)  && push!(causes, "→ std(PH_i) NaN: deflactor_pib.csv columns didn't parse. Check file path and column count.")
     any(isnan, l_d)  && push!(causes, "→ std(L_i) NaN: count_workers_by_sector.csv missing or sector alignment wrong.")
     isnan(d_std_Q)   && push!(causes, "→ std(Q) NaN: reer_chile_bis.xlsx not found or RBCL column missing.")
-    isnan(d_TBGDP)   && push!(causes, "→ TB/GDP NaN: datos_CCNN_mayo2025.xlsx not found or column mapping failed.")
+    isnan(d_TBGDP)     && push!(causes, "→ TB/GDP NaN: datos_CCNN_mayo2025.xlsx not found or column mapping failed.")
+    isnan(d_std_TBGDP) && push!(causes, "→ std(TB/GDP) NaN: TB/GDP series has fewer than 20 observations.")
     cause_lines = isempty(causes) ? "" : "\n\nLikely causes:\n" * join(causes, "\n")
 
     @printf "\n%s\n" repeat("!", 62)
@@ -937,8 +945,8 @@ if !isempty(nan_idx)
     Files present: $(filter(f -> endswith(f, r"\.xlsx|\.csv"), readdir(DATA_DIR, join=true) .|> basename))
     """)
 end
-@assert length(d_vec_check) == 44 "BUG: expected 44 moments, got $(length(d_vec_check))"
-@printf "\nValidation passed: all 44 moments are non-NaN.\n"
+@assert length(d_vec_check) == 45 "BUG: expected 45 moments, got $(length(d_vec_check))"
+@printf "\nValidation passed: all 45 moments are non-NaN.\n"
 
 
 # =========================================================================== #
@@ -963,14 +971,14 @@ CSV.write(OUT_SECTORAL, df_sec)
 
 # --- 2. Aggregate moments (key-value, easy to read in any language) ------
 df_agg = DataFrame(
-    moment = ["std_GDP",   "std_pi",   "corr_GDPpi",
-              "omG",       "std_Q",    "autocorr_Q",
-              "corr_GDPQ", "TBGDP",
+    moment = ["std_GDP",   "std_pi",    "corr_GDPpi",
+              "omG",       "std_Q",     "autocorr_Q",
+              "corr_GDPQ", "TBGDP",     "std_TBGDP",
               "sample_start_year", "sample_start_q",
               "sample_end_year",   "sample_end_q"],
-    value  = [d_std_GDP,   d_std_pi,   d_corr_GDPpi,
-              d_omG,       d_std_Q,    d_autocorr_Q,
-              d_corr_GDPQ, d_TBGDP,
+    value  = [d_std_GDP,   d_std_pi,    d_corr_GDPpi,
+              d_omG,       d_std_Q,     d_autocorr_Q,
+              d_corr_GDPQ, d_TBGDP,    d_std_TBGDP,
               Float64(SAMPLE_START.year), Float64(SAMPLE_START.q),
               Float64(SAMPLE_END.year),   Float64(SAMPLE_END.q)],
 )
