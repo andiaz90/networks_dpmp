@@ -56,23 +56,35 @@ The network amplification effect is then the difference between total and direct
 \subsubsection{Aggregate Responses}
 
 Figure~\ref{fig:oil_agg_irf} shows the impulse responses of aggregate variables to the 10\% oil price shock.
-\textcolor{red}{[Values to be filled after running oil\_shock\_analysis.jl.]}
-GDP contracts on impact as the cost shock raises production costs economy-wide.
-CPI inflation rises, reflecting the pass-through of higher import prices into domestic prices through both the direct oil channel and the network multiplier.
-The real exchange rate depreciates, amplifying the domestic-currency oil price increase, while the trade balance deteriorates as the oil import bill rises.
-The central bank responds by tightening the policy rate, which partially offsets the inflationary pressure but deepens the output contraction.
-The persistence of the shock ($\rho_{O^*} = 0.9$) implies that effects are long-lived, with GDP returning to steady state only gradually.
+GDP falls by 0.19\% on impact and remains below trend for several quarters, recovering gradually as the shock dissipates under its AR(1) persistence of $\rho_{O^*}=0.9$.
+CPI inflation rises by 0.15 annualized percentage points on impact, peaking at 0.21 annualized percentage points in the second quarter, as higher import costs pass through to domestic prices via both the direct oil channel and the IO network multiplier.
+The central bank tightens the policy rate by 0.10 annualized percentage points on impact, peaking at 0.23 annualized percentage points by the third quarter; this monetary tightening induces a real appreciation of the exchange rate---$Q$ falls by 0.50\% on impact---partially offsetting the domestic-currency oil price increase.
+The trade balance improves markedly on impact (0.44\% of GDP), peaking at 2.40\% of GDP by the third quarter, as the demand compression from monetary tightening reduces import volumes by more than the rise in oil prices raises the import bill; the trade balance only returns to its long-run level gradually as the shock dissipates.
 
 Table~\ref{tab:oil_agg} summarizes the impact and peak responses of the key aggregate variables.
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.95\textwidth]{figures/oil_shock/irf_aggregate_oil_shock.pdf}
+    \includegraphics[width=0.95\textwidth]{Figures/oil_shock/irf_aggregate_oil_shock.pdf}
     \caption{Aggregate impulse responses to a 10\% world oil price shock. All variables in percentage deviations from steady state. The shock follows an AR(1) with persistence $\rho_{O^*} = 0.9$.}
     \label{fig:oil_agg_irf}
 \end{figure}
 
 \input{tables/oil_shock_aggregates}
+
+Figure~\ref{fig:oil_inflation_agg} aggregates the sectoral home-price inflation responses into goods, services, and economy-wide averages, weighted by steady-state consumption expenditure shares.
+The goods sectors are the primary source of inflationary pressure: goods home-price inflation reaches 1.19 annualized percentage points on impact, driven by the direct oil cost channel operating through Transport, Manufacturing, and Mining.
+Services home-price inflation is more muted at 0.33 annualized percentage points on impact, as services sectors have lower direct oil intensity and the network spillovers from goods to services are dampened by price stickiness in several services sectors.
+The expenditure-weighted aggregate home-price inflation is 0.82 annualized percentage points on impact---roughly four times larger than the aggregate consumer CPI response (0.15 pp) reported in the aggregate responses section.
+The wedge between home-price and CPI inflation reflects the real exchange rate appreciation induced by monetary tightening: as $Q$ falls by 0.50\% on impact, the foreign-variety component of the Armington composite becomes cheaper, substantially offsetting the rise in domestic prices from the perspective of the consumer price index.
+This open-economy offset is a central quantitative finding: the exchange rate channel insulates consumers from a significant portion of the domestic cost-push shock, even as home-price inflation across sectors remains substantial.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.80\textwidth]{Figures/oil_shock/irf_aggregate_inflation_oil.pdf}
+    \caption{Expenditure-weighted home-price inflation by sector group. All series in annualized percentage-point deviations from steady state, using the same $\Delta P^H_{it}$ concept as Figure~\ref{fig:oil_sec_pi}. Aggregate (solid black) = economy-wide consumption-share-weighted average; Goods (dashed blue) = within-group weighted average of sectors 1--5; Services (dotted red) = within-group weighted average of sectors 6--12.}
+    \label{fig:oil_inflation_agg}
+\end{figure}
 
 \subsubsection{Sectoral Responses}
 
@@ -83,7 +95,7 @@ However, the ranking of sectoral responses does not perfectly mirror the ranking
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.95\textwidth]{figures/oil_shock/irf_sectoral_Y_oil_shock.pdf}
+    \includegraphics[width=0.95\textwidth]{Figures/oil_shock/irf_sectoral_Y_oil_shock.pdf}
     \caption{Sectoral output responses to a 10\% oil price shock. Blue panels are goods sectors; red panels are services sectors.}
     \label{fig:oil_sec_y}
 \end{figure}
@@ -94,9 +106,23 @@ This heterogeneity in price adjustment speeds, combined with the IO structure, i
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.95\textwidth]{figures/oil_shock/irf_sectoral_PH_oil_shock.pdf}
-    \caption{Sectoral price responses to a 10\% oil price shock.}
+    \includegraphics[width=0.95\textwidth]{Figures/oil_shock/irf_sectoral_PH_oil_shock.pdf}
+    \caption{Sectoral home-price level responses to a 10\% oil price shock. All series in percentage deviations from steady state.}
     \label{fig:oil_sec_ph}
+\end{figure}
+
+Figure~\ref{fig:oil_sec_pi} translates the price level responses into sectoral inflation rates (annualized quarter-over-quarter changes in $P^H_{it}$).
+The cross-sectoral dispersion is striking: Transport and Communications experiences the largest inflation response (2.26 annualized percentage points on impact), followed by Manufacturing (1.29 pp) and Mining (0.82 pp), all reflecting high direct oil intensity.
+Agriculture (0.55 pp) and Utilities (0.52 pp) also see meaningful inflation on impact despite lower oil shares, because they purchase heavily from oil-intensive upstream suppliers.
+In contrast, several services sectors---Financial Services ($-0.43$ pp), Personal Services ($-0.32$ pp), Public Administration ($-0.36$ pp), and Business Services ($-0.18$ pp)---record negative inflation on impact.
+These sectors have minimal direct oil exposure and face lower demand due to the monetary tightening and income compression; with relatively flexible prices, they adjust downward quickly.
+The sign reversal illustrates the counteracting forces in the oil shock transmission: cost-push effects dominate for oil-intensive sectors, while demand-compression effects dominate for oil-remote, flexible-price services sectors.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{Figures/oil_shock/irf_sectoral_inflation_oil.pdf}
+    \caption{Sectoral home-price inflation (annualized pp) responses to a 10\% world oil price shock. Blue panels: goods sectors (1--5); red panels: services sectors (6--12). Each panel shows the quarter-over-quarter change in the home price level $P^H_{it}$, annualized.}
+    \label{fig:oil_sec_pi}
 \end{figure}
 
 \subsubsection{Decomposition: Direct Cost vs.\ Network Amplification}
@@ -105,8 +131,8 @@ Table~\ref{tab:oil_decomp} decomposes the marginal cost increase in each sector 
 Two key findings emerge.
 
 First, the network amplification is quantitatively large.
-\textcolor{red}{[Aggregate amplification ratio to be filled after running the script.]}
-On an output-weighted basis, the total effect on marginal costs is substantially larger than the direct effect alone, implying that ignoring IO linkages would significantly understate the inflationary impact of oil shocks.
+On an output-weighted basis, the total marginal cost increase is 2.50 times the direct oil cost effect: the weighted-average direct effect is 0.24\% and the total effect is 0.61\%, so IO network propagation accounts for 60\% of the aggregate inflationary impact.
+Ignoring input-output linkages would therefore cause a researcher to understate the inflationary impact of an oil shock by a factor of 2.5.
 
 Second, the network channel partially reshuffles the cross-sectoral ranking of vulnerability.
 While Transport and Communications has the highest direct oil exposure, sectors like Agriculture and Manufacturing receive a large additional cost push through the IO network because they purchase heavily from other oil-intensive sectors.
@@ -116,7 +142,7 @@ Figure~\ref{fig:oil_decomp_mc} provides a visual decomposition: the orange bars 
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.95\textwidth]{figures/oil_shock/decomposition_mc_oil.pdf}
+    \includegraphics[width=0.95\textwidth]{Figures/oil_shock/decomposition_mc_oil.pdf}
     \caption{Decomposition of the oil shock effect on sectoral marginal costs. Orange: direct oil cost channel ($\alpha_{Vi} \times \alpha^{\text{Oil}}_i \times \Delta\log P^O$). Blue: network amplification via IO linkages.}
     \label{fig:oil_decomp_mc}
 \end{figure}
@@ -133,7 +159,7 @@ This variation, combined with the complementarity between oil and non-oil import
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.85\textwidth]{figures/oil_shock/oil_intensity_exposure.pdf}
+    \includegraphics[width=0.85\textwidth]{Figures/oil_shock/oil_intensity_exposure.pdf}
     \caption{Oil share of intermediate imports by sector ($\alpha^{\text{Oil}}_i$), computed from Chile's 2021 IO tables.}
     \label{fig:oil_intensity}
 \end{figure}

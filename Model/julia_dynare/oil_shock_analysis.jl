@@ -45,6 +45,7 @@ OUTPUT FILES (saved to figures/oil_shock/ and tables/):
 using LinearAlgebra
 using Statistics
 using Printf
+using Logging
 using NLsolve
 using CSV
 using DataFrames
@@ -585,6 +586,16 @@ pi_peak_q = argmax(pi_irf)
 #  GENERATE FIGURES                                                            #
 # =========================================================================== #
 
+# Suppress PlotUtils "No strict ticks" Julia warnings and GR/Qt C-level stderr
+# (QPainterPath NaN messages) that fire during PDF rendering.
+function savefig_quiet(p, path)
+    redirect_stderr(devnull) do
+        with_logger(NullLogger()) do
+            Plots.savefig(p, path)
+        end
+    end
+end
+
 if _HAS_PLOTS[]
     @printf "\n--- Generating figures ---\n"
     periods = 1:n_irf
@@ -614,7 +625,7 @@ if _HAS_PLOTS[]
         xlabel="Quarters", title="Trade Balance")
     Plots.hline!(p_agg, [0.0], subplot=4, color=:black, lw=0.6, ls=:dash, label="")
 
-    Plots.savefig(p_agg, joinpath(FIGURES_DIR, "irf_aggregate_oil_shock.pdf"))
+    savefig_quiet(p_agg, joinpath(FIGURES_DIR, "irf_aggregate_oil_shock.pdf"))
     @printf "  Saved: irf_aggregate_oil_shock.pdf\n"
 
 
@@ -635,7 +646,7 @@ if _HAS_PLOTS[]
             title=short_names[i], titlefontsize=7)
         Plots.hline!(p_sec_y, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
     end
-    Plots.savefig(p_sec_y, joinpath(FIGURES_DIR, "irf_sectoral_Y_oil_shock.pdf"))
+    savefig_quiet(p_sec_y, joinpath(FIGURES_DIR, "irf_sectoral_Y_oil_shock.pdf"))
     @printf "  Saved: irf_sectoral_Y_oil_shock.pdf\n"
 
 
@@ -650,7 +661,7 @@ if _HAS_PLOTS[]
             title=short_names[i], titlefontsize=7)
         Plots.hline!(p_sec_ph, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
     end
-    Plots.savefig(p_sec_ph, joinpath(FIGURES_DIR, "irf_sectoral_PH_oil_shock.pdf"))
+    savefig_quiet(p_sec_ph, joinpath(FIGURES_DIR, "irf_sectoral_PH_oil_shock.pdf"))
     @printf "  Saved: irf_sectoral_PH_oil_shock.pdf\n"
 
 
@@ -669,7 +680,7 @@ if _HAS_PLOTS[]
         legend=:topright,
         bottom_margin=10Plots.mm
     )
-    Plots.savefig(p_decomp, joinpath(FIGURES_DIR, "decomposition_mc_oil.pdf"))
+    savefig_quiet(p_decomp, joinpath(FIGURES_DIR, "decomposition_mc_oil.pdf"))
     @printf "  Saved: decomposition_mc_oil.pdf\n"
 
 
@@ -685,7 +696,7 @@ if _HAS_PLOTS[]
         size=(900, 450),
         bottom_margin=10Plots.mm
     )
-    Plots.savefig(p_oil, joinpath(FIGURES_DIR, "oil_intensity_exposure.pdf"))
+    savefig_quiet(p_oil, joinpath(FIGURES_DIR, "oil_intensity_exposure.pdf"))
     @printf "  Saved: oil_intensity_exposure.pdf\n"
 
 
@@ -704,7 +715,7 @@ if _HAS_PLOTS[]
         legend=:bottomright,
         bottom_margin=10Plots.mm
     )
-    Plots.savefig(p_out_decomp, joinpath(FIGURES_DIR, "decomposition_output_oil.pdf"))
+    savefig_quiet(p_out_decomp, joinpath(FIGURES_DIR, "decomposition_output_oil.pdf"))
     @printf "  Saved: decomposition_output_oil.pdf\n"
 
 
@@ -719,7 +730,7 @@ if _HAS_PLOTS[]
             title=short_names[i], titlefontsize=7)
         Plots.hline!(p_sec_mc, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
     end
-    Plots.savefig(p_sec_mc, joinpath(FIGURES_DIR, "irf_sectoral_MC_oil_shock.pdf"))
+    savefig_quiet(p_sec_mc, joinpath(FIGURES_DIR, "irf_sectoral_MC_oil_shock.pdf"))
     @printf "  Saved: irf_sectoral_MC_oil_shock.pdf\n"
 
 else
