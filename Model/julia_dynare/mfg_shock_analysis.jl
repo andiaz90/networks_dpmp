@@ -89,8 +89,9 @@ mkpath(FIGURES_DIR)
 mkpath(TABLES_DIR)
 
 # Overleaf Dropbox sync folder — figures are written here for direct inclusion
-OVERLEAF_DIR = abspath(joinpath(SCRIPT_DIR, "..", "..", "..",
-    "Network DPMP-DME", "Figures", "mfg_shock"))
+OVERLEAF_DIR = get(ENV, "OVERLEAF_MFG",
+    abspath(joinpath(homedir(), "Library", "CloudStorage",
+        "Dropbox", "Apps", "Overleaf", "Network DPMP-DME", "Figures", "mfg_shock")))
 overleaf_ok = try mkpath(OVERLEAF_DIR); true catch; false end
 if overleaf_ok
     @printf "  Overleaf output: %s\n\n" OVERLEAF_DIR
@@ -504,14 +505,21 @@ function get_irf_var(varname::String)
     return irf_pct[idx, :]
 end
 
-# Sectoral home-price inflation: ΔPH_i(t) = PH_i(t) - PH_i(t-1), annualized × 4
-# At t=1: ΔPH_i(1) = PH_i(1) - 0 = PH_i(1)  (% dev from SS, pre-shock = 0)
+# Extract aggregate CPI inflation immediately — needed for sectoral inflation.
+# pi in Dynare is gross quarterly CPI inflation (SS = 1); irf_pct gives % dev from SS,
+# so pi_cpi_irf[h] = 100*(Π_t - 1) = quarterly net CPI inflation in %.
+pi_cpi_irf = get_irf_var("pi")
+
+# Sectoral nominal home-price inflation: π̂ᴴᵢₜ = Πₜ · PHᵢₜ/PHᵢₜ₋₁
+# PH_i in the model is a relative price (normalized by CPI P_t).
+# Nominal inflation = change in relative price + aggregate CPI inflation.
+# In log %: (ΔPH_i(h) + pi(h)) × 4  [annualised]
 function get_inflation_irf(i::Int)
     ph = get_irf_var("PH_$(i)")
     dph = similar(ph)
-    dph[1] = ph[1]
+    dph[1] = ph[1] + pi_cpi_irf[1]
     for t in 2:n_irf
-        dph[t] = ph[t] - ph[t-1]
+        dph[t] = ph[t] - ph[t-1] + pi_cpi_irf[t]
     end
     return dph .* 4   # annualize
 end
@@ -539,7 +547,7 @@ agg_infl_tot = omega_G .* agg_infl_g .+ omega_S .* agg_infl_s
 # =========================================================================== #
 
 gdp_irf = get_irf_var("GDP")
-pi_irf  = get_irf_var("pi")
+pi_irf  = pi_cpi_irf          # already extracted above (= get_irf_var("pi"))
 q_irf   = get_irf_var("Q")
 tb_irf  = get_irf_var("TB")
 c_irf   = get_irf_var("C")
@@ -693,13 +701,15 @@ else
             return out
         end
 
-        # Oil sectoral inflation (ΔPH, annualized)
+        # Oil sectoral nominal inflation: π̂ᴴᵢₜ = Πₜ · PHᵢₜ/PHᵢₜ₋₁ (oil shock)
+        # Add oil-shock aggregate CPI inflation to recover nominal price change.
+        pi_oil_cpi = get_oil_irf("pi")
         function get_oil_inflation_irf(i::Int)
             ph = get_oil_irf("PH_$(i)")
             dph = similar(ph)
-            dph[1] = ph[1]
+            dph[1] = ph[1] + pi_oil_cpi[1]
             for t in 2:n_irf
-                dph[t] = ph[t] - ph[t-1]
+                dph[t] = ph[t] - ph[t-1] + pi_oil_cpi[t]
             end
             return dph .* 4
         end

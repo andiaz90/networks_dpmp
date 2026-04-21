@@ -83,28 +83,58 @@ ss_vec = get_ss(context, mr, n_endo)
 @info "SS length: $(length(ss_vec))  non-zero entries: $(sum(abs.(ss_vec) .> 1e-10))"
 
 # ---- Decision rule ----
+# In Dynare.jl the LRE object stores three matrices:
+#   g1_1  →  response to predetermined (backward) variables  ≈ oo_.dr.ghx
+#   g1_2  →  response to forward-looking variables            (NOT shocks)
+#   g1_3  →  response to exogenous shocks                    ≈ oo_.dr.ghu
+# Earlier code tried (g1_1, g1_2) and got zeros because g1_2 is forward vars.
+# The fix: try (g1_1, g1_3) first, then fall back to other names.
+# We also select the best pair by nonzero element count so stale-zero fields
+# don't silently win.
 function get_decision_rule(mr, n_endo)
     if !isdefined(mr, :linearrationalexpectations)
         @warn "no linearrationalexpectations field"
         return zeros(n_endo, 1), zeros(n_endo, 1)
     end
     lre = mr.linearrationalexpectations
-    @info "lre fields: $(fieldnames(typeof(lre)))"
+    lre_fields = fieldnames(typeof(lre))
+    @info "lre type: $(typeof(lre))"
+    @info "lre fields: $lre_fields"
 
-    g1_1 = nothing; g1_2 = nothing
-    for (cand1, cand2) in [(:g1_1, :g1_2), (:ghx, :ghu), (:g1, :g2)]
+    # Log every numeric field with its size and nonzero count for diagnostics
+    for fn in lre_fields
+        try
+            v = getfield(lre, fn)
+            if isa(v, AbstractMatrix) && eltype(v) <: Real
+                nz = sum(abs.(Float64.(v)) .> 1e-12)
+                @info "  lre.$fn  size=$(size(v))  nonzero=$nz"
+            end
+        catch; end
+    end
+
+    best_ghx = nothing; best_ghu = nothing; best_nz = -1
+    # Candidate pairs: (state_feedback, shock_impact)
+    # g1_3 is the Dynare.jl shock matrix; g1_2 is forward-looking (wrong for shocks)
+    for (cand1, cand2) in [(:g1_1, :g1_3), (:g1_1, :g1_2), (:ghx, :ghu), (:g1, :g2)]
         if isdefined(lre, cand1) && isdefined(lre, cand2)
-            g1_1 = Matrix{Float64}(getfield(lre, cand1))
-            g1_2 = Matrix{Float64}(getfield(lre, cand2))
-            @info "Found decision rule as lre.$cand1 / lre.$cand2 — sizes: $(size(g1_1)) / $(size(g1_2))"
-            break
+            m1 = Matrix{Float64}(getfield(lre, cand1))
+            m2 = Matrix{Float64}(getfield(lre, cand2))
+            nz = sum(abs.(m1) .> 1e-12) + sum(abs.(m2) .> 1e-12)
+            @info "Candidate ($cand1,$cand2): sizes $(size(m1))/$(size(m2))  nonzero=$nz"
+            if nz > best_nz
+                best_ghx = m1; best_ghu = m2; best_nz = nz
+                @info "  → new best: ($cand1,$cand2)"
+            end
         end
     end
-    if isnothing(g1_1)
-        @warn "Could not find decision rule matrices"
-        g1_1 = zeros(n_endo, 1); g1_2 = zeros(n_endo, 1)
+
+    if isnothing(best_ghx)
+        @warn "Could not find any decision rule matrices — IRFs will be zero"
+        return zeros(n_endo, 1), zeros(n_endo, 1)
     end
-    return g1_1, g1_2
+
+    @info "Selected decision rule: ghx size=$(size(best_ghx))  ghu size=$(size(best_ghu))  total_nonzero=$best_nz"
+    return best_ghx, best_ghu
 end
 
 g1_1, g1_2 = get_decision_rule(mr, n_endo)

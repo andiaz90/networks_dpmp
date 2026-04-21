@@ -118,6 +118,11 @@ function write_params_mod(mod_dir::String, p::NamedTuple)
         _wp(io, "shock_eps_i",      p.shock_eps_i_val)
         _wp(io, "shock_eps_pvstar", p.shock_eps_pvstar_val)
         _wp(io, "shock_eps_xi",     p.shock_eps_xi_val)
+        # shock_eps_om is the variance of the single scalar eps_om shock (declared in
+        # the .mod shocks block as "var eps_om = shock_eps_om").  The per-sector
+        # shock_eps_om_i values (written below) are used inside model equations.
+        # If any sector's omega shock is active, turn the aggregate shock on too.
+        _wp(io, "shock_eps_om",     maximum(p.shock_eps_om_vec))
         println(io)
 
         # ---- Option-A: 12 sectoral demand shock parameters -------------- #
