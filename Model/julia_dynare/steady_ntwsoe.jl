@@ -46,10 +46,13 @@ function steady_ntwsoe(
     tb_target :: Real,
 )
     nsec  = length(varrho_vec)
-    pHvec = x_vec[1:nsec]
-    w     = x_vec[nsec+1]
-    q     = x_vec[nsec+2]
-    C     = x_vec[nsec+3]
+    # Clamp price-like unknowns to positive values so that fractional
+    # exponentiation never receives a negative base (the NLsolve trust-region
+    # solver can explore negative regions).
+    pHvec = max.(x_vec[1:nsec], 1e-20)
+    w     = max(x_vec[nsec+1], 1e-20)
+    q     = max(x_vec[nsec+2], 1e-20)
+    C     = max(x_vec[nsec+3], 1e-20)
 
     PL  = fill(w, nsec)
     PV  = q * PVstar
@@ -58,11 +61,11 @@ function steady_ntwsoe(
     MCi = (epsilon - 1) / epsilon .* pHvec
 
     # Intermediate price indices: PMi[i] = (Σ_j beta[i,j] * pH_j^(1-ε_m_j))^(1/(1-ε_m_i))
-    PMi = (beta_mat * (pHvec .^ (1 .- epsM_vec))) .^ (1 ./ (1 .- epsM_vec))
+    PMi = max.((beta_mat * (pHvec .^ (1 .- epsM_vec))) .^ (1 ./ (1 .- epsM_vec)), 1e-20)
 
     # Consumer price of each sector (Armington aggregator)
-    pvec = (varrho_vec .^ sigmaH .* pHvec .^ (1 - sigmaH)
-          .+ (1 .- varrho_vec) .^ sigmaH .* PV .^ (1 - sigmaH)) .^ (1 / (1 - sigmaH))
+    pvec = max.((varrho_vec .^ sigmaH .* pHvec .^ (1 - sigmaH)
+          .+ (1 .- varrho_vec) .^ sigmaH .* PV .^ (1 - sigmaH)) .^ (1 / (1 - sigmaH)), 1e-20)
 
     # Goods / services price indices (Cobb-Douglas)
     p_g = prod(pvec .^ gammag_vec)
@@ -98,9 +101,9 @@ function steady_ntwsoe(
     end
     ig .*= mean(CHi .+ Xi)
 
-    M_init  = (MCi ./ PMi) .^ epsY_vec .* alpha_vec .* (CHi .+ Xi .+ ig)
-    L_init  = (MCi ./ PL)  .^ epsY_vec .* (1 .- alpha_vec .- alphaV_vec) .* (CHi .+ Xi .+ ig)
-    Vi_init = (MCi ./ PV)  .^ epsY_vec .* alphaV_vec .* (CHi .+ Xi .+ ig)
+    M_init  = max.(MCi ./ PMi, 1e-20) .^ epsY_vec .* alpha_vec .* (CHi .+ Xi .+ ig)
+    L_init  = max.(MCi ./ PL,  1e-20) .^ epsY_vec .* (1 .- alpha_vec .- alphaV_vec) .* (CHi .+ Xi .+ ig)
+    Vi_init = max.(MCi ./ PV,  1e-20) .^ epsY_vec .* alphaV_vec .* (CHi .+ Xi .+ ig)
     Yi_init = A_vec .* (
         alpha_vec        .^ (1 ./ epsY_vec) .* max.(M_init,  1e-20) .^ ((epsY_vec .- 1) ./ epsY_vec)
       .+ alphaV_vec      .^ (1 ./ epsY_vec) .* max.(Vi_init, 1e-20) .^ ((epsY_vec .- 1) ./ epsY_vec)

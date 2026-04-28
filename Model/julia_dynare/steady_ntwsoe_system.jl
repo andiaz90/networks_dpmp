@@ -47,14 +47,19 @@ function steady_ntwsoe_system!(
 
     demand = CHi .+ Xi .+ intermediate_use
 
+    # Clamp price ratios to avoid complex exponentiation with fractional epsY
+    rM  = max.(MCi ./ PMi, 1e-20)
+    rL  = max.(MCi ./ PL,  1e-20)
+    rV  = max.(MCi ./ PV,  1e-20)
+
     # F1: material input demand
-    F[1:nsec] .= M .- (MCi ./ PMi) .^ epsY_vec .* alpha_vec .* demand
+    F[1:nsec] .= M .- rM .^ epsY_vec .* alpha_vec .* demand
 
     # F2: labor demand
-    F[nsec+1:2*nsec] .= L .- (MCi ./ PL) .^ epsY_vec .* (1 .- alpha_vec .- alphaV_vec) .* demand
+    F[nsec+1:2*nsec] .= L .- rL .^ epsY_vec .* (1 .- alpha_vec .- alphaV_vec) .* demand
 
     # F3: imported input demand
-    F[2*nsec+1:3*nsec] .= Vi .- (MCi ./ PV) .^ epsY_vec .* alphaV_vec .* demand
+    F[2*nsec+1:3*nsec] .= Vi .- rV .^ epsY_vec .* alphaV_vec .* demand
 
     # F4: CES production function (clamp negatives for robustness)
     Mpos  = max.(M,  1e-20)

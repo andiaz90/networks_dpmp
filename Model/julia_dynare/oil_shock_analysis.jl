@@ -251,6 +251,33 @@ end
 
 
 # =========================================================================== #
+#  THREE ε_Y CASES: NEAR-LEONTIEF / BASELINE / HIGH SUBSTITUTION              #
+# =========================================================================== #
+
+# Save baseline εY (from SMM estimates or default 0.8)
+epsY_baseline = modepsY[1]
+nT = 40   # IRF horizon (available after loop for plotting)
+
+epsY_cases = [
+    (label="Near-Leontief (εY=0.30)", short="leontief", val=0.30,
+     color=:forestgreen, ls=:dash, lw=1.8),
+    (label="Baseline (εY=$(round(epsY_baseline,digits=2)))", short="baseline",
+     val=epsY_baseline, color=:steelblue, ls=:solid, lw=2.5),
+    (label="High subst. (εY=2.0)", short="high", val=2.0,
+     color=:firebrick, ls=:dot, lw=1.8),
+]
+
+case_results = Vector{Any}()
+
+for (ic, case) in enumerate(epsY_cases)
+
+@printf "\n%s\n  CASE %d/%d: %s\n%s\n" repeat("─",60) ic length(epsY_cases) case.label repeat("─",60)
+
+# Override εY for this case
+modepsY = fill(case.val, nsec)
+
+
+# =========================================================================== #
 #  STEADY STATE (same as main_SOE_gap.jl)                                      #
 # =========================================================================== #
 
@@ -616,6 +643,80 @@ pi_peak_q = argmax(pi_irf)
 @printf "  GDP trough : %+.3f%% at quarter %d\n" gdp_trough gdp_trough_q
 @printf "  π peak     : %+.3f%% at quarter %d\n" pi_peak pi_peak_q
 
+# ---- Compute additional matrices for this case ----
+ph_irf_mat = hcat([get_irf_var("PH_$(i)") for i in 1:nsec]...)'  # nsec × n_irf
+mc_irf_mat = hcat([get_irf_var("MC_$(i)") for i in 1:nsec]...)'
+l_irf_mat  = hcat([get_irf_var("L_$(i)")  for i in 1:nsec]...)'
+
+# Sectoral nominal home-price inflation (annualized)
+pi_sec_mat = zeros(nsec, n_irf)
+for i in 1:nsec
+    pi_sec_mat[i, 1] = (ph_irf_mat[i, 1] + pi_irf[1]) * 4
+    for h in 2:n_irf
+        pi_sec_mat[i, h] = (ph_irf_mat[i, h] - ph_irf_mat[i, h-1] + pi_irf[h]) * 4
+    end
+end
+
+# Consumption-weighted inflation aggregates
+cons_ss_g = C_gi_ss; cons_ss_s = C_si_ss
+cons_ss_all = cons_ss_g .+ cons_ss_s; tot_cons_all = sum(cons_ss_all)
+w_agg_c = cons_ss_all ./ tot_cons_all
+w_g_c   = cons_ss_g ./ sum(cons_ss_g)
+w_s_c   = cons_ss_s ./ sum(cons_ss_s)
+pi_agg_irf   = [sum(w_agg_c .* pi_sec_mat[:, h]) for h in 1:n_irf]
+pi_goods_irf = [sum(w_g_c   .* pi_sec_mat[:, h]) for h in 1:n_irf]
+pi_serv_irf  = [sum(w_s_c   .* pi_sec_mat[:, h]) for h in 1:n_irf]
+
+# Inflation at various horizons
+infl_irf_impact = ph_irf_impact .+ pi_irf[1]
+infl_6m  = ph_irf_mat[:, 2] .+ sum(pi_irf[1:2])
+infl_12m = ph_irf_mat[:, 4] .+ sum(pi_irf[1:4])
+
+# GE decomposition components at horizons 1, 2, 4
+alpha_L_vec = 1.0 .- modalpha .- modalphaV
+function _mc_decomp(h, _ph, _mc, _po, _pv, _w, _aV, _aO, _am, _aL, _beta)
+    dir_h   = _aV .* _aO .* _po[h]
+    net_h   = _am .* (_beta * _ph[:, h])
+    noi_h   = _aV .* (1.0 .- _aO) .* _pv[h]
+    lab_h   = _aL .* _w[h]
+    res_h   = _mc[:, h] .- dir_h .- net_h .- noi_h .- lab_h
+    return (dir=copy(dir_h), net=copy(net_h), noi=copy(noi_h),
+            lab=copy(lab_h), res=copy(res_h), mc=copy(_mc[:, h]))
+end
+ge_h1 = _mc_decomp(1, ph_irf_mat, mc_irf_mat, po_irf, pv_irf, w_irf,
+                    modalphaV, modalphaOil, modalpha, alpha_L_vec, modbeta)
+ge_h2 = _mc_decomp(2, ph_irf_mat, mc_irf_mat, po_irf, pv_irf, w_irf,
+                    modalphaV, modalphaOil, modalpha, alpha_L_vec, modbeta)
+ge_h4 = _mc_decomp(4, ph_irf_mat, mc_irf_mat, po_irf, pv_irf, w_irf,
+                    modalphaV, modalphaOil, modalpha, alpha_L_vec, modbeta)
+
+# ---- Store results for this εY case ----
+push!(case_results, (
+    case = case,
+    get_irf = let _irf=copy(irf_pct), _idx=copy(endo_idx), _ss=copy(ss_vec), _nT=n_irf
+        (vn::String) -> begin i = get(_idx, vn, 0); i==0 ? zeros(_nT) : _irf[i,:] end
+    end,
+    gdp_irf=copy(gdp_irf), pi_irf=copy(pi_irf), q_irf=copy(q_irf), tb_irf=copy(tb_irf),
+    c_irf=copy(c_irf), n_irf_v=copy(n_irf_v), r_irf=copy(r_irf), w_irf=copy(w_irf),
+    po_irf=copy(po_irf), pv_irf=copy(pv_irf),
+    ph_irf_mat=copy(ph_irf_mat), mc_irf_mat=copy(mc_irf_mat), l_irf_mat=copy(l_irf_mat),
+    pi_sec_mat=copy(pi_sec_mat),
+    pi_agg_irf=copy(pi_agg_irf), pi_goods_irf=copy(pi_goods_irf), pi_serv_irf=copy(pi_serv_irf),
+    infl_irf_impact=copy(infl_irf_impact), infl_6m=copy(infl_6m), infl_12m=copy(infl_12m),
+    ge_h1=ge_h1, ge_h2=ge_h2, ge_h4=ge_h4,
+    direct_mc=copy(direct_mc), network_mc=copy(network_mc),
+    total_mc_approx=copy(total_mc_approx), amp_ratio=copy(amp_ratio),
+    mc_irf_impact=copy(mc_irf_impact), y_irf_impact=copy(y_irf_impact),
+    ph_irf_impact=copy(ph_irf_impact),
+    Yi_ss=copy(Yi_ss), L_ss=copy(L_ss), GDP_ss=GDP_ss, TB_ss=TB_ss, N_ss=N_ss,
+    C_gi_ss=copy(C_gi_ss), C_si_ss=copy(C_si_ss), alpha_L=copy(alpha_L_vec),
+    agg_direct=agg_direct, agg_network=agg_network, agg_total=agg_total, agg_amp=agg_amp,
+))
+
+end  # for epsY_cases
+
+@printf "\n%s\n  All %d εY cases computed.\n%s\n" repeat("=",60) length(epsY_cases) repeat("=",60)
+
 
 # =========================================================================== #
 #  GENERATE FIGURES                                                            #
@@ -624,21 +725,29 @@ pi_peak_q = argmax(pi_irf)
 # Suppress PlotUtils "No strict ticks" Julia warnings and GR/Qt C-level stderr
 # (QPainterPath NaN messages) that fire during PDF rendering.
 function savefig_quiet(p, path)
-    redirect_stderr(devnull) do
-        with_logger(NullLogger()) do
-            Plots.savefig(p, path)
+    try
+        redirect_stderr(devnull) do
+            with_logger(NullLogger()) do
+                Plots.savefig(p, path)
+            end
         end
+    catch e
+        @warn "savefig failed for $path" exception=(e, catch_backtrace())
+        # Retry without stderr suppression so GR errors are visible
+        Plots.savefig(p, path)
     end
 end
 
 # Save figure locally and sync to Overleaf Dropbox folder if available.
+# For Overleaf, write to a temp file first then copy (avoids Dropbox lock issues).
 function save_fig(p, fname)
     local_path = joinpath(FIGURES_DIR, fname)
     savefig_quiet(p, local_path)
     @printf "  Saved: %s\n" fname
     if overleaf_ok
         ol_path = joinpath(OVERLEAF_FIG_DIR, fname)
-        savefig_quiet(p, ol_path)
+        # Copy from the already-saved local file instead of re-rendering
+        cp(local_path, ol_path; force=true)
         @printf "  → Overleaf: %s\n" ol_path
     end
 end
@@ -653,173 +762,212 @@ function sync_table(fname)
 end
 
 if _HAS_PLOTS[]
-    @printf "\n--- Generating figures ---\n"
-    periods = 1:n_irf
+    @printf "\n--- Generating figures (three εY cases overlaid) ---\n"
+    periods = 1:nT
 
-    # ---- Figure 1: Aggregate IRFs (2×3) ---- #
+    short_names = [s[1:min(18,length(s))] for s in names_vec]
+    sector_colors = vcat(fill(:steelblue, 5), fill(:firebrick, 7))
+    bar_names = [
+        "Agric. & Fishing", "Mining", "Manufacturing", "Utilities",
+        "Construction", "Trade & Hotels", "Transport & ICT", "Finance",
+        "Real Estate", "Business Serv.", "Personal Serv.", "Public Admin.",
+    ]
+
+    # Legend labels for the three εY cases
+    case_labels = [cr.case.label for cr in case_results]
+
+    # ================================================================== #
+    # Helper: overlay three εY cases on a single-panel plot               #
+    # ================================================================== #
+    function overlay_agg!(p, field::Symbol; subplot=nothing, kw...)
+        for cr in case_results
+            c = cr.case
+            irf = getfield(cr, field)
+            kwargs = isnothing(subplot) ?
+                (label=c.label, color=c.color, lw=c.lw, ls=c.ls, kw...) :
+                (subplot=subplot, label=c.label, color=c.color, lw=c.lw, ls=c.ls, kw...)
+            Plots.plot!(p, periods, irf; kwargs...)
+        end
+    end
+
+    # ================================================================== #
+    #  Figure 1: Aggregate IRFs (2×3) — three εY lines per panel          #
+    # ================================================================== #
+    agg_panels = [
+        (:gdp_irf, "GDP", "% dev."),
+        (:pi_irf,  "CPI Inflation", "% dev."),
+        (:q_irf,   "Real Exchange Rate", "% dev."),
+        (:tb_irf,  "Trade Balance", "% dev."),
+        (:r_irf,   "Nominal Interest Rate", "% dev."),
+        (:w_irf,   "Real Wage", "% dev."),
+    ]
     p_agg = Plots.plot(layout=(2,3), size=(1400,700),
-        plot_title="10% Oil Price Shock — Aggregate Responses",
-        titlefontsize=14, margin=5Plots.mm)
-
-    Plots.plot!(p_agg, periods, gdp_irf, subplot=1,
-        label="GDP", color=:steelblue, lw=2,
-        ylabel="% dev.", title="GDP")
-    Plots.hline!(p_agg, [0.0], subplot=1, color=:black, lw=0.6, ls=:dash, label="")
-
-    Plots.plot!(p_agg, periods, pi_irf, subplot=2,
-        label="Inflation (π)", color=:firebrick, lw=2,
-        title="CPI Inflation")
-    Plots.hline!(p_agg, [0.0], subplot=2, color=:black, lw=0.6, ls=:dash, label="")
-
-    Plots.plot!(p_agg, periods, q_irf, subplot=3,
-        label="RER (Q)", color=:forestgreen, lw=2,
-        title="Real Exchange Rate")
-    Plots.hline!(p_agg, [0.0], subplot=3, color=:black, lw=0.6, ls=:dash, label="")
-
-    Plots.plot!(p_agg, periods, tb_irf, subplot=4,
-        label="Trade Balance", color=:darkorange, lw=2,
-        xlabel="Quarters", ylabel="% dev.", title="Trade Balance")
-    Plots.hline!(p_agg, [0.0], subplot=4, color=:black, lw=0.6, ls=:dash, label="")
-
-    Plots.plot!(p_agg, periods, r_irf, subplot=5,
-        label="Interest Rate (r)", color=:purple, lw=2,
-        xlabel="Quarters", title="Nominal Interest Rate")
-    Plots.hline!(p_agg, [0.0], subplot=5, color=:black, lw=0.6, ls=:dash, label="")
-
-    Plots.plot!(p_agg, periods, w_irf, subplot=6,
-        label="Wage (w)", color=:teal, lw=2,
-        xlabel="Quarters", title="Real Wage")
-    Plots.hline!(p_agg, [0.0], subplot=6, color=:black, lw=0.6, ls=:dash, label="")
-
+        plot_title="10% Oil Price Shock — Aggregate Responses (εY Comparison)",
+        titlefontsize=12, margin=5Plots.mm)
+    for (k, (fld, ttl, yl)) in enumerate(agg_panels)
+        for cr in case_results
+            c = cr.case
+            Plots.plot!(p_agg, periods, getfield(cr, fld), subplot=k,
+                label=(k==1 ? c.label : ""), color=c.color, lw=c.lw, ls=c.ls,
+                title=ttl, ylabel=(k∈[1,4] ? yl : ""),
+                xlabel=(k>3 ? "Quarters" : ""))
+        end
+        Plots.hline!(p_agg, [0.0], subplot=k, color=:black, lw=0.6, ls=:dash, label="")
+    end
     save_fig(p_agg, "irf_aggregate_oil_shock.pdf")
 
 
-    # ---- Figure 2: Sectoral Output IRFs (4×3 panel) ---- #
-    short_names = [s[1:min(18,length(s))] for s in names_vec]
-    sector_colors = vcat(
-        fill(:steelblue, 5),   # goods sectors
-        fill(:firebrick, 7)    # service sectors
-    )
-
+    # ================================================================== #
+    #  Figure 2: Sectoral Output IRFs (4×3) — three lines per subplot     #
+    # ================================================================== #
     p_sec_y = Plots.plot(layout=(4,3), size=(1200,900),
-        plot_title="10% Oil Shock — Sectoral Output Responses",
-        titlefontsize=12)
+        plot_title="10% Oil Shock — Sectoral Output (εY Comparison)",
+        titlefontsize=10)
     for i in 1:12
-        yi = get_irf_var("Y_$(i)")
-        Plots.plot!(p_sec_y, periods, yi, subplot=i,
-            label="", color=sector_colors[i], lw=1.8,
-            title=short_names[i], titlefontsize=11)
+        for cr in case_results
+            c = cr.case
+            yi = cr.get_irf("Y_$(i)")
+            Plots.plot!(p_sec_y, periods, yi, subplot=i,
+                label=(i==1 ? c.label : ""), color=c.color, lw=c.lw, ls=c.ls,
+                title=short_names[i], titlefontsize=9)
+        end
         Plots.hline!(p_sec_y, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
     end
     save_fig(p_sec_y, "irf_sectoral_Y_oil_shock.pdf")
 
 
-    # ---- Figure 3: Sectoral Price IRFs ---- #
+    # ================================================================== #
+    #  Figure 3: Sectoral Price IRFs (4×3) — three lines                  #
+    # ================================================================== #
     p_sec_ph = Plots.plot(layout=(4,3), size=(1200,900),
-        plot_title="10% Oil Shock — Sectoral Price Responses",
-        titlefontsize=12)
+        plot_title="10% Oil Shock — Sectoral Home Prices (εY Comparison)",
+        titlefontsize=10)
     for i in 1:12
-        phi = get_irf_var("PH_$(i)")
-        Plots.plot!(p_sec_ph, periods, phi, subplot=i,
-            label="", color=sector_colors[i], lw=1.8,
-            title=short_names[i], titlefontsize=11)
+        for cr in case_results
+            c = cr.case
+            phi = cr.get_irf("PH_$(i)")
+            Plots.plot!(p_sec_ph, periods, phi, subplot=i,
+                label=(i==1 ? c.label : ""), color=c.color, lw=c.lw, ls=c.ls,
+                title=short_names[i], titlefontsize=9)
+        end
         Plots.hline!(p_sec_ph, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
     end
     save_fig(p_sec_ph, "irf_sectoral_PH_oil_shock.pdf")
 
 
-    # ---- Figure 4 / 4b / 4c: MC Decomposition + Inflation Pass-Through ---- #
-    #
-    # Three-component additive decomposition of the GE MC response:
-    #
-    #   mc_irf_impact_i  =  direct_i  +  network_i  +  ge_residual_i
-    #
-    #   Orange  = direct oil cost:     αV_i × αOil_i × Δlog(PO)        always ≥ 0
-    #   Blue    = network amplif.:     (Leontief − I) × direct          always ≥ 0
-    #   Olive   = GE residual:         mc_irf_i − total_mc_approx_i     ±
-    #             captures wage compression, markup adjustment, and other
-    #             GE channels not in the Leontief PE approximation.
-    #             Negative for labor-intensive, low-oil sectors (e.g. Public Admin)
-    #             because falling wages reduce MC more than oil raises it.
-    #
-    # The bars sum exactly to the Dynare MC IRF at the relevant horizon.
-    # The black diamond shows nominal home-price inflation — its gap below
-    # the bar top reveals markup compression (κ_i absorbs cost into markups).
-
-    # Impact-period quantities
-    infl_irf_impact = ph_irf_impact .+ pi_irf[1]   # q-o-q nominal home-price inflation, pp
-
-    # Multi-horizon quantities
-    # Cumulative inflation: Σ_{h=1}^H [ΔPH_i(h) + pi(h)] = PH_i(H) + Σ_{h=1}^H pi(h)
-    ph_irf_mat = hcat([get_irf_var("PH_$(i)") for i in 1:nsec]...)'  # nsec × n_irf
-    mc_irf_mat = hcat([get_irf_var("MC_$(i)") for i in 1:nsec]...)'  # nsec × n_irf
-    infl_6m  = ph_irf_mat[:, 2] .+ sum(pi_irf[1:2])   # 6-month cumulative (pp)
-    infl_12m = ph_irf_mat[:, 4] .+ sum(pi_irf[1:4])   # 12-month cumulative (pp)
-    mc_2q    = mc_irf_mat[:, 2]                         # MC level at quarter 2 (% dev. SS)
-    mc_4q    = mc_irf_mat[:, 4]                         # MC level at quarter 4 (% dev. SS)
-
-    # Oil price decays as rho_postar^(h-1). Scale the PE Leontief effects accordingly
-    # so that at each horizon the bars reflect the actual oil cost pressure at that period.
-    # The GE residual then captures what the full model adds beyond the decaying PE channel.
-    decay_1q = 1.0                        # rho^0  = 1.000  (impact)
-    decay_2q = rho_postar_val^1           # rho^1  = 0.900  (6-month)
-    decay_4q = rho_postar_val^3           # rho^3  = 0.729  (12-month)
-
-    direct_mc_1q  = direct_mc  .* decay_1q;  network_mc_1q  = network_mc  .* decay_1q
-    direct_mc_2q  = direct_mc  .* decay_2q;  network_mc_2q  = network_mc  .* decay_2q
-    direct_mc_4q  = direct_mc  .* decay_4q;  network_mc_4q  = network_mc  .* decay_4q
+    # ================================================================== #
+    #  Figure 5b: Sectoral Inflation IRFs (4×3) — three lines            #
+    # ================================================================== #
+    p_sec_pi = Plots.plot(layout=(4,3), size=(1200,900),
+        plot_title="10% Oil Shock — Sectoral Home-Price Inflation (εY Comparison)",
+        titlefontsize=10)
+    for i in 1:12
+        for cr in case_results
+            c = cr.case
+            Plots.plot!(p_sec_pi, periods, cr.pi_sec_mat[i, :], subplot=i,
+                label=(i==1 ? c.label : ""), color=c.color, lw=c.lw, ls=c.ls,
+                title=short_names[i], titlefontsize=9)
+        end
+        Plots.hline!(p_sec_pi, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
+    end
+    save_fig(p_sec_pi, "irf_sectoral_inflation_oil.pdf")
 
 
-    # Abbreviated x-axis labels
-    bar_names = [
-        "Agric. & Fishing",
-        "Mining",
-        "Manufacturing",
-        "Utilities",
-        "Construction",
-        "Trade & Hotels",
-        "Transport & ICT",
-        "Finance",
-        "Real Estate",
-        "Business Serv.",
-        "Personal Serv.",
-        "Public Admin.",
-    ]
+    # ================================================================== #
+    #  Figure 5c: Aggregate Inflation by Group — three lines per group    #
+    # ================================================================== #
+    p_pi_agg = Plots.plot(size=(1000, 500),
+        title="10% Oil Shock — Agg. Home-Price Inflation (εY Comparison)",
+        titlefontsize=11, xlabel="Quarters", ylabel="Ann. pp dev. from SS",
+        legend=:topright, margin=5Plots.mm)
+    for cr in case_results
+        c = cr.case
+        Plots.plot!(p_pi_agg, periods, cr.pi_agg_irf,
+            label="Agg. — $(c.label)", color=c.color, lw=c.lw, ls=c.ls)
+    end
+    Plots.hline!(p_pi_agg, [0.0], color=:black, lw=0.5, ls=:dash, label="")
+    save_fig(p_pi_agg, "irf_aggregate_inflation_oil.pdf")
 
-    # ---- Figures 4 / 4b / 4c: GE MC Decomposition + Inflation Pass-Through ----
-    #
-    # Four-component additive decomposition of Δlog MC_i at horizon h:
-    #
-    #   mc_irf_i(h) = dir_i(h) + net_i(h) + noimp_i(h) + lab_i(h) + resid_i(h)
-    #
-    #   Orange  = direct oil cost:    αV_i × αOil_i × ΔlogPO(h)            ≥ 0
-    #   Blue    = network via prices: αm_i × Σ_j Γ_{ij} × ΔlogPH_j(h)     ±  (attenuated by κ_j)
-    #   Green   = non-oil imports:    αV_i × (1−αOil_i) × ΔlogPV(h)        ±  (exchange-rate driven)
-    #   Crimson = labor:              (1−αm_i−αV_i) × Δlogw(h)             typically < 0
-    #   Gray    = residual:           mc_irf_i(h) − sum_of_four             ±
-    #
-    # Unlike the Leontief PE approximation, this uses actual Dynare IRFs for
-    # all price inputs.  The network term can be negative because sticky sectors
-    # (high κ_j) do not fully pass through their own cost increases to PH_j.
-    # Bars sum exactly to the Dynare MC IRF at every horizon.
-    # Black diamonds show nominal home-price inflation at the relevant horizon.
+
+    # ================================================================== #
+    #  Figure 7: Sectoral MC IRFs (4×3) — three lines                    #
+    # ================================================================== #
+    p_sec_mc = Plots.plot(layout=(4,3), size=(1200,900),
+        plot_title="10% Oil Shock — Sectoral Marginal Cost (εY Comparison)",
+        titlefontsize=10)
+    for i in 1:12
+        for cr in case_results
+            c = cr.case
+            Plots.plot!(p_sec_mc, periods, cr.mc_irf_mat[i, :], subplot=i,
+                label=(i==1 ? c.label : ""), color=c.color, lw=c.lw, ls=c.ls,
+                title=short_names[i], titlefontsize=9)
+        end
+        Plots.hline!(p_sec_mc, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
+    end
+    save_fig(p_sec_mc, "irf_sectoral_MC_oil_shock.pdf")
+
+
+    # ================================================================== #
+    #  Figure 8: Aggregate Labor Market (1×2) — three lines per panel    #
+    # ================================================================== #
+    p_lab_agg = Plots.plot(layout=(1,2), size=(1000, 400),
+        plot_title="10% Oil Shock — Aggregate Labor Market (εY Comparison)",
+        titlefontsize=11, margin=5Plots.mm)
+    for cr in case_results
+        c = cr.case
+        Plots.plot!(p_lab_agg, periods, cr.n_irf_v, subplot=1,
+            label=c.label, color=c.color, lw=c.lw, ls=c.ls,
+            xlabel="Quarters", ylabel="% dev. from SS", title="Aggregate Employment")
+        Plots.plot!(p_lab_agg, periods, cr.w_irf, subplot=2,
+            label=c.label, color=c.color, lw=c.lw, ls=c.ls,
+            xlabel="Quarters", ylabel="% dev. from SS", title="Real Wage")
+    end
+    Plots.hline!(p_lab_agg, [0.0], subplot=1, color=:black, lw=0.6, ls=:dash, label="")
+    Plots.hline!(p_lab_agg, [0.0], subplot=2, color=:black, lw=0.6, ls=:dash, label="")
+    save_fig(p_lab_agg, "irf_labor_aggregate_oil_shock.pdf")
+
+
+    # ================================================================== #
+    #  Figure 9: Sectoral Employment (4×3) — three lines                 #
+    # ================================================================== #
+    p_sec_l = Plots.plot(layout=(4,3), size=(1200,900),
+        plot_title="10% Oil Shock — Sectoral Employment (εY Comparison)",
+        titlefontsize=10)
+    for i in 1:12
+        for cr in case_results
+            c = cr.case
+            Plots.plot!(p_sec_l, periods, cr.l_irf_mat[i, :], subplot=i,
+                label=(i==1 ? c.label : ""), color=c.color, lw=c.lw, ls=c.ls,
+                title=short_names[i], titlefontsize=9)
+        end
+        Plots.hline!(p_sec_l, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
+    end
+    save_fig(p_sec_l, "irf_sectoral_L_oil_shock.pdf")
+
+
+    # ================================================================== #
+    #  Figure 5: Oil Intensity Map (no εY dependence)                    #
+    # ================================================================== #
+    p_oil = Plots.bar(1:12, modalphaOil .* 100,
+        xticks=(1:12, [s[1:min(12,length(s))] for s in names_vec]),
+        xrotation=45, label="Oil share of imports (%)",
+        color=:darkorange, ylabel="Oil share (%)",
+        title="Oil Intensity of Intermediate Imports by Sector",
+        titlefontsize=14, size=(900, 450), bottom_margin=10Plots.mm)
+    save_fig(p_oil, "oil_intensity_exposure.pdf")
+
+
+    # ================================================================== #
+    #  Decomposition Figures — ONE PER εY CASE                           #
+    #                                                                     #
+    #  GE MC decomposition + inflation pass-through (stacked bars).      #
+    #  Generates separate PDF for each εY value at each horizon.         #
+    # ================================================================== #
 
     # Helper: solid rectangle shape for manual bar-chart plotting
     bar_rect(x, y0, y1, w=0.65) = Plots.Shape(
         [x - w/2, x + w/2, x + w/2, x - w/2],
         [y0,      y0,      y1,      y1      ])
-
-    # Compute the 4-component GE decomposition at horizon h (1-indexed)
-    function mc_decomp_at(h)
-        ph_h    = ph_irf_mat[:, h]
-        mc_h    = mc_irf_mat[:, h]
-        dir_h   = modalphaV .* modalphaOil .* po_irf[h]
-        net_h   = modalpha  .* (modbeta * ph_h)
-        noimp_h = modalphaV .* (1.0 .- modalphaOil) .* pv_irf[h]
-        lab_h   = alpha_L   .* w_irf[h]
-        resid_h = mc_h .- dir_h .- net_h .- noimp_h .- lab_h
-        return dir_h, net_h, noimp_h, lab_h, resid_h, mc_h
-    end
 
     ge_comp_colors = [:darkorange, :steelblue, :forestgreen, :crimson, :gray60]
     ge_comp_labels = ["Direct oil (pp)", "Network via prices (pp)",
@@ -827,29 +975,23 @@ if _HAS_PLOTS[]
 
     function make_ge_decomp_fig(dir_h, net_h, noimp_h, lab_h, resid_h, mc_h,
                                  infl_h, infl_label, title_str, ylabel_str)
-        # Stack 5 components; positives accumulate above 0, negatives below 0
-        comps   = hcat(dir_h, net_h, noimp_h, lab_h, resid_h)   # nsec × 5
+        comps   = hcat(dir_h, net_h, noimp_h, lab_h, resid_h)
         pos_mat = max.(comps, 0.0)
         neg_mat = min.(comps, 0.0)
-
         pos_tops = vec(sum(pos_mat, dims=2))
         neg_tops = vec(sum(neg_mat, dims=2))
         all_vals = vcat(pos_tops, neg_tops, infl_h, [0.0])
         ylo = min(minimum(all_vals), 0.0) * 1.40
         yhi = max(maximum(all_vals), 0.0) * 1.35
-
         p = Plots.plot(
             xticks=(1:nsec, bar_names), xrotation=55,
-            ylabel=ylabel_str, title=title_str, titlefontsize=14,
+            ylabel=ylabel_str, title=title_str, titlefontsize=12,
             size=(1400, 660), legend=:topright, ylims=(ylo, yhi),
             bottom_margin=26Plots.mm, left_margin=14Plots.mm,
             right_margin=8Plots.mm, top_margin=3Plots.mm,
-            xlims=(0.3, nsec + 0.7),
-        )
+            xlims=(0.3, nsec + 0.7))
         Plots.hline!(p, [0.0], color=:black, lw=0.6, ls=:dash, label="")
-
-        ncomp = 5
-        bw    = 0.65
+        ncomp = 5; bw = 0.65
         for k in 1:ncomp
             pos_bot = k > 1 ? vec(sum(pos_mat[:, 1:k-1], dims=2)) : zeros(nsec)
             neg_bot = k > 1 ? vec(sum(neg_mat[:, 1:k-1], dims=2)) : zeros(nsec)
@@ -869,155 +1011,71 @@ if _HAS_PLOTS[]
                     lbl_used = true
                 end
             end
-            # Ensure every component appears in legend even if all values near zero
             if !lbl_used
                 Plots.plot!(p, [NaN], [NaN], color=ge_comp_colors[k],
                     label=ge_comp_labels[k], lw=4)
             end
         end
-
         Plots.scatter!(p, 1:nsec, infl_h,
             color=:black, markershape=:diamond,
             markersize=7, markerstrokewidth=1, label=infl_label)
         return p
     end
 
-    # Figure 4: impact period (h = 1)
-    dir1, net1, noi1, lab1, res1, mc1_ge = mc_decomp_at(1)
-    p_mc_decomp_infl = make_ge_decomp_fig(
-        dir1, net1, noi1, lab1, res1, mc1_ge, infl_irf_impact,
-        "Home-price inflation (q-o-q pp, t=1)",
-        "Oil Shock — GE MC Decomposition and Inflation Pass-Through (Impact)",
-        "Percentage points (t = 1)",
-    )
-    save_fig(p_mc_decomp_infl, "decomposition_mc_inflation_oil.pdf")
+    # Generate decomposition figures for each εY case
+    for cr in case_results
+        tag = cr.case.short
+        epsY_str = "$(round(cr.case.val, digits=2))"
 
-    # Figure 4b: 6-month horizon (h = 2)
-    dir2, net2, noi2, lab2, res2, mc2_ge = mc_decomp_at(2)
-    p_mc_infl_6m = make_ge_decomp_fig(
-        dir2, net2, noi2, lab2, res2, mc2_ge, infl_6m,
-        "Home-price inflation (6-month cumulative, pp)",
-        "Oil Shock — GE MC Decomposition and Inflation Pass-Through (6-Month)",
-        "Percentage points",
-    )
-    save_fig(p_mc_infl_6m, "decomposition_mc_inflation_6m_oil.pdf")
+        # Impact (h = 1)
+        ge1 = cr.ge_h1
+        p1 = make_ge_decomp_fig(
+            ge1.dir, ge1.net, ge1.noi, ge1.lab, ge1.res, ge1.mc,
+            cr.infl_irf_impact,
+            "Home-price inflation (q-o-q pp, t=1)",
+            "Oil Shock — GE MC Decomposition (Impact, εY=$(epsY_str))",
+            "Percentage points (t = 1)")
+        save_fig(p1, "decomposition_mc_inflation_oil_$(tag).pdf")
 
-    # Figure 4c: 12-month horizon (h = 4)
-    dir4, net4, noi4, lab4, res4, mc4_ge = mc_decomp_at(4)
-    p_mc_infl_12m = make_ge_decomp_fig(
-        dir4, net4, noi4, lab4, res4, mc4_ge, infl_12m,
-        "Home-price inflation (12-month cumulative, pp)",
-        "Oil Shock — GE MC Decomposition and Inflation Pass-Through (12-Month)",
-        "Percentage points",
-    )
-    save_fig(p_mc_infl_12m, "decomposition_mc_inflation_12m_oil.pdf")
+        # 6-month (h = 2)
+        ge2 = cr.ge_h2
+        p2 = make_ge_decomp_fig(
+            ge2.dir, ge2.net, ge2.noi, ge2.lab, ge2.res, ge2.mc,
+            cr.infl_6m,
+            "Home-price inflation (6-month cumulative, pp)",
+            "Oil Shock — GE MC Decomposition (6-Month, εY=$(epsY_str))",
+            "Percentage points")
+        save_fig(p2, "decomposition_mc_inflation_6m_oil_$(tag).pdf")
 
+        # 12-month (h = 4)
+        ge4 = cr.ge_h4
+        p4 = make_ge_decomp_fig(
+            ge4.dir, ge4.net, ge4.noi, ge4.lab, ge4.res, ge4.mc,
+            cr.infl_12m,
+            "Home-price inflation (12-month cumulative, pp)",
+            "Oil Shock — GE MC Decomposition (12-Month, εY=$(epsY_str))",
+            "Percentage points")
+        save_fig(p4, "decomposition_mc_inflation_12m_oil_$(tag).pdf")
 
-    # ---- Figure 5: Oil Intensity Map ---- #
-    p_oil = Plots.bar(1:12, modalphaOil .* 100,
-        xticks=(1:12, [s[1:min(12,length(s))] for s in names_vec]),
-        xrotation=45,
-        label="Oil share of imports (%)",
-        color=:darkorange,
-        ylabel="Oil share (%)",
-        title="Oil Intensity of Intermediate Imports by Sector",
-        titlefontsize=14,
-        size=(900, 450),
-        bottom_margin=10Plots.mm
-    )
-    save_fig(p_oil, "oil_intensity_exposure.pdf")
-
-
-    # ---- Figure 6: Decomposition — Model IRFs for Output (impact) ---- #
-    p_out_decomp = groupedbar(
-        [y_irf_impact mc_irf_impact],
-        xticks=(1:12, bar_names),
-        xrotation=55,
-        label=["Output Y_i  (% dev. from SS)" "Marginal cost MC_i  (% dev. from SS)"],
-        color=[:steelblue :firebrick],
-        ylabel="Percentage change from steady state (t = 1)",
-        title="Oil Shock Impact: Sectoral Output and Marginal Cost",
-        titlefontsize=14,
-        size=(1400, 600),
-        legend=:topright,
-        bottom_margin=24Plots.mm,
-        left_margin=14Plots.mm,
-        right_margin=5Plots.mm,
-    )
-    save_fig(p_out_decomp, "decomposition_output_oil.pdf")
-
-
-    # (Figure 8 merged into Figure 4 — see decomposition_mc_inflation_oil.pdf)
-
-
-    # ---- Figure 5b: Sectoral Inflation IRFs (4×3 panel, annualised q-o-q) ---- #
-    # Nominal sectoral inflation: π̂ᴴᵢₜ = Πₜ · PHᵢₜ/PHᵢₜ₋₁
-    # In log %: (ΔPH_i(h) + pi(h)) × 4  [annualised]
-    # PH_i is a relative price (divided by CPI), so aggregate CPI inflation pi_irf[h]
-    # must be added to recover the change in the nominal price level.
-    ph_irf_mat = hcat([get_irf_var("PH_$(i)") for i in 1:nsec]...)'  # nsec × n_irf
-    pi_sec_mat = zeros(nsec, n_irf)
-    for i in 1:nsec
-        pi_sec_mat[i, 1] = (ph_irf_mat[i, 1] + pi_irf[1]) * 4
-        for h in 2:n_irf
-            pi_sec_mat[i, h] = (ph_irf_mat[i, h] - ph_irf_mat[i, h-1] + pi_irf[h]) * 4
-        end
+        @printf "  Decomposition figures saved for case: %s\n" cr.case.label
     end
 
-    p_sec_pi = Plots.plot(layout=(4,3), size=(1200,900),
-        plot_title="10% Oil Shock — Sectoral Home-Price Inflation (ann. pp)",
-        titlefontsize=12)
-    for i in 1:12
-        Plots.plot!(p_sec_pi, periods, pi_sec_mat[i, :], subplot=i,
-            label="", color=sector_colors[i], lw=1.8,
-            title=short_names[i], titlefontsize=11)
-        Plots.hline!(p_sec_pi, [0.0], subplot=i,
-            color=:black, lw=0.5, ls=:dash, label="")
+    # ---- Output + MC decomposition (impact) — one per εY case ---- #
+    for cr in case_results
+        tag = cr.case.short
+        epsY_str = "$(round(cr.case.val, digits=2))"
+        p_out = groupedbar(
+            [cr.y_irf_impact cr.mc_irf_impact],
+            xticks=(1:12, bar_names), xrotation=55,
+            label=["Output Y_i (% dev.)" "MC_i (% dev.)"],
+            color=[:steelblue :firebrick],
+            ylabel="% change from SS (t = 1)",
+            title="Oil Shock Impact: Output & MC (εY=$(epsY_str))",
+            titlefontsize=12, size=(1400, 600), legend=:topright,
+            bottom_margin=24Plots.mm, left_margin=14Plots.mm, right_margin=5Plots.mm)
+        save_fig(p_out, "decomposition_output_oil_$(tag).pdf")
     end
-    save_fig(p_sec_pi, "irf_sectoral_inflation_oil.pdf")
 
-
-    # ---- Figure 5c: Aggregate Home-Price Inflation by Group ---- #
-    # Expenditure-weighted averages: goods (sectors 1–5), services (6–12), aggregate.
-    # Weights: steady-state consumption shares C_gi_ss and C_si_ss.
-    cons_ss_g = C_gi_ss   # vector length nsec (zero for service sectors)
-    cons_ss_s = C_si_ss   # vector length nsec (zero for goods sectors)
-    cons_ss   = cons_ss_g .+ cons_ss_s
-    tot_cons  = sum(cons_ss)
-    w_agg = cons_ss ./ tot_cons         # economy-wide weights
-    w_g   = cons_ss_g ./ sum(cons_ss_g) # within-goods weights
-    w_s   = cons_ss_s ./ sum(cons_ss_s) # within-services weights
-
-    pi_agg_irf   = [sum(w_agg .* pi_sec_mat[:, h]) for h in 1:n_irf]
-    pi_goods_irf = [sum(w_g   .* pi_sec_mat[:, h]) for h in 1:n_irf]
-    pi_serv_irf  = [sum(w_s   .* pi_sec_mat[:, h]) for h in 1:n_irf]
-
-    p_pi_agg = Plots.plot(periods, pi_agg_irf,
-        label="Aggregate", color=:black, lw=2, ls=:solid,
-        ylabel="Ann. pp deviations from SS",
-        title="10% Oil Shock — Aggregate Home-Price Inflation by Sector Group",
-        titlefontsize=13, size=(900, 450), legend=:topright,
-        bottom_margin=5Plots.mm, left_margin=10Plots.mm)
-    Plots.plot!(p_pi_agg, periods, pi_goods_irf,
-        label="Goods (sec. 1–5)", color=:steelblue, lw=2, ls=:dash)
-    Plots.plot!(p_pi_agg, periods, pi_serv_irf,
-        label="Services (sec. 6–12)", color=:firebrick, lw=2, ls=:dot)
-    Plots.hline!(p_pi_agg, [0.0], color=:black, lw=0.5, ls=:dash, label="")
-    save_fig(p_pi_agg, "irf_aggregate_inflation_oil.pdf")
-
-
-    # ---- Figure 7: Sectoral MC IRFs (4×3 panel) ---- #
-    p_sec_mc = Plots.plot(layout=(4,3), size=(1200,900),
-        plot_title="10% Oil Shock — Sectoral Marginal Cost Responses",
-        titlefontsize=12)
-    for i in 1:12
-        mci = get_irf_var("MC_$(i)")
-        Plots.plot!(p_sec_mc, periods, mci, subplot=i,
-            label="", color=sector_colors[i], lw=1.8,
-            title=short_names[i], titlefontsize=11)
-        Plots.hline!(p_sec_mc, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
-    end
-    save_fig(p_sec_mc, "irf_sectoral_MC_oil_shock.pdf")
 
 else
     @printf "\n  [Plots.jl not available — skipping figures]\n"
@@ -1028,7 +1086,29 @@ end
 #  GENERATE LaTeX TABLES                                                       #
 # =========================================================================== #
 
-@printf "\n--- Generating LaTeX tables ---\n"
+@printf "\n--- Generating LaTeX tables (baseline εY case) ---\n"
+
+# Use baseline case for tables
+baseline_idx = findfirst(cr -> cr.case.short == "baseline", case_results)
+bl = case_results[baseline_idx]
+direct_mc       = bl.direct_mc
+network_mc      = bl.network_mc
+total_mc_approx = bl.total_mc_approx
+amp_ratio       = bl.amp_ratio
+y_irf_impact    = bl.y_irf_impact
+mc_irf_impact   = bl.mc_irf_impact
+gdp_irf         = bl.gdp_irf
+pi_irf          = bl.pi_irf
+q_irf           = bl.q_irf
+tb_irf          = bl.tb_irf
+c_irf           = bl.c_irf
+n_irf_v         = bl.n_irf_v
+r_irf           = bl.r_irf
+w_irf           = bl.w_irf
+agg_direct      = bl.agg_direct
+agg_network     = bl.agg_network
+agg_total       = bl.agg_total
+agg_amp         = bl.agg_amp
 
 # ---- Table 1: Sectoral Decomposition ---- #
 # English abbreviated sector names (consistent with bar_names used in figures)
@@ -1138,27 +1218,48 @@ let sec_src = joinpath(TABLES_DIR, "oil_shock_section.tex")
 end
 
 
-# ---- Save IRF data as CSV for external use ---- #
-df_irf_out = DataFrame(period = repeat(1:n_irf, outer=n_endo))
-df_irf_out.variable = repeat(endo_names, inner=n_irf)
-df_irf_out.value = vec(irf_pct')
-CSV.write(joinpath(TABLES_DIR, "oil_shock_irfs.csv"), df_irf_out)
-@printf "  Saved: oil_shock_irfs.csv\n"
+# ---- Save IRF data as CSV for external use (baseline case) ---- #
+# Reconstruct the IRF long-format DataFrame from the baseline case's stored get_irf
+# Save a compact CSV with key variables for each εY case
+for cr in case_results
+    tag = cr.case.short
+    vars_to_save = ["GDP", "pi", "Q", "TB", "C", "N", "w", "r"]
+    for i in 1:nsec
+        push!(vars_to_save, "Y_$(i)", "PH_$(i)", "MC_$(i)", "L_$(i)")
+    end
+    rows = []
+    for vn in vars_to_save
+        irf_v = cr.get_irf(vn)
+        for h in 1:nT
+            push!(rows, (period=h, variable=vn, value=irf_v[h]))
+        end
+    end
+    df_out = DataFrame(rows)
+    CSV.write(joinpath(TABLES_DIR, "oil_shock_irfs_$(tag).csv"), df_out)
+    @printf "  Saved: oil_shock_irfs_%s.csv\n" tag
+end
+# Also save baseline as the default name (for mfg_shock comparison)
+let bl_tag = case_results[baseline_idx].case.short
+    src = joinpath(TABLES_DIR, "oil_shock_irfs_$(bl_tag).csv")
+    dst = joinpath(TABLES_DIR, "oil_shock_irfs.csv")
+    cp(src, dst; force=true)
+    @printf "  Saved: oil_shock_irfs.csv (copy of baseline)\n"
+end
 
-# Save decomposition data
+# Save decomposition data (baseline)
 df_decomp = DataFrame(
     sector    = 1:nsec,
     name      = names_vec,
     oil_share = modalphaOil,
     alphaV    = modalphaV,
-    direct_mc = direct_mc,
-    network_mc= network_mc,
-    total_mc  = total_mc_approx,
-    amp_ratio = amp_ratio,
-    mc_irf    = mc_irf_impact,
-    y_irf     = y_irf_impact,
-    ph_irf    = ph_irf_impact,
-    yi_ss     = Yi_ss,
+    direct_mc = bl.direct_mc,
+    network_mc= bl.network_mc,
+    total_mc  = bl.total_mc_approx,
+    amp_ratio = bl.amp_ratio,
+    mc_irf    = bl.mc_irf_impact,
+    y_irf     = bl.y_irf_impact,
+    ph_irf    = bl.ph_irf_impact,
+    yi_ss     = bl.Yi_ss,
 )
 CSV.write(joinpath(TABLES_DIR, "oil_shock_decomposition.csv"), df_decomp)
 @printf "  Saved: oil_shock_decomposition.csv\n"

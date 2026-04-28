@@ -682,6 +682,48 @@ else
 
 
     # ------------------------------------------------------------------ #
+    # Figure 4b: Aggregate Labor Market IRFs (N and w)                    #
+    # ------------------------------------------------------------------ #
+    w_irf_full = get_irf_var("w")
+    n_irf_lab  = get_irf_var("N")
+
+    p_lab_agg = Plots.plot(layout=(1, 2), size=(1000, 400),
+        plot_title="1% Manufacturing TFP Shock — Aggregate Labor Market",
+        titlefontsize=10, margin=5Plots.mm)
+
+    Plots.plot!(p_lab_agg, periods, n_irf_lab, subplot=1,
+        label="Employment (N)", color=:steelblue, lw=2,
+        xlabel="Quarters", ylabel="% dev. from SS", title="Aggregate Employment")
+    Plots.hline!(p_lab_agg, [0.0], subplot=1, color=:black, lw=0.6, ls=:dash, label="")
+
+    Plots.plot!(p_lab_agg, periods, w_irf_full, subplot=2,
+        label="Wage (w)", color=:firebrick, lw=2,
+        xlabel="Quarters", ylabel="% dev. from SS", title="Real Wage")
+    Plots.hline!(p_lab_agg, [0.0], subplot=2, color=:black, lw=0.6, ls=:dash, label="")
+
+    save_fig(p_lab_agg, "irf_labor_aggregate_mfg_shock.pdf")
+
+
+    # ------------------------------------------------------------------ #
+    # Figure 4c: Sectoral Employment IRFs (4×3 panel)                     #
+    # ------------------------------------------------------------------ #
+    p_sec_l = Plots.plot(layout=(4, 3), size=(1200, 900),
+        plot_title="1% Manufacturing TFP Shock — Sectoral Employment",
+        titlefontsize=8)
+    for i in 1:12
+        li = get_irf_var("L_$(i)")
+        clr = (i == mfg_sector) ? :firebrick : sector_colors[i]
+        lw_i = (i == mfg_sector) ? 2.5 : 1.8
+        Plots.plot!(p_sec_l, periods, li, subplot=i,
+            label="", color=clr, lw=lw_i,
+            title=short_names[i], titlefontsize=7,
+            ylabel=(i % 3 == 1 ? "% dev." : ""))
+        Plots.hline!(p_sec_l, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
+    end
+    save_fig(p_sec_l, "irf_sectoral_L_mfg_shock.pdf")
+
+
+    # ------------------------------------------------------------------ #
     # Figure 5 & 6: Comparison with Oil Shock (if oil IRF data exists)    #
     # ------------------------------------------------------------------ #
     oil_irfs_path = joinpath(TABLES_DIR, "oil_shock_irfs.csv")
