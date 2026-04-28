@@ -525,11 +525,17 @@ for h in 1:n_irf
 end
 
 # Convert to percentage deviations from SS
+# For variables with SS ≈ 0 (gaps, log-deviations), the linearized IRF is already
+# in deviation units — multiply by 100 to get percentage points.
 irf_pct = zeros(n_endo, n_irf)
 for i in 1:n_endo
     ssv = abs(ss_vec[i])
     if ssv > 1e-10
         irf_pct[i, :] .= 100.0 .* irf_mat[i, :] ./ ssv
+    else
+        # Gap variables (Ygap, GDPgap, Ngap, etc.) have SS = 0;
+        # linearized IRF is in log-deviation units → ×100 for pp.
+        irf_pct[i, :] .= 100.0 .* irf_mat[i, :]
     end
 end
 
@@ -647,6 +653,9 @@ pi_peak_q = argmax(pi_irf)
 ph_irf_mat = hcat([get_irf_var("PH_$(i)") for i in 1:nsec]...)'  # nsec × n_irf
 mc_irf_mat = hcat([get_irf_var("MC_$(i)") for i in 1:nsec]...)'
 l_irf_mat  = hcat([get_irf_var("L_$(i)")  for i in 1:nsec]...)'
+ygap_irf_mat = hcat([get_irf_var("Ygap_$(i)") for i in 1:nsec]...)'  # nsec × n_irf
+ygap_irf   = get_irf_var("Ygap")     # aggregate output gap
+gdpgap_irf = get_irf_var("GDPgap")   # GDP gap
 
 # Sectoral nominal home-price inflation (annualized)
 pi_sec_mat = zeros(nsec, n_irf)
@@ -700,6 +709,7 @@ push!(case_results, (
     c_irf=copy(c_irf), n_irf_v=copy(n_irf_v), r_irf=copy(r_irf), w_irf=copy(w_irf),
     po_irf=copy(po_irf), pv_irf=copy(pv_irf),
     ph_irf_mat=copy(ph_irf_mat), mc_irf_mat=copy(mc_irf_mat), l_irf_mat=copy(l_irf_mat),
+    ygap_irf_mat=copy(ygap_irf_mat), ygap_irf=copy(ygap_irf), gdpgap_irf=copy(gdpgap_irf),
     pi_sec_mat=copy(pi_sec_mat),
     pi_agg_irf=copy(pi_agg_irf), pi_goods_irf=copy(pi_goods_irf), pi_serv_irf=copy(pi_serv_irf),
     infl_irf_impact=copy(infl_irf_impact), infl_6m=copy(infl_6m), infl_12m=copy(infl_12m),
@@ -943,6 +953,44 @@ if _HAS_PLOTS[]
         Plots.hline!(p_sec_l, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
     end
     save_fig(p_sec_l, "irf_sectoral_L_oil_shock.pdf")
+
+
+    # ================================================================== #
+    #  Figure 10: Aggregate Output Gap (1×2) — three lines per panel     #
+    # ================================================================== #
+    p_gap_agg = Plots.plot(layout=(1,2), size=(1000, 400),
+        plot_title="10% Oil Shock — Aggregate Output Gap (εY Comparison)",
+        titlefontsize=11, margin=5Plots.mm)
+    for cr in case_results
+        c = cr.case
+        Plots.plot!(p_gap_agg, periods, cr.ygap_irf, subplot=1,
+            label=c.label, color=c.color, lw=c.lw, ls=c.ls,
+            xlabel="Quarters", ylabel="% dev. from SS", title="Output Gap (Ygap)")
+        Plots.plot!(p_gap_agg, periods, cr.gdpgap_irf, subplot=2,
+            label=c.label, color=c.color, lw=c.lw, ls=c.ls,
+            xlabel="Quarters", ylabel="% dev. from SS", title="GDP Gap")
+    end
+    Plots.hline!(p_gap_agg, [0.0], subplot=1, color=:black, lw=0.6, ls=:dash, label="")
+    Plots.hline!(p_gap_agg, [0.0], subplot=2, color=:black, lw=0.6, ls=:dash, label="")
+    save_fig(p_gap_agg, "irf_outputgap_aggregate_oil_shock.pdf")
+
+
+    # ================================================================== #
+    #  Figure 11: Sectoral Output Gaps (4×3) — three lines               #
+    # ================================================================== #
+    p_sec_ygap = Plots.plot(layout=(4,3), size=(1200,900),
+        plot_title="10% Oil Shock — Sectoral Output Gap (εY Comparison)",
+        titlefontsize=10)
+    for i in 1:12
+        for cr in case_results
+            c = cr.case
+            Plots.plot!(p_sec_ygap, periods, cr.ygap_irf_mat[i, :], subplot=i,
+                label=(i==1 ? c.label : ""), color=c.color, lw=c.lw, ls=c.ls,
+                title=short_names[i], titlefontsize=9)
+        end
+        Plots.hline!(p_sec_ygap, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
+    end
+    save_fig(p_sec_ygap, "irf_sectoral_Ygap_oil_shock.pdf")
 
 
     # ================================================================== #

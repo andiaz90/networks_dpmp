@@ -493,10 +493,16 @@ for h in 1:n_irf
 end
 
 # Convert to percentage deviations from SS
+# For variables with SS ≈ 0 (gaps, log-deviations), the linearized IRF is already
+# in deviation units — multiply by 100 to get percentage points.
 irf_pct = zeros(n_endo, n_irf)
 for i in 1:n_endo
     ssv = abs(ss_vec[i])
-    ssv > 1e-10 && (irf_pct[i, :] .= 100.0 .* irf_mat[i, :] ./ ssv)
+    if ssv > 1e-10
+        irf_pct[i, :] .= 100.0 .* irf_mat[i, :] ./ ssv
+    else
+        irf_pct[i, :] .= 100.0 .* irf_mat[i, :]
+    end
 end
 
 function get_irf_var(varname::String)
@@ -721,6 +727,48 @@ else
         Plots.hline!(p_sec_l, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
     end
     save_fig(p_sec_l, "irf_sectoral_L_mfg_shock.pdf")
+
+
+    # ------------------------------------------------------------------ #
+    # Figure 4d: Aggregate Output Gap IRFs (Ygap and GDPgap)              #
+    # ------------------------------------------------------------------ #
+    ygap_irf   = get_irf_var("Ygap")
+    gdpgap_irf = get_irf_var("GDPgap")
+
+    p_gap_agg = Plots.plot(layout=(1, 2), size=(1000, 400),
+        plot_title="1% Manufacturing TFP Shock — Aggregate Output Gap",
+        titlefontsize=10, margin=5Plots.mm)
+
+    Plots.plot!(p_gap_agg, periods, ygap_irf, subplot=1,
+        label="Output gap (Ygap)", color=:steelblue, lw=2,
+        xlabel="Quarters", ylabel="% dev. from SS", title="Output Gap")
+    Plots.hline!(p_gap_agg, [0.0], subplot=1, color=:black, lw=0.6, ls=:dash, label="")
+
+    Plots.plot!(p_gap_agg, periods, gdpgap_irf, subplot=2,
+        label="GDP gap", color=:firebrick, lw=2,
+        xlabel="Quarters", ylabel="% dev. from SS", title="GDP Gap")
+    Plots.hline!(p_gap_agg, [0.0], subplot=2, color=:black, lw=0.6, ls=:dash, label="")
+
+    save_fig(p_gap_agg, "irf_outputgap_aggregate_mfg_shock.pdf")
+
+
+    # ------------------------------------------------------------------ #
+    # Figure 4e: Sectoral Output Gap IRFs (4×3 panel)                     #
+    # ------------------------------------------------------------------ #
+    p_sec_ygap = Plots.plot(layout=(4, 3), size=(1200, 900),
+        plot_title="1% Manufacturing TFP Shock — Sectoral Output Gap",
+        titlefontsize=8)
+    for i in 1:12
+        ygi = get_irf_var("Ygap_$(i)")
+        clr = (i == mfg_sector) ? :firebrick : sector_colors[i]
+        lw_i = (i == mfg_sector) ? 2.5 : 1.8
+        Plots.plot!(p_sec_ygap, periods, ygi, subplot=i,
+            label="", color=clr, lw=lw_i,
+            title=short_names[i], titlefontsize=7,
+            ylabel=(i % 3 == 1 ? "% dev." : ""))
+        Plots.hline!(p_sec_ygap, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
+    end
+    save_fig(p_sec_ygap, "irf_sectoral_Ygap_mfg_shock.pdf")
 
 
     # ------------------------------------------------------------------ #
