@@ -624,6 +624,8 @@ pi_irf  = get_irf_var("pi")
 q_irf   = get_irf_var("Q")
 tb_irf  = get_irf_var("TB")
 c_irf   = get_irf_var("C")
+cg_irf  = get_irf_var("C_g")   # goods consumption
+cs_irf  = get_irf_var("C_s")   # services consumption
 n_irf_v = get_irf_var("N")
 r_irf   = get_irf_var("r")
 w_irf   = get_irf_var("w")
@@ -706,7 +708,8 @@ push!(case_results, (
         (vn::String) -> begin i = get(_idx, vn, 0); i==0 ? zeros(_nT) : _irf[i,:] end
     end,
     gdp_irf=copy(gdp_irf), pi_irf=copy(pi_irf), q_irf=copy(q_irf), tb_irf=copy(tb_irf),
-    c_irf=copy(c_irf), n_irf_v=copy(n_irf_v), r_irf=copy(r_irf), w_irf=copy(w_irf),
+    c_irf=copy(c_irf), cg_irf=copy(cg_irf), cs_irf=copy(cs_irf),
+    n_irf_v=copy(n_irf_v), r_irf=copy(r_irf), w_irf=copy(w_irf),
     po_irf=copy(po_irf), pv_irf=copy(pv_irf),
     ph_irf_mat=copy(ph_irf_mat), mc_irf_mat=copy(mc_irf_mat), l_irf_mat=copy(l_irf_mat),
     ygap_irf_mat=copy(ygap_irf_mat), ygap_irf=copy(ygap_irf), gdpgap_irf=copy(gdpgap_irf),
@@ -787,7 +790,7 @@ if _HAS_PLOTS[]
     case_labels = [cr.case.label for cr in case_results]
 
     # ================================================================== #
-    # Helper: overlay three εY cases on a single-panel plot               #
+    # Helper: overlay εY cases on a single-panel plot                     #
     # ================================================================== #
     function overlay_agg!(p, field::Symbol; subplot=nothing, kw...)
         for cr in case_results
@@ -800,27 +803,35 @@ if _HAS_PLOTS[]
         end
     end
 
+    # ---- Use only baseline case for all plots ----
+    case_results_all = copy(case_results)   # keep full set if needed later
+    case_results = [case_results[findfirst(cr -> cr.case.short == "baseline", case_results)]]
+
     # ================================================================== #
-    #  Figure 1: Aggregate IRFs (2×3) — three εY lines per panel          #
+    #  Figure 1: Aggregate IRFs (2×3) — baseline only                    #
     # ================================================================== #
     agg_panels = [
         (:gdp_irf, "GDP", "% dev."),
         (:pi_irf,  "CPI Inflation", "% dev."),
         (:q_irf,   "Real Exchange Rate", "% dev."),
         (:tb_irf,  "Trade Balance", "% dev."),
+        (:cg_irf,  "Goods Consumption", "% dev."),
         (:r_irf,   "Nominal Interest Rate", "% dev."),
         (:w_irf,   "Real Wage", "% dev."),
+        (:pi_goods_irf,  "Goods Inflation", "ann. pp"),
+        (:pi_serv_irf,   "Services Inflation", "ann. pp"),
+        (:cs_irf,  "Services Consumption", "% dev."),
     ]
-    p_agg = Plots.plot(layout=(2,3), size=(1400,700),
-        plot_title="10% Oil Price Shock — Aggregate Responses (εY Comparison)",
+    p_agg = Plots.plot(layout=(2,5), size=(2000,700),
+        plot_title="10% Oil Price Shock — Aggregate Responses",
         titlefontsize=12, margin=5Plots.mm)
     for (k, (fld, ttl, yl)) in enumerate(agg_panels)
         for cr in case_results
             c = cr.case
             Plots.plot!(p_agg, periods, getfield(cr, fld), subplot=k,
                 label=(k==1 ? c.label : ""), color=c.color, lw=c.lw, ls=c.ls,
-                title=ttl, ylabel=(k∈[1,4] ? yl : ""),
-                xlabel=(k>3 ? "Quarters" : ""))
+                title=ttl, ylabel=(k∈[1,6] ? yl : ""),
+                xlabel=(k>5 ? "Quarters" : ""))
         end
         Plots.hline!(p_agg, [0.0], subplot=k, color=:black, lw=0.6, ls=:dash, label="")
     end
@@ -831,7 +842,7 @@ if _HAS_PLOTS[]
     #  Figure 2: Sectoral Output IRFs (4×3) — three lines per subplot     #
     # ================================================================== #
     p_sec_y = Plots.plot(layout=(4,3), size=(1200,900),
-        plot_title="10% Oil Shock — Sectoral Output (εY Comparison)",
+        plot_title="10% Oil Shock — Sectoral Output",
         titlefontsize=10)
     for i in 1:12
         for cr in case_results
@@ -850,7 +861,7 @@ if _HAS_PLOTS[]
     #  Figure 3: Sectoral Price IRFs (4×3) — three lines                  #
     # ================================================================== #
     p_sec_ph = Plots.plot(layout=(4,3), size=(1200,900),
-        plot_title="10% Oil Shock — Sectoral Home Prices (εY Comparison)",
+        plot_title="10% Oil Shock — Sectoral Home Prices",
         titlefontsize=10)
     for i in 1:12
         for cr in case_results
@@ -869,7 +880,7 @@ if _HAS_PLOTS[]
     #  Figure 5b: Sectoral Inflation IRFs (4×3) — three lines            #
     # ================================================================== #
     p_sec_pi = Plots.plot(layout=(4,3), size=(1200,900),
-        plot_title="10% Oil Shock — Sectoral Home-Price Inflation (εY Comparison)",
+        plot_title="10% Oil Shock — Sectoral Home-Price Inflation",
         titlefontsize=10)
     for i in 1:12
         for cr in case_results
@@ -887,7 +898,7 @@ if _HAS_PLOTS[]
     #  Figure 5c: Aggregate Inflation by Group — three lines per group    #
     # ================================================================== #
     p_pi_agg = Plots.plot(size=(1000, 500),
-        title="10% Oil Shock — Agg. Home-Price Inflation (εY Comparison)",
+        title="10% Oil Shock — Aggregate Home-Price Inflation",
         titlefontsize=11, xlabel="Quarters", ylabel="Ann. pp dev. from SS",
         legend=:topright, margin=5Plots.mm)
     for cr in case_results
@@ -900,10 +911,28 @@ if _HAS_PLOTS[]
 
 
     # ================================================================== #
+    #  Figure 5d: Goods vs Services Inflation — baseline εY only         #
+    # ================================================================== #
+    cr_base = case_results[1]  # baseline (filtered above)
+    p_gs_pi = Plots.plot(size=(800, 500),
+        title="10% Oil Shock — Home-Price Inflation: Goods vs Services",
+        titlefontsize=11, xlabel="Quarters", ylabel="Ann. pp dev. from SS",
+        legend=:topright, margin=5Plots.mm)
+    Plots.plot!(p_gs_pi, periods, cr_base.pi_agg_irf,
+        label="Aggregate", color=:black, lw=2.5, ls=:solid)
+    Plots.plot!(p_gs_pi, periods, cr_base.pi_goods_irf,
+        label="Goods (sectors 1–5)", color=:steelblue, lw=2, ls=:dash)
+    Plots.plot!(p_gs_pi, periods, cr_base.pi_serv_irf,
+        label="Services (sectors 6–12)", color=:firebrick, lw=2, ls=:dot)
+    Plots.hline!(p_gs_pi, [0.0], color=:black, lw=0.5, ls=:dash, label="")
+    save_fig(p_gs_pi, "irf_goods_vs_services_inflation_oil.pdf")
+
+
+    # ================================================================== #
     #  Figure 7: Sectoral MC IRFs (4×3) — three lines                    #
     # ================================================================== #
     p_sec_mc = Plots.plot(layout=(4,3), size=(1200,900),
-        plot_title="10% Oil Shock — Sectoral Marginal Cost (εY Comparison)",
+        plot_title="10% Oil Shock — Sectoral Marginal Cost",
         titlefontsize=10)
     for i in 1:12
         for cr in case_results
@@ -921,7 +950,7 @@ if _HAS_PLOTS[]
     #  Figure 8: Aggregate Labor Market (1×2) — three lines per panel    #
     # ================================================================== #
     p_lab_agg = Plots.plot(layout=(1,2), size=(1000, 400),
-        plot_title="10% Oil Shock — Aggregate Labor Market (εY Comparison)",
+        plot_title="10% Oil Shock — Aggregate Labor Market",
         titlefontsize=11, margin=5Plots.mm)
     for cr in case_results
         c = cr.case
@@ -941,7 +970,7 @@ if _HAS_PLOTS[]
     #  Figure 9: Sectoral Employment (4×3) — three lines                 #
     # ================================================================== #
     p_sec_l = Plots.plot(layout=(4,3), size=(1200,900),
-        plot_title="10% Oil Shock — Sectoral Employment (εY Comparison)",
+        plot_title="10% Oil Shock — Sectoral Employment",
         titlefontsize=10)
     for i in 1:12
         for cr in case_results
@@ -959,7 +988,7 @@ if _HAS_PLOTS[]
     #  Figure 10: Aggregate Output Gap (1×2) — three lines per panel     #
     # ================================================================== #
     p_gap_agg = Plots.plot(layout=(1,2), size=(1000, 400),
-        plot_title="10% Oil Shock — Aggregate Output Gap (εY Comparison)",
+        plot_title="10% Oil Shock — Aggregate Output Gap",
         titlefontsize=11, margin=5Plots.mm)
     for cr in case_results
         c = cr.case
@@ -979,7 +1008,7 @@ if _HAS_PLOTS[]
     #  Figure 11: Sectoral Output Gaps (4×3) — three lines               #
     # ================================================================== #
     p_sec_ygap = Plots.plot(layout=(4,3), size=(1200,900),
-        plot_title="10% Oil Shock — Sectoral Output Gap (εY Comparison)",
+        plot_title="10% Oil Shock — Sectoral Output Gap",
         titlefontsize=10)
     for i in 1:12
         for cr in case_results
@@ -996,11 +1025,12 @@ if _HAS_PLOTS[]
     # ================================================================== #
     #  Figure 5: Oil Intensity Map (no εY dependence)                    #
     # ================================================================== #
-    p_oil = Plots.bar(1:12, modalphaOil .* 100,
+    direct_oil_exposure = modalphaV .* modalphaOil   # oil share of total inputs
+    p_oil = Plots.bar(1:12, direct_oil_exposure .* 100,
         xticks=(1:12, [s[1:min(12,length(s))] for s in names_vec]),
-        xrotation=45, label="Oil share of imports (%)",
-        color=:darkorange, ylabel="Oil share (%)",
-        title="Oil Intensity of Intermediate Imports by Sector",
+        xrotation=45, label="Oil share of total inputs (%)",
+        color=:darkorange, ylabel="Oil cost share (%)",
+        title="Oil Share of Total Inputs by Sector",
         titlefontsize=14, size=(900, 450), bottom_margin=10Plots.mm)
     save_fig(p_oil, "oil_intensity_exposure.pdf")
 
@@ -1150,6 +1180,8 @@ pi_irf          = bl.pi_irf
 q_irf           = bl.q_irf
 tb_irf          = bl.tb_irf
 c_irf           = bl.c_irf
+cg_irf          = bl.cg_irf
+cs_irf          = bl.cs_irf
 n_irf_v         = bl.n_irf_v
 r_irf           = bl.r_irf
 w_irf           = bl.w_irf

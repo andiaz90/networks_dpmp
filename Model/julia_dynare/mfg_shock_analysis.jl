@@ -557,8 +557,11 @@ pi_irf  = pi_cpi_irf          # already extracted above (= get_irf_var("pi"))
 q_irf   = get_irf_var("Q")
 tb_irf  = get_irf_var("TB")
 c_irf   = get_irf_var("C")
+cg_irf  = get_irf_var("C_g")   # goods consumption
+cs_irf  = get_irf_var("C_s")   # services consumption
 n_irf_v = get_irf_var("N")
 r_irf   = get_irf_var("r")
+w_irf   = get_irf_var("w")
 
 @printf "--- Aggregate IRFs (1%% Manufacturing TFP shock, impact period) ---\n"
 @printf "  GDP      : %+.3f%%\n"   gdp_irf[1]
@@ -599,10 +602,11 @@ else
     # ------------------------------------------------------------------ #
     # Figure 1: Aggregate IRFs (5 panels)                                 #
     # ------------------------------------------------------------------ #
-    p_agg = Plots.plot(layout=(2, 3), size=(1200, 700),
+    p_agg = Plots.plot(layout=(2, 5), size=(2000, 700),
         plot_title="1% Manufacturing TFP Shock — Aggregate Responses",
         titlefontsize=10, margin=5Plots.mm)
 
+    # Row 1: GDP, CPI, RER, TB, Goods Consumption
     Plots.plot!(p_agg, periods, gdp_irf, subplot=1,
         label="GDP", color=:steelblue, lw=2,
         ylabel="% dev. from SS", title="GDP")
@@ -618,20 +622,42 @@ else
         title="Real Exchange Rate")
     Plots.hline!(p_agg, [0.0], subplot=3, color=:black, lw=0.6, ls=:dash, label="")
 
-    Plots.plot!(p_agg, periods, r_irf .* 4, subplot=4,
-        label="Policy rate", color=:darkorchid, lw=2,
-        xlabel="Quarters", ylabel="ann. pp dev.", title="Policy Rate")
+    tb_gdp_irf = tb_irf .* (TB_ss / GDP_ss)
+    Plots.plot!(p_agg, periods, tb_gdp_irf, subplot=4,
+        label="TB/GDP", color=:darkorange, lw=2,
+        title="Trade Balance (% GDP)")
     Plots.hline!(p_agg, [0.0], subplot=4, color=:black, lw=0.6, ls=:dash, label="")
 
-    # TB as % of GDP
-    tb_gdp_irf = tb_irf .* (TB_ss / GDP_ss)
-    Plots.plot!(p_agg, periods, tb_gdp_irf, subplot=5,
-        label="TB/GDP", color=:darkorange, lw=2,
-        xlabel="Quarters", title="Trade Balance (% GDP)")
+    Plots.plot!(p_agg, periods, cg_irf, subplot=5,
+        label="Goods C", color=:steelblue, lw=2,
+        title="Goods Consumption")
     Plots.hline!(p_agg, [0.0], subplot=5, color=:black, lw=0.6, ls=:dash, label="")
 
-    # Subplot 6: empty (leave for future use)
-    Plots.plot!(p_agg, subplot=6, framestyle=:none, label="")
+    # Row 2: Policy Rate, Real Wage, Goods Inflation, Services Inflation, Services Consumption
+    Plots.plot!(p_agg, periods, r_irf .* 4, subplot=6,
+        label="Policy rate", color=:darkorchid, lw=2,
+        xlabel="Quarters", ylabel="ann. pp dev.", title="Policy Rate")
+    Plots.hline!(p_agg, [0.0], subplot=6, color=:black, lw=0.6, ls=:dash, label="")
+
+    Plots.plot!(p_agg, periods, w_irf, subplot=7,
+        label="Real wage", color=:teal, lw=2,
+        xlabel="Quarters", title="Real Wage")
+    Plots.hline!(p_agg, [0.0], subplot=7, color=:black, lw=0.6, ls=:dash, label="")
+
+    Plots.plot!(p_agg, periods, agg_infl_g, subplot=8,
+        label="Goods", color=:steelblue, lw=2,
+        xlabel="Quarters", title="Goods Inflation (ann. pp)")
+    Plots.hline!(p_agg, [0.0], subplot=8, color=:black, lw=0.6, ls=:dash, label="")
+
+    Plots.plot!(p_agg, periods, agg_infl_s, subplot=9,
+        label="Services", color=:firebrick, lw=2,
+        xlabel="Quarters", title="Services Inflation (ann. pp)")
+    Plots.hline!(p_agg, [0.0], subplot=9, color=:black, lw=0.6, ls=:dash, label="")
+
+    Plots.plot!(p_agg, periods, cs_irf, subplot=10,
+        label="Services C", color=:firebrick, lw=2,
+        xlabel="Quarters", title="Services Consumption")
+    Plots.hline!(p_agg, [0.0], subplot=10, color=:black, lw=0.6, ls=:dash, label="")
 
     save_fig(p_agg, "irf_aggregate_mfg_shock.pdf")
 
