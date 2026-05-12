@@ -505,11 +505,11 @@
 , {"residual": {"lhs": "X", "rhs": "omegaX*(PX/Q)^(-etastar)*Ystar"}}
 , {"residual": {"lhs": "X_f", "rhs": "Ystar*omegaX*(PX_f/Q_f)^(-etastar)"}}
 , {"residual": {"lhs": "Ystar", "rhs": "ystar_ss"}}
-, {"residual": {"lhs": "PV", "rhs": "Q*PVstar"}}
+, {"residual": {"lhs": "1-epsilonV+Q*epsilonV*PVstar/PV-pi*(pi-1)*kappaV+(pi-1)*beta*kappaV*pi^2/pi", "rhs": "0"}}
 , {"residual": {"lhs": "PV_f", "rhs": "Q_f*PVstar"}}
-, {"residual": {"lhs": "mkupV", "rhs": "1"}}
-, {"residual": {"lhs": "IMP", "rhs": "CFg+CFs+V"}}
-, {"residual": {"lhs": "IMP_f", "rhs": "CFg_f+CFs_f+V_f"}}
+, {"residual": {"lhs": "mkupV", "rhs": "PV/(Q*PVstar)"}}
+, {"residual": {"lhs": "IMP", "rhs": "mkupV*(CFg+CFs+V)"}}
+, {"residual": {"lhs": "IMP_f", "rhs": "mkupV*(CFg_f+CFs_f+V_f)"}}
 , {"residual": {"lhs": "V", "rhs": "V_12+V_11+V_10+V_9+V_8+V_7+V_6+V_5+V_4+V_3+V_1+V_2"}}
 , {"residual": {"lhs": "V_f", "rhs": "V_f_12+V_f_11+V_f_10+V_f_9+V_f_8+V_f_7+V_f_6+V_f_5+V_f_4+V_f_3+V_f_1+V_f_2"}}
 , {"residual": {"lhs": "CFs", "rhs": "CFs_12+CFs_11+CFs_10+CFs_9+CFs_8+CFs_7+CFs_6+CFs_5+CFs_4+CFs_3+CFs_1+CFs_2"}}
@@ -3591,21 +3591,27 @@
 , {"eq": 504, "col": 299, "var": "PX_f", "val": "(-(Ystar*omegaX*get_power_deriv(PX_f/Q_f,(-etastar),1)*1/Q_f))"}
 , {"eq": 504, "col": 300, "var": "X_f", "val": "1"}
 , {"eq": 505, "col": 35, "var": "Ystar", "val": "1"}
-, {"eq": 506, "col": 25, "var": "PV", "val": "1"}
-, {"eq": 506, "col": 31, "var": "Q", "val": "(-PVstar)"}
-, {"eq": 506, "col": 37, "var": "PVstar", "val": "(-Q)"}
+, {"eq": 506, "col": 17, "var": "pi", "val": "(pi*(beta*kappaV*pi^2+(pi-1)*beta*kappaV*2*pi)-(pi-1)*beta*kappaV*pi^2)/(pi*pi)-((pi-1)*kappaV+pi*kappaV)"}
+, {"eq": 506, "col": 25, "var": "PV", "val": "(-(Q*epsilonV*PVstar))/(PV*PV)"}
+, {"eq": 506, "col": 31, "var": "Q", "val": "epsilonV*PVstar/PV"}
+, {"eq": 506, "col": 37, "var": "PVstar", "val": "Q*epsilonV/PV"}
 , {"eq": 507, "col": 37, "var": "PVstar", "val": "(-Q_f)"}
 , {"eq": 507, "col": 280, "var": "PV_f", "val": "1"}
 , {"eq": 507, "col": 297, "var": "Q_f", "val": "(-PVstar)"}
+, {"eq": 508, "col": 25, "var": "PV", "val": "(-(1/(Q*PVstar)))"}
+, {"eq": 508, "col": 31, "var": "Q", "val": "(-((-(PV*PVstar))/(Q*PVstar*Q*PVstar)))"}
+, {"eq": 508, "col": 37, "var": "PVstar", "val": "(-((-(PV*Q))/(Q*PVstar*Q*PVstar)))"}
 , {"eq": 508, "col": 40, "var": "mkupV", "val": "1"}
-, {"eq": 509, "col": 36, "var": "V", "val": "(-1)"}
+, {"eq": 509, "col": 36, "var": "V", "val": "(-mkupV)"}
 , {"eq": 509, "col": 39, "var": "IMP", "val": "1"}
-, {"eq": 509, "col": 41, "var": "CFs", "val": "(-1)"}
-, {"eq": 509, "col": 42, "var": "CFg", "val": "(-1)"}
-, {"eq": 510, "col": 278, "var": "CFs_f", "val": "(-1)"}
-, {"eq": 510, "col": 279, "var": "CFg_f", "val": "(-1)"}
+, {"eq": 509, "col": 40, "var": "mkupV", "val": "(-(CFg+CFs+V))"}
+, {"eq": 509, "col": 41, "var": "CFs", "val": "(-mkupV)"}
+, {"eq": 509, "col": 42, "var": "CFg", "val": "(-mkupV)"}
+, {"eq": 510, "col": 40, "var": "mkupV", "val": "(-(CFg_f+CFs_f+V_f))"}
+, {"eq": 510, "col": 278, "var": "CFs_f", "val": "(-mkupV)"}
+, {"eq": 510, "col": 279, "var": "CFg_f", "val": "(-mkupV)"}
 , {"eq": 510, "col": 301, "var": "IMP_f", "val": "1"}
-, {"eq": 510, "col": 302, "var": "V_f", "val": "(-1)"}
+, {"eq": 510, "col": 302, "var": "V_f", "val": "(-mkupV)"}
 , {"eq": 511, "col": 36, "var": "V", "val": "1"}
 , {"eq": 511, "col": 155, "var": "V_1", "val": "(-1)"}
 , {"eq": 511, "col": 156, "var": "V_2", "val": "(-1)"}

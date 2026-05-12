@@ -117,13 +117,31 @@ function get_decision_rule(mr, n_endo)
     # g1_3 is the Dynare.jl shock matrix; g1_2 is forward-looking (wrong for shocks)
     for (cand1, cand2) in [(:g1_1, :g1_3), (:g1_1, :g1_2), (:ghx, :ghu), (:g1, :g2)]
         if isdefined(lre, cand1) && isdefined(lre, cand2)
-            m1 = Matrix{Float64}(getfield(lre, cand1))
-            m2 = Matrix{Float64}(getfield(lre, cand2))
-            nz = sum(abs.(m1) .> 1e-12) + sum(abs.(m2) .> 1e-12)
-            @info "Candidate ($cand1,$cand2): sizes $(size(m1))/$(size(m2))  nonzero=$nz"
-            if nz > best_nz
-                best_ghx = m1; best_ghu = m2; best_nz = nz
-                @info "  → new best: ($cand1,$cand2)"
+            v1 = getfield(lre, cand1)
+            v2 = getfield(lre, cand2)
+            # Guard: Dynare.jl may leave fields as `nothing` when the LRE
+            # solver fails (e.g. MethodError on ARM).  Skip silently.
+            if isnothing(v1) || isnothing(v2)
+                @warn "Candidate ($cand1,$cand2): skipped — field is nothing"
+                continue
+            end
+            if !isa(v1, AbstractMatrix) || !isa(v2, AbstractMatrix)
+                @warn "Candidate ($cand1,$cand2): skipped — not a matrix ($(typeof(v1)), $(typeof(v2)))"
+                continue
+            end
+            local m1, m2
+            try
+                m1 = Matrix{Float64}(v1)
+                m2 = Matrix{Float64}(v2)
+                nz = sum(abs.(m1) .> 1e-12) + sum(abs.(m2) .> 1e-12)
+                @info "Candidate ($cand1,$cand2): sizes $(size(m1))/$(size(m2))  nonzero=$nz"
+                if nz > best_nz
+                    best_ghx = m1; best_ghu = m2; best_nz = nz
+                    @info "  → new best: ($cand1,$cand2)"
+                end
+            catch e
+                @warn "Candidate ($cand1,$cand2): conversion failed — $e"
+                continue
             end
         end
     end
@@ -138,6 +156,13 @@ function get_decision_rule(mr, n_endo)
 end
 
 g1_1, g1_2 = get_decision_rule(mr, n_endo)
+
+# Report nonzero counts (parsed by parent to detect solver failures)
+_nz_total = sum(abs.(g1_1) .> 1e-12) + sum(abs.(g1_2) .> 1e-12)
+println("DECISION_RULE_NONZERO=$(_nz_total)")
+if _nz_total == 0
+    @warn "Decision rule matrices are ALL ZEROS — LRE solver likely failed for this parameterization"
+end
 
 # ---- Sigma_e ----
 Sigma_e = isdefined(context.models[1], :Sigma_e) ?

@@ -5,7 +5,7 @@ function dynamic_params_derivs(y, x, params, steady_state, it_,ss_param_deriv, s
 @inbounds begin
 T = zeros(0)
 rp = zeros(570, 607);
-gp = zeros(570, 723, 607);
+gp = zeros(570, 726, 607);
 end
 return (rp, gp)
 end

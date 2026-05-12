@@ -254,27 +254,13 @@ end
 #  THREE ε_Y CASES: NEAR-LEONTIEF / BASELINE / HIGH SUBSTITUTION              #
 # =========================================================================== #
 
-# Save baseline εY (from SMM estimates or default 0.8)
+# Use baseline εY from SMM estimates (no εY sensitivity loop)
 epsY_baseline = modepsY[1]
-nT = 40   # IRF horizon (available after loop for plotting)
+nT = 40   # IRF horizon
 
-epsY_cases = [
-    (label="Near-Leontief (εY=0.30)", short="leontief", val=0.30,
-     color=:forestgreen, ls=:dash, lw=1.8),
-    (label="Baseline (εY=$(round(epsY_baseline,digits=2)))", short="baseline",
-     val=epsY_baseline, color=:steelblue, ls=:solid, lw=2.5),
-    (label="High subst. (εY=2.0)", short="high", val=2.0,
-     color=:firebrick, ls=:dot, lw=1.8),
-]
+@printf "\n%s\n  Baseline εY = %.4f (from SMM estimates)\n%s\n" repeat("─",60) epsY_baseline repeat("─",60)
 
-case_results = Vector{Any}()
-
-for (ic, case) in enumerate(epsY_cases)
-
-@printf "\n%s\n  CASE %d/%d: %s\n%s\n" repeat("─",60) ic length(epsY_cases) case.label repeat("─",60)
-
-# Override εY for this case
-modepsY = fill(case.val, nsec)
+# εY is already set in modepsY from the SMM parameter load — no override needed
 
 
 # =========================================================================== #
@@ -442,16 +428,20 @@ project_dir   = dirname(Base.active_project())
 
 @printf "--- Running Dynare.jl (subprocess) ---\n"
 dynare_out = IOBuffer()
-proc = run(pipeline(
-    `$julia_exe --project=$project_dir $dynare_script $MOD_DIR`,
-    stdout=dynare_out, stderr=stderr), wait=true)
+dynare_cmd = ignorestatus(`$julia_exe --project=$project_dir $dynare_script $MOD_DIR`)
+dynare_proc = run(pipeline(dynare_cmd, stdout=dynare_out, stderr=stderr), wait=true)
 
 dynare_stdout = String(take!(dynare_out))
 print(dynare_stdout)
 
-if !occursin("DYNARE_SUCCESS", dynare_stdout)
-    error("Dynare subprocess failed. See output above.")
+if !success(dynare_proc)
+    error("Dynare subprocess crashed (exit code $(dynare_proc.exitcode)). See stderr above.")
 end
+
+if !occursin("DYNARE_SUCCESS", dynare_stdout)
+    error("Dynare subprocess did not report success. See output above.")
+end
+
 @printf "\n--- Dynare completed ---\n\n"
 
 
@@ -478,6 +468,21 @@ n_shocks = size(ghu, 2)
 endo_idx = Dict(nm => i for (i, nm) in enumerate(endo_names))
 
 @printf "  Variables: %d  States: %d  Shocks: %d\n" n_endo n_states n_shocks
+
+# Validate decision rules — detect Dynare solver failures (zero matrices)
+_nz_ghx = sum(abs.(ghx) .> 1e-12)
+_nz_ghu = sum(abs.(ghu) .> 1e-12)
+@printf "  Decision rule nonzeros:  ghx=%d  ghu=%d\n" _nz_ghx _nz_ghu
+if _nz_ghx == 0 || _nz_ghu == 0
+    @error """
+    ╔══════════════════════════════════════════════════════════════╗
+    ║  DECISION RULES ARE ALL ZEROS — Dynare solver failed!      ║
+    ║  This parameterization likely hit the ARM/aarch64 gees bug  ║
+    ║  or another Dynare.jl solver failure.                       ║
+    ║  IRFs for this εY case will be meaningless (flat at zero).  ║
+    ╚══════════════════════════════════════════════════════════════╝
+    """
+end
 
 # Identify eps_postar column
 # varexo order: eps_om eps_i epschi eps_pvstar eps_postar epsA_1..12 eps_xi
@@ -634,12 +639,13 @@ pv_irf  = get_irf_var("PV")    # composite non-oil import price (exchange-rate d
 alpha_L = 1.0 .- modalpha .- modalphaV   # labor cost share per sector
 
 @printf "--- Aggregate IRFs (10%% oil shock, impact period) ---\n"
-@printf "  GDP    : %+.3f%%\n" gdp_irf[1]
-@printf "  CPI (π): %+.3f%%\n" pi_irf[1]
-@printf "  RER (Q): %+.3f%%\n" q_irf[1]
-@printf "  TB     : %+.3f%%\n" tb_irf[1]
-@printf "  C      : %+.3f%%\n" c_irf[1]
-@printf "  N      : %+.3f%%\n" n_irf_v[1]
+@printf "  GDP    : %+.3f%% dev.\n" gdp_irf[1]
+@printf "  CPI (π): %+.3f ann. pp\n" (pi_irf[1]*4)
+@printf "  RER (Q): %+.3f%% dev.\n" q_irf[1]
+@printf "  TB     : %+.4f pp of GDP\n" (tb_irf[1]*TB_ss/GDP_ss)
+@printf "  C      : %+.3f%% dev.\n" c_irf[1]
+@printf "  N      : %+.3f%% dev.\n" n_irf_v[1]
+@printf "  r      : %+.3f ann. pp\n" (r_irf[1]*4)
 @printf "\n"
 
 # Peak effects
@@ -701,34 +707,13 @@ ge_h2 = _mc_decomp(2, ph_irf_mat, mc_irf_mat, po_irf, pv_irf, w_irf,
 ge_h4 = _mc_decomp(4, ph_irf_mat, mc_irf_mat, po_irf, pv_irf, w_irf,
                     modalphaV, modalphaOil, modalpha, alpha_L_vec, modbeta)
 
-# ---- Store results for this εY case ----
-push!(case_results, (
-    case = case,
-    get_irf = let _irf=copy(irf_pct), _idx=copy(endo_idx), _ss=copy(ss_vec), _nT=n_irf
-        (vn::String) -> begin i = get(_idx, vn, 0); i==0 ? zeros(_nT) : _irf[i,:] end
-    end,
-    gdp_irf=copy(gdp_irf), pi_irf=copy(pi_irf), q_irf=copy(q_irf), tb_irf=copy(tb_irf),
-    c_irf=copy(c_irf), cg_irf=copy(cg_irf), cs_irf=copy(cs_irf),
-    n_irf_v=copy(n_irf_v), r_irf=copy(r_irf), w_irf=copy(w_irf),
-    po_irf=copy(po_irf), pv_irf=copy(pv_irf),
-    ph_irf_mat=copy(ph_irf_mat), mc_irf_mat=copy(mc_irf_mat), l_irf_mat=copy(l_irf_mat),
-    ygap_irf_mat=copy(ygap_irf_mat), ygap_irf=copy(ygap_irf), gdpgap_irf=copy(gdpgap_irf),
-    pi_sec_mat=copy(pi_sec_mat),
-    pi_agg_irf=copy(pi_agg_irf), pi_goods_irf=copy(pi_goods_irf), pi_serv_irf=copy(pi_serv_irf),
-    infl_irf_impact=copy(infl_irf_impact), infl_6m=copy(infl_6m), infl_12m=copy(infl_12m),
-    ge_h1=ge_h1, ge_h2=ge_h2, ge_h4=ge_h4,
-    direct_mc=copy(direct_mc), network_mc=copy(network_mc),
-    total_mc_approx=copy(total_mc_approx), amp_ratio=copy(amp_ratio),
-    mc_irf_impact=copy(mc_irf_impact), y_irf_impact=copy(y_irf_impact),
-    ph_irf_impact=copy(ph_irf_impact),
-    Yi_ss=copy(Yi_ss), L_ss=copy(L_ss), GDP_ss=GDP_ss, TB_ss=TB_ss, N_ss=N_ss,
-    C_gi_ss=copy(C_gi_ss), C_si_ss=copy(C_si_ss), alpha_L=copy(alpha_L_vec),
-    agg_direct=agg_direct, agg_network=agg_network, agg_total=agg_total, agg_amp=agg_amp,
-))
+# Helper: retrieve IRF for a named variable (used by plotting code)
+get_irf(vn::String) = begin
+    i = get(endo_idx, vn, 0)
+    i == 0 ? zeros(n_irf) : irf_pct[i, :]
+end
 
-end  # for epsY_cases
-
-@printf "\n%s\n  All %d εY cases computed.\n%s\n" repeat("=",60) length(epsY_cases) repeat("=",60)
+@printf "\n%s\n  Baseline case computed.\n%s\n" repeat("=",60) repeat("=",60)
 
 
 # =========================================================================== #
@@ -775,7 +760,7 @@ function sync_table(fname)
 end
 
 if _HAS_PLOTS[]
-    @printf "\n--- Generating figures (three εY cases overlaid) ---\n"
+    @printf "\n--- Generating figures (baseline εY = %.2f) ---\n" epsY_baseline
     periods = 1:nT
 
     short_names = [s[1:min(18,length(s))] for s in names_vec]
@@ -786,237 +771,183 @@ if _HAS_PLOTS[]
         "Real Estate", "Business Serv.", "Personal Serv.", "Public Admin.",
     ]
 
-    # Legend labels for the three εY cases
-    case_labels = [cr.case.label for cr in case_results]
+    baseline_label = "Baseline (εY=$(round(epsY_baseline,digits=2)))"
+    baseline_color = :steelblue
+    baseline_lw    = 2.5
 
     # ================================================================== #
-    # Helper: overlay εY cases on a single-panel plot                     #
-    # ================================================================== #
-    function overlay_agg!(p, field::Symbol; subplot=nothing, kw...)
-        for cr in case_results
-            c = cr.case
-            irf = getfield(cr, field)
-            kwargs = isnothing(subplot) ?
-                (label=c.label, color=c.color, lw=c.lw, ls=c.ls, kw...) :
-                (subplot=subplot, label=c.label, color=c.color, lw=c.lw, ls=c.ls, kw...)
-            Plots.plot!(p, periods, irf; kwargs...)
-        end
-    end
-
-    # ---- Use only baseline case for all plots ----
-    case_results_all = copy(case_results)   # keep full set if needed later
-    case_results = [case_results[findfirst(cr -> cr.case.short == "baseline", case_results)]]
-
-    # ================================================================== #
-    #  Figure 1: Aggregate IRFs (2×3) — baseline only                    #
+    #  Figure 1: Aggregate IRFs (2×5)                                    #
     # ================================================================== #
     agg_panels = [
-        (:gdp_irf, "GDP", "% dev."),
-        (:pi_irf,  "CPI Inflation", "% dev."),
-        (:q_irf,   "Real Exchange Rate", "% dev."),
-        (:tb_irf,  "Trade Balance", "% dev."),
-        (:cg_irf,  "Goods Consumption", "% dev."),
-        (:r_irf,   "Nominal Interest Rate", "% dev."),
-        (:w_irf,   "Real Wage", "% dev."),
-        (:pi_goods_irf,  "Goods Inflation", "ann. pp"),
-        (:pi_serv_irf,   "Services Inflation", "ann. pp"),
-        (:cs_irf,  "Services Consumption", "% dev."),
+        (gdp_irf, "GDP", "% dev.", 1.0),
+        (pi_irf,  "CPI Inflation", "ann. pp", 4.0),
+        (q_irf,   "Real Exchange Rate", "% dev.", 1.0),
+        (tb_irf,  "Trade Balance", "pp of GDP", TB_ss/GDP_ss),
+        (cg_irf,  "Goods Consumption", "% dev.", 1.0),
+        (r_irf,   "Nominal Interest Rate", "ann. pp", 4.0),
+        (w_irf,   "Real Wage", "% dev.", 1.0),
+        (pi_goods_irf,  "Goods Inflation", "ann. pp", 1.0),
+        (pi_serv_irf,   "Services Inflation", "ann. pp", 1.0),
+        (cs_irf,  "Services Consumption", "% dev.", 1.0),
     ]
     p_agg = Plots.plot(layout=(2,5), size=(2000,700),
         plot_title="10% Oil Price Shock — Aggregate Responses",
         titlefontsize=12, margin=5Plots.mm)
-    for (k, (fld, ttl, yl)) in enumerate(agg_panels)
-        for cr in case_results
-            c = cr.case
-            Plots.plot!(p_agg, periods, getfield(cr, fld), subplot=k,
-                label=(k==1 ? c.label : ""), color=c.color, lw=c.lw, ls=c.ls,
-                title=ttl, ylabel=(k∈[1,6] ? yl : ""),
-                xlabel=(k>5 ? "Quarters" : ""))
-        end
+    for (k, (irf_v, ttl, yl, scl)) in enumerate(agg_panels)
+        Plots.plot!(p_agg, periods, irf_v .* scl, subplot=k,
+            label=(k==1 ? baseline_label : ""), color=baseline_color, lw=baseline_lw,
+            title=ttl, ylabel=(k∈[1,6] ? yl : ""),
+            xlabel=(k>5 ? "Quarters" : ""))
         Plots.hline!(p_agg, [0.0], subplot=k, color=:black, lw=0.6, ls=:dash, label="")
     end
     save_fig(p_agg, "irf_aggregate_oil_shock.pdf")
 
 
     # ================================================================== #
-    #  Figure 2: Sectoral Output IRFs (4×3) — three lines per subplot     #
+    #  Figure 2: Sectoral Output IRFs (4×3)                               #
     # ================================================================== #
     p_sec_y = Plots.plot(layout=(4,3), size=(1200,900),
         plot_title="10% Oil Shock — Sectoral Output",
         titlefontsize=10)
     for i in 1:12
-        for cr in case_results
-            c = cr.case
-            yi = cr.get_irf("Y_$(i)")
-            Plots.plot!(p_sec_y, periods, yi, subplot=i,
-                label=(i==1 ? c.label : ""), color=c.color, lw=c.lw, ls=c.ls,
-                title=short_names[i], titlefontsize=9)
-        end
+        Plots.plot!(p_sec_y, periods, get_irf("Y_$(i)"), subplot=i,
+            label="", color=baseline_color, lw=baseline_lw,
+            title=short_names[i], titlefontsize=9)
         Plots.hline!(p_sec_y, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
     end
     save_fig(p_sec_y, "irf_sectoral_Y_oil_shock.pdf")
 
 
     # ================================================================== #
-    #  Figure 3: Sectoral Price IRFs (4×3) — three lines                  #
+    #  Figure 3: Sectoral Price IRFs (4×3)                                #
     # ================================================================== #
     p_sec_ph = Plots.plot(layout=(4,3), size=(1200,900),
         plot_title="10% Oil Shock — Sectoral Home Prices",
         titlefontsize=10)
     for i in 1:12
-        for cr in case_results
-            c = cr.case
-            phi = cr.get_irf("PH_$(i)")
-            Plots.plot!(p_sec_ph, periods, phi, subplot=i,
-                label=(i==1 ? c.label : ""), color=c.color, lw=c.lw, ls=c.ls,
-                title=short_names[i], titlefontsize=9)
-        end
+        Plots.plot!(p_sec_ph, periods, get_irf("PH_$(i)"), subplot=i,
+            label="", color=baseline_color, lw=baseline_lw,
+            title=short_names[i], titlefontsize=9)
         Plots.hline!(p_sec_ph, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
     end
     save_fig(p_sec_ph, "irf_sectoral_PH_oil_shock.pdf")
 
 
     # ================================================================== #
-    #  Figure 5b: Sectoral Inflation IRFs (4×3) — three lines            #
+    #  Figure 5b: Sectoral Inflation IRFs (4×3)                          #
     # ================================================================== #
     p_sec_pi = Plots.plot(layout=(4,3), size=(1200,900),
         plot_title="10% Oil Shock — Sectoral Home-Price Inflation",
         titlefontsize=10)
     for i in 1:12
-        for cr in case_results
-            c = cr.case
-            Plots.plot!(p_sec_pi, periods, cr.pi_sec_mat[i, :], subplot=i,
-                label=(i==1 ? c.label : ""), color=c.color, lw=c.lw, ls=c.ls,
-                title=short_names[i], titlefontsize=9)
-        end
+        Plots.plot!(p_sec_pi, periods, pi_sec_mat[i, :], subplot=i,
+            label="", color=baseline_color, lw=baseline_lw,
+            title=short_names[i], titlefontsize=9)
         Plots.hline!(p_sec_pi, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
     end
     save_fig(p_sec_pi, "irf_sectoral_inflation_oil.pdf")
 
 
     # ================================================================== #
-    #  Figure 5c: Aggregate Inflation by Group — three lines per group    #
+    #  Figure 5c: Aggregate Inflation by Group                           #
     # ================================================================== #
     p_pi_agg = Plots.plot(size=(1000, 500),
         title="10% Oil Shock — Aggregate Home-Price Inflation",
         titlefontsize=11, xlabel="Quarters", ylabel="Ann. pp dev. from SS",
         legend=:topright, margin=5Plots.mm)
-    for cr in case_results
-        c = cr.case
-        Plots.plot!(p_pi_agg, periods, cr.pi_agg_irf,
-            label="Agg. — $(c.label)", color=c.color, lw=c.lw, ls=c.ls)
-    end
+    Plots.plot!(p_pi_agg, periods, pi_agg_irf,
+        label="Aggregate", color=baseline_color, lw=baseline_lw)
     Plots.hline!(p_pi_agg, [0.0], color=:black, lw=0.5, ls=:dash, label="")
     save_fig(p_pi_agg, "irf_aggregate_inflation_oil.pdf")
 
 
     # ================================================================== #
-    #  Figure 5d: Goods vs Services Inflation — baseline εY only         #
+    #  Figure 5d: Goods vs Services Inflation                            #
     # ================================================================== #
-    cr_base = case_results[1]  # baseline (filtered above)
     p_gs_pi = Plots.plot(size=(800, 500),
         title="10% Oil Shock — Home-Price Inflation: Goods vs Services",
         titlefontsize=11, xlabel="Quarters", ylabel="Ann. pp dev. from SS",
         legend=:topright, margin=5Plots.mm)
-    Plots.plot!(p_gs_pi, periods, cr_base.pi_agg_irf,
+    Plots.plot!(p_gs_pi, periods, pi_agg_irf,
         label="Aggregate", color=:black, lw=2.5, ls=:solid)
-    Plots.plot!(p_gs_pi, periods, cr_base.pi_goods_irf,
+    Plots.plot!(p_gs_pi, periods, pi_goods_irf,
         label="Goods (sectors 1–5)", color=:steelblue, lw=2, ls=:dash)
-    Plots.plot!(p_gs_pi, periods, cr_base.pi_serv_irf,
+    Plots.plot!(p_gs_pi, periods, pi_serv_irf,
         label="Services (sectors 6–12)", color=:firebrick, lw=2, ls=:dot)
     Plots.hline!(p_gs_pi, [0.0], color=:black, lw=0.5, ls=:dash, label="")
     save_fig(p_gs_pi, "irf_goods_vs_services_inflation_oil.pdf")
 
 
     # ================================================================== #
-    #  Figure 7: Sectoral MC IRFs (4×3) — three lines                    #
+    #  Figure 7: Sectoral MC IRFs (4×3)                                  #
     # ================================================================== #
     p_sec_mc = Plots.plot(layout=(4,3), size=(1200,900),
         plot_title="10% Oil Shock — Sectoral Marginal Cost",
         titlefontsize=10)
     for i in 1:12
-        for cr in case_results
-            c = cr.case
-            Plots.plot!(p_sec_mc, periods, cr.mc_irf_mat[i, :], subplot=i,
-                label=(i==1 ? c.label : ""), color=c.color, lw=c.lw, ls=c.ls,
-                title=short_names[i], titlefontsize=9)
-        end
+        Plots.plot!(p_sec_mc, periods, mc_irf_mat[i, :], subplot=i,
+            label="", color=baseline_color, lw=baseline_lw,
+            title=short_names[i], titlefontsize=9)
         Plots.hline!(p_sec_mc, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
     end
     save_fig(p_sec_mc, "irf_sectoral_MC_oil_shock.pdf")
 
 
     # ================================================================== #
-    #  Figure 8: Aggregate Labor Market (1×2) — three lines per panel    #
+    #  Figure 8: Aggregate Labor Market (1×2)                            #
     # ================================================================== #
     p_lab_agg = Plots.plot(layout=(1,2), size=(1000, 400),
         plot_title="10% Oil Shock — Aggregate Labor Market",
         titlefontsize=11, margin=5Plots.mm)
-    for cr in case_results
-        c = cr.case
-        Plots.plot!(p_lab_agg, periods, cr.n_irf_v, subplot=1,
-            label=c.label, color=c.color, lw=c.lw, ls=c.ls,
-            xlabel="Quarters", ylabel="% dev. from SS", title="Aggregate Employment")
-        Plots.plot!(p_lab_agg, periods, cr.w_irf, subplot=2,
-            label=c.label, color=c.color, lw=c.lw, ls=c.ls,
-            xlabel="Quarters", ylabel="% dev. from SS", title="Real Wage")
-    end
+    Plots.plot!(p_lab_agg, periods, n_irf_v, subplot=1,
+        label=baseline_label, color=baseline_color, lw=baseline_lw,
+        xlabel="Quarters", ylabel="% dev. from SS", title="Aggregate Employment")
+    Plots.plot!(p_lab_agg, periods, w_irf, subplot=2,
+        label=baseline_label, color=baseline_color, lw=baseline_lw,
+        xlabel="Quarters", ylabel="% dev. from SS", title="Real Wage")
     Plots.hline!(p_lab_agg, [0.0], subplot=1, color=:black, lw=0.6, ls=:dash, label="")
     Plots.hline!(p_lab_agg, [0.0], subplot=2, color=:black, lw=0.6, ls=:dash, label="")
     save_fig(p_lab_agg, "irf_labor_aggregate_oil_shock.pdf")
 
 
     # ================================================================== #
-    #  Figure 9: Sectoral Employment (4×3) — three lines                 #
+    #  Figure 9: Sectoral Employment (4×3)                               #
     # ================================================================== #
     p_sec_l = Plots.plot(layout=(4,3), size=(1200,900),
         plot_title="10% Oil Shock — Sectoral Employment",
         titlefontsize=10)
     for i in 1:12
-        for cr in case_results
-            c = cr.case
-            Plots.plot!(p_sec_l, periods, cr.l_irf_mat[i, :], subplot=i,
-                label=(i==1 ? c.label : ""), color=c.color, lw=c.lw, ls=c.ls,
-                title=short_names[i], titlefontsize=9)
-        end
+        Plots.plot!(p_sec_l, periods, l_irf_mat[i, :], subplot=i,
+            label="", color=baseline_color, lw=baseline_lw,
+            title=short_names[i], titlefontsize=9)
         Plots.hline!(p_sec_l, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
     end
     save_fig(p_sec_l, "irf_sectoral_L_oil_shock.pdf")
 
 
     # ================================================================== #
-    #  Figure 10: Aggregate Output Gap (1×2) — three lines per panel     #
+    #  Figure 10: GDP Gap                                                #
     # ================================================================== #
-    p_gap_agg = Plots.plot(layout=(1,2), size=(1000, 400),
-        plot_title="10% Oil Shock — Aggregate Output Gap",
-        titlefontsize=11, margin=5Plots.mm)
-    for cr in case_results
-        c = cr.case
-        Plots.plot!(p_gap_agg, periods, cr.ygap_irf, subplot=1,
-            label=c.label, color=c.color, lw=c.lw, ls=c.ls,
-            xlabel="Quarters", ylabel="% dev. from SS", title="Output Gap (Ygap)")
-        Plots.plot!(p_gap_agg, periods, cr.gdpgap_irf, subplot=2,
-            label=c.label, color=c.color, lw=c.lw, ls=c.ls,
-            xlabel="Quarters", ylabel="% dev. from SS", title="GDP Gap")
-    end
-    Plots.hline!(p_gap_agg, [0.0], subplot=1, color=:black, lw=0.6, ls=:dash, label="")
-    Plots.hline!(p_gap_agg, [0.0], subplot=2, color=:black, lw=0.6, ls=:dash, label="")
-    save_fig(p_gap_agg, "irf_outputgap_aggregate_oil_shock.pdf")
+    p_gap_agg = Plots.plot(size=(700, 400),
+        title="10% Oil Shock — GDP Gap",
+        titlefontsize=11, margin=5Plots.mm,
+        xlabel="Quarters", ylabel="% dev. from SS")
+    Plots.plot!(p_gap_agg, periods, gdpgap_irf,
+        label=baseline_label, color=baseline_color, lw=baseline_lw)
+    Plots.hline!(p_gap_agg, [0.0], color=:black, lw=0.6, ls=:dash, label="")
+    save_fig(p_gap_agg, "irf_gdpgap_aggregate_oil_shock.pdf")
 
 
     # ================================================================== #
-    #  Figure 11: Sectoral Output Gaps (4×3) — three lines               #
+    #  Figure 11: Sectoral Output Gaps (4×3)                             #
     # ================================================================== #
     p_sec_ygap = Plots.plot(layout=(4,3), size=(1200,900),
         plot_title="10% Oil Shock — Sectoral Output Gap",
         titlefontsize=10)
     for i in 1:12
-        for cr in case_results
-            c = cr.case
-            Plots.plot!(p_sec_ygap, periods, cr.ygap_irf_mat[i, :], subplot=i,
-                label=(i==1 ? c.label : ""), color=c.color, lw=c.lw, ls=c.ls,
-                title=short_names[i], titlefontsize=9)
-        end
+        Plots.plot!(p_sec_ygap, periods, ygap_irf_mat[i, :], subplot=i,
+            label="", color=baseline_color, lw=baseline_lw,
+            title=short_names[i], titlefontsize=9)
         Plots.hline!(p_sec_ygap, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
     end
     save_fig(p_sec_ygap, "irf_sectoral_Ygap_oil_shock.pdf")
@@ -1100,59 +1031,49 @@ if _HAS_PLOTS[]
         return p
     end
 
-    # Generate decomposition figures for each εY case
-    for cr in case_results
-        tag = cr.case.short
-        epsY_str = "$(round(cr.case.val, digits=2))"
+    # Generate decomposition figures (baseline only)
+    epsY_str = "$(round(epsY_baseline, digits=2))"
 
-        # Impact (h = 1)
-        ge1 = cr.ge_h1
-        p1 = make_ge_decomp_fig(
-            ge1.dir, ge1.net, ge1.noi, ge1.lab, ge1.res, ge1.mc,
-            cr.infl_irf_impact,
-            "Home-price inflation (q-o-q pp, t=1)",
-            "Oil Shock — GE MC Decomposition (Impact, εY=$(epsY_str))",
-            "Percentage points (t = 1)")
-        save_fig(p1, "decomposition_mc_inflation_oil_$(tag).pdf")
+    # Impact (h = 1)
+    p1 = make_ge_decomp_fig(
+        ge_h1.dir, ge_h1.net, ge_h1.noi, ge_h1.lab, ge_h1.res, ge_h1.mc,
+        infl_irf_impact,
+        "Home-price inflation (q-o-q pp, t=1)",
+        "Oil Shock — GE MC Decomposition (Impact, εY=$(epsY_str))",
+        "Percentage points (t = 1)")
+    save_fig(p1, "decomposition_mc_inflation_oil_baseline.pdf")
 
-        # 6-month (h = 2)
-        ge2 = cr.ge_h2
-        p2 = make_ge_decomp_fig(
-            ge2.dir, ge2.net, ge2.noi, ge2.lab, ge2.res, ge2.mc,
-            cr.infl_6m,
-            "Home-price inflation (6-month cumulative, pp)",
-            "Oil Shock — GE MC Decomposition (6-Month, εY=$(epsY_str))",
-            "Percentage points")
-        save_fig(p2, "decomposition_mc_inflation_6m_oil_$(tag).pdf")
+    # 6-month (h = 2)
+    p2 = make_ge_decomp_fig(
+        ge_h2.dir, ge_h2.net, ge_h2.noi, ge_h2.lab, ge_h2.res, ge_h2.mc,
+        infl_6m,
+        "Home-price inflation (6-month cumulative, pp)",
+        "Oil Shock — GE MC Decomposition (6-Month, εY=$(epsY_str))",
+        "Percentage points")
+    save_fig(p2, "decomposition_mc_inflation_6m_oil_baseline.pdf")
 
-        # 12-month (h = 4)
-        ge4 = cr.ge_h4
-        p4 = make_ge_decomp_fig(
-            ge4.dir, ge4.net, ge4.noi, ge4.lab, ge4.res, ge4.mc,
-            cr.infl_12m,
-            "Home-price inflation (12-month cumulative, pp)",
-            "Oil Shock — GE MC Decomposition (12-Month, εY=$(epsY_str))",
-            "Percentage points")
-        save_fig(p4, "decomposition_mc_inflation_12m_oil_$(tag).pdf")
+    # 12-month (h = 4)
+    p4 = make_ge_decomp_fig(
+        ge_h4.dir, ge_h4.net, ge_h4.noi, ge_h4.lab, ge_h4.res, ge_h4.mc,
+        infl_12m,
+        "Home-price inflation (12-month cumulative, pp)",
+        "Oil Shock — GE MC Decomposition (12-Month, εY=$(epsY_str))",
+        "Percentage points")
+    save_fig(p4, "decomposition_mc_inflation_12m_oil_baseline.pdf")
 
-        @printf "  Decomposition figures saved for case: %s\n" cr.case.label
-    end
+    @printf "  Decomposition figures saved (baseline)\n"
 
-    # ---- Output + MC decomposition (impact) — one per εY case ---- #
-    for cr in case_results
-        tag = cr.case.short
-        epsY_str = "$(round(cr.case.val, digits=2))"
-        p_out = groupedbar(
-            [cr.y_irf_impact cr.mc_irf_impact],
-            xticks=(1:12, bar_names), xrotation=55,
-            label=["Output Y_i (% dev.)" "MC_i (% dev.)"],
-            color=[:steelblue :firebrick],
-            ylabel="% change from SS (t = 1)",
-            title="Oil Shock Impact: Output & MC (εY=$(epsY_str))",
-            titlefontsize=12, size=(1400, 600), legend=:topright,
-            bottom_margin=24Plots.mm, left_margin=14Plots.mm, right_margin=5Plots.mm)
-        save_fig(p_out, "decomposition_output_oil_$(tag).pdf")
-    end
+    # ---- Output + MC decomposition (impact) ---- #
+    p_out = groupedbar(
+        [y_irf_impact mc_irf_impact],
+        xticks=(1:12, bar_names), xrotation=55,
+        label=["Output Y_i (% dev.)" "MC_i (% dev.)"],
+        color=[:steelblue :firebrick],
+        ylabel="% change from SS (t = 1)",
+        title="Oil Shock Impact: Output & MC (εY=$(epsY_str))",
+        titlefontsize=12, size=(1400, 600), legend=:topright,
+        bottom_margin=24Plots.mm, left_margin=14Plots.mm, right_margin=5Plots.mm)
+    save_fig(p_out, "decomposition_output_oil_baseline.pdf")
 
 
 else
@@ -1164,31 +1085,9 @@ end
 #  GENERATE LaTeX TABLES                                                       #
 # =========================================================================== #
 
-@printf "\n--- Generating LaTeX tables (baseline εY case) ---\n"
+@printf "\n--- Generating LaTeX tables (baseline εY = %.2f) ---\n" epsY_baseline
 
-# Use baseline case for tables
-baseline_idx = findfirst(cr -> cr.case.short == "baseline", case_results)
-bl = case_results[baseline_idx]
-direct_mc       = bl.direct_mc
-network_mc      = bl.network_mc
-total_mc_approx = bl.total_mc_approx
-amp_ratio       = bl.amp_ratio
-y_irf_impact    = bl.y_irf_impact
-mc_irf_impact   = bl.mc_irf_impact
-gdp_irf         = bl.gdp_irf
-pi_irf          = bl.pi_irf
-q_irf           = bl.q_irf
-tb_irf          = bl.tb_irf
-c_irf           = bl.c_irf
-cg_irf          = bl.cg_irf
-cs_irf          = bl.cs_irf
-n_irf_v         = bl.n_irf_v
-r_irf           = bl.r_irf
-w_irf           = bl.w_irf
-agg_direct      = bl.agg_direct
-agg_network     = bl.agg_network
-agg_total       = bl.agg_total
-agg_amp         = bl.agg_amp
+# All variables are already in scope from the single baseline computation
 
 # ---- Table 1: Sectoral Decomposition ---- #
 # English abbreviated sector names (consistent with bar_names used in figures)
@@ -1260,15 +1159,15 @@ open(joinpath(TABLES_DIR, "oil_shock_aggregates.tex"), "w") do f
     println(f, "\\midrule")
 
     vars_agg = [
-        ("GDP",          "GDP",   gdp_irf),
-        ("CPI Inflation","pi",    pi_irf),
-        ("Consumption",  "C",     c_irf),
-        ("Employment",   "N",     n_irf_v),
-        ("Real Exch. Rate","Q",   q_irf),
-        ("Trade Balance","TB",    tb_irf),
-        ("Policy Rate",  "r",     r_irf),
+        ("GDP",            "GDP",  gdp_irf,              "\\% dev."),
+        ("CPI Inflation",  "pi",   pi_irf .* 4,          "ann.\\ pp"),
+        ("Consumption",    "C",    c_irf,                 "\\% dev."),
+        ("Employment",     "N",    n_irf_v,               "\\% dev."),
+        ("Real Exch.\\ Rate","Q",  q_irf,                 "\\% dev."),
+        ("Trade Balance",  "TB",   tb_irf .* (TB_ss/GDP_ss), "pp of GDP"),
+        ("Policy Rate",    "r",    r_irf .* 4,            "ann.\\ pp"),
     ]
-    for (label, _, irf_v) in vars_agg
+    for (label, _, irf_v, unit) in vars_agg
         impact = irf_v[1]
         ext_val = abs(minimum(irf_v)) > abs(maximum(irf_v)) ? minimum(irf_v) : maximum(irf_v)
         ext_q   = abs(minimum(irf_v)) > abs(maximum(irf_v)) ? argmin(irf_v) : argmax(irf_v)
@@ -1279,7 +1178,7 @@ open(joinpath(TABLES_DIR, "oil_shock_aggregates.tex"), "w") do f
     println(f, "\\end{tabular}")
     println(f, "\\begin{tablenotes}[flushleft]")
     println(f, "\\footnotesize")
-    println(f, "\\item \\textit{Notes:} All values in percentage deviations from steady state. The shock is a one-time 10\\% increase in the world oil price \$P^{O*}_t\$ with persistence \$\\rho = $(rho_postar_val)\$. Impact = quarter 1 response. Trough/Peak = extreme response over 40 quarters.")
+    println(f, "\\item \\textit{Notes:} GDP, consumption, employment, and RER in \\% deviations from SS; inflation and policy rate in annualized pp; trade balance in pp of GDP. The shock is a one-time 10\\% increase in the world oil price \$P^{O*}_t\$ with persistence \$\\rho = $(rho_postar_val)\$. Impact = quarter 1 response. Trough/Peak = extreme response over 40 quarters.")
     println(f, "\\end{tablenotes}")
     println(f, "\\end{threeparttable}")
     println(f, "\\end{table}")
@@ -1300,46 +1199,39 @@ end
 
 # ---- Save IRF data as CSV for external use (baseline case) ---- #
 # Reconstruct the IRF long-format DataFrame from the baseline case's stored get_irf
-# Save a compact CSV with key variables for each εY case
-for cr in case_results
-    tag = cr.case.short
+# Save IRF data as CSV (baseline case)
+let
     vars_to_save = ["GDP", "pi", "Q", "TB", "C", "N", "w", "r"]
     for i in 1:nsec
         push!(vars_to_save, "Y_$(i)", "PH_$(i)", "MC_$(i)", "L_$(i)")
     end
     rows = []
     for vn in vars_to_save
-        irf_v = cr.get_irf(vn)
+        irf_v = get_irf(vn)
         for h in 1:nT
             push!(rows, (period=h, variable=vn, value=irf_v[h]))
         end
     end
     df_out = DataFrame(rows)
-    CSV.write(joinpath(TABLES_DIR, "oil_shock_irfs_$(tag).csv"), df_out)
-    @printf "  Saved: oil_shock_irfs_%s.csv\n" tag
-end
-# Also save baseline as the default name (for mfg_shock comparison)
-let bl_tag = case_results[baseline_idx].case.short
-    src = joinpath(TABLES_DIR, "oil_shock_irfs_$(bl_tag).csv")
-    dst = joinpath(TABLES_DIR, "oil_shock_irfs.csv")
-    cp(src, dst; force=true)
-    @printf "  Saved: oil_shock_irfs.csv (copy of baseline)\n"
+    CSV.write(joinpath(TABLES_DIR, "oil_shock_irfs_baseline.csv"), df_out)
+    CSV.write(joinpath(TABLES_DIR, "oil_shock_irfs.csv"), df_out)
+    @printf "  Saved: oil_shock_irfs_baseline.csv / oil_shock_irfs.csv\n"
 end
 
-# Save decomposition data (baseline)
+# Save decomposition data
 df_decomp = DataFrame(
     sector    = 1:nsec,
     name      = names_vec,
     oil_share = modalphaOil,
     alphaV    = modalphaV,
-    direct_mc = bl.direct_mc,
-    network_mc= bl.network_mc,
-    total_mc  = bl.total_mc_approx,
-    amp_ratio = bl.amp_ratio,
-    mc_irf    = bl.mc_irf_impact,
-    y_irf     = bl.y_irf_impact,
-    ph_irf    = bl.ph_irf_impact,
-    yi_ss     = bl.Yi_ss,
+    direct_mc = direct_mc,
+    network_mc= network_mc,
+    total_mc  = total_mc_approx,
+    amp_ratio = amp_ratio,
+    mc_irf    = mc_irf_impact,
+    y_irf     = y_irf_impact,
+    ph_irf    = ph_irf_impact,
+    yi_ss     = Yi_ss,
 )
 CSV.write(joinpath(TABLES_DIR, "oil_shock_decomposition.csv"), df_decomp)
 @printf "  Saved: oil_shock_decomposition.csv\n"

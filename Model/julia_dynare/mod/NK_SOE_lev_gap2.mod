@@ -600,17 +600,17 @@ X_f = omegaX*(PX_f/Q_f)^(-etastar)*Ystar;
 
 Ystar=ystar_ss;
 
-%1 - epsilonV + epsilonV*Q*PVstar/PV 
-%- kappaV*(pi*PV/PV(-1)-1)*pi*PV/PV(-1)
-%    + beta*(C(+1)/C)^(-gamma)*kappaV*(pi(+1)*PV(+1)/PV-1)
-%    *(pi(+1)*PV(+1)/PV)^2/pi(+1)*V(+1)/V =0; 
-    
+// Rotemberg pricing for imports (κ_V adjustment cost)
+1 - epsilonV + epsilonV*Q*PVstar/PV
+- kappaV*(pi*PV/PV(-1)-1)*pi*PV/PV(-1)
+    + beta*(C(+1)/C)^(-gamma)*kappaV*(pi(+1)*PV(+1)/PV-1)
+    *(pi(+1)*PV(+1)/PV)^2/pi(+1)*V(+1)/V =0;
 
-PV=Q*PVstar;
+// Flexible-price counterpart: law of one price
 PV_f=Q_f*PVstar;
 
 
-mkupV=1; //PV/(Q*PVstar);
+mkupV=PV/(Q*PVstar);
 
 IMP=mkupV*(V+CFs+CFg);
 IMP_f=mkupV*(V_f+CFs_f+CFg_f);
