@@ -182,7 +182,10 @@ modalphaV = alpha_V
 # =========================================================================== #
 
 beta_val = 0.986;  epsilon = 10.0;  gamma = 2.0;  psi = 1.0;  chi = 1.0
-modkappa = theta_vec .* (epsilon-1) ./ ((1 .- theta_vec) .* (1 .- theta_vec .* beta_val))
+# theta_vec is the FREQUENCY of price adjustment (fraction of firms that reset each
+# quarter). Calvo stickiness = probability of NOT adjusting = 1 - theta_vec.
+stick    = 1 .- theta_vec
+modkappa = stick .* (epsilon - 1) ./ ((1 .- stick) .* (1 .- stick .* beta_val))
 
 goods    = spend_good .> spend_serv
 services = spend_serv .> spend_good
@@ -251,6 +254,17 @@ if isfile(smm_est_file)
     isigma_tfp_val   = [est["isigma_tfp_$(i)"] for i in 1:nsec]
     haskey(est, "etastar") && (etastar_val = est["etastar"])
     @printf "  Loaded SMM estimates from %s\n" smm_est_file
+end
+
+# ---- Optional εY override (e.g. paper baseline εY = 0.8) ------------------ #
+# Set ENV["EPSY_OVERRIDE"] (e.g. `EPSY_OVERRIDE=0.8 julia --project=. …`) to
+# override the production-input elasticity AFTER the SMM load. εY<1 = inputs are
+# complements (paper baseline), εY>1 = substitutes. Propagates to the
+# subprocesses launched by run_all_shocks.jl.
+if haskey(ENV, "EPSY_OVERRIDE")
+    _epsY_ovr = parse(Float64, ENV["EPSY_OVERRIDE"])
+    modepsY = fill(_epsY_ovr, nsec)
+    @printf "  εY OVERRIDE active: εY = %.4f (overrides SMM/default)\n" _epsY_ovr
 end
 
 
@@ -583,6 +597,12 @@ y_irf_impact  = y_irf_mat[:, 1]
 mc_irf_impact = mc_irf_mat[:, 1]
 ph_irf_impact = ph_irf_mat[:, 1]
 
+# Real sectoral VALUE ADDED (GDP-consistent). Reported as "Y_i" in the
+# decomposition figure/table: gross output double-counts intermediates and can
+# rise under a negative TFP shock even as value added (and GDP) falls.
+va_irf_mat    = sectoral_va_irf(get_irf_var, nsec, n_irf, Yi_ss, M_ss, Vi_ss, pH_ss, PMi_ss, PV_ss)
+va_irf_impact = va_irf_mat[:, 1]
+
 # Sectoral & group home-price inflation (shared helper)
 infl = compute_inflation_aggregates(ph_irf_mat, pi_irf, C_gi_ss, C_si_ss, nsec, n_irf)
 
@@ -641,6 +661,7 @@ ctx = (
     y_irf_mat=y_irf_mat, ph_irf_mat=ph_irf_mat, mc_irf_mat=mc_irf_mat,
     l_irf_mat=l_irf_mat, ygap_irf_mat=ygap_irf_mat,
     y_irf_impact=y_irf_impact, mc_irf_impact=mc_irf_impact, ph_irf_impact=ph_irf_impact,
+    va_irf_impact=va_irf_impact, va_irf_mat=va_irf_mat,
     pi_sec_mat=infl.pi_sec_mat, pi_agg_irf=infl.pi_agg_irf,
     pi_goods_irf=infl.pi_goods_irf, pi_serv_irf=infl.pi_serv_irf,
     infl_irf_impact=infl.infl_irf_impact, infl_6m=infl.infl_6m, infl_12m=infl.infl_12m,

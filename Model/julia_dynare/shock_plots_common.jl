@@ -164,6 +164,34 @@ function leontief_decomp(direct_mc, modalpha, modbeta, Yi_ss)
 end
 
 """
+    sectoral_va_irf(get_irf, nsec, n_irf, Yi_ss, M_ss, Vi_ss, pH_ss, PMi_ss, PV_ss)
+
+Real (double-deflated, base-SS-price) sectoral VALUE-ADDED IRF, in % deviation
+from steady state.  Value added of sector `i` is gross output minus intermediate
+materials and imported inputs:
+    VA_i = P^H_i Y_i − P^M_i M_i − P^V V_i,
+all valued at steady-state prices so the response is a pure quantity (real) move.
+This is the GDP-consistent object: a negative TFP shock raises intermediate use
+per unit of output, so gross output `Y_i` can rise mechanically while value added
+(and hence GDP) falls.  Reporting value added removes that double-counting.
+Returns an `nsec × n_irf` matrix of percent deviations.
+"""
+function sectoral_va_irf(get_irf, nsec, n_irf, Yi_ss, M_ss, Vi_ss, pH_ss, PMi_ss, PV_ss)
+    va = zeros(nsec, n_irf)
+    for i in 1:nsec
+        yi = get_irf("Y_$(i)"); mi = get_irf("M_$(i)"); vi = get_irf("V_$(i)")
+        VA_ss_i = pH_ss[i]*Yi_ss[i] - PMi_ss[i]*M_ss[i] - PV_ss*Vi_ss[i]
+        for t in 1:n_irf
+            dVA = pH_ss[i]*(yi[t]/100*Yi_ss[i]) -
+                  PMi_ss[i]*(mi[t]/100*M_ss[i]) -
+                  PV_ss*(vi[t]/100*Vi_ss[i])
+            va[i, t] = abs(VA_ss_i) > 1e-12 ? 100.0*dVA/VA_ss_i : 0.0
+        end
+    end
+    return va
+end
+
+"""
     ge_mc_components(kind, h, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha,
                      alpha_L_vec, modbeta; po_irf, pv_irf, modalphaOil, a_irf_mat)
 
@@ -443,16 +471,20 @@ function generate_shock_figures(ctx)
         "Puntos porcentuales", bar_names, nsec)
     shock_save_fig(p4, fn[:decomp_mc_12m], ctx)
 
-    # ---- Producto e inflación sectorial en el impacto (barras agrupadas) ---- #
+    # ---- Producto (valor agregado) e inflación sectorial en el impacto ---- #
+    # Report sectoral VALUE ADDED under the "Y_i" label: gross output double-counts
+    # intermediates and can rise under a negative TFP shock even as GDP falls.
+    # Falls back to gross output if the caller did not supply a VA vector.
+    out_impact = get(ctx, :va_irf_impact, ctx.y_irf_impact)
     pi_sec_impact = ctx.pi_sec_mat[:, 1]
     p_out = Main.groupedbar(
-        [ctx.y_irf_impact pi_sec_impact],
+        [out_impact pi_sec_impact],
         xticks=(1:nsec, bar_names), xrotation=55,
         label=["Producto Y_i (% desv.)" "Inflación π_i (pp anual)"], color=[:steelblue :firebrick],
         ylabel="Respuesta en el impacto (t = 1)",
         title="$(ctx.title_short) — Impacto: Producto e Inflación Sectorial (εY=$(epsY_str))",
         titlefontsize=12, size=(1400, 600), legend=:topright,
-        ylims=padlims(vcat(ctx.y_irf_impact, pi_sec_impact)),
+        ylims=padlims(vcat(out_impact, pi_sec_impact)),
         bottom_margin=24P.mm, left_margin=14P.mm, right_margin=5P.mm)
     shock_save_fig(p_out, fn[:decomp_output], ctx)
 
@@ -468,6 +500,7 @@ end
 function generate_shock_tables(ctx)
     nsec = ctx.nsec
     tab_names = SHOCK_TAB_NAMES
+    out_impact = get(ctx, :va_irf_impact, ctx.y_irf_impact)   # VA (GDP-consistent) if supplied
     @printf "\n--- Generating LaTeX tables (%s) ---\n" ctx.title_short
 
     # ---- Table 1: Sectoral decomposition ---- #
@@ -491,7 +524,7 @@ function generate_shock_tables(ctx)
             amp_str = dval > 1e-8 ? @sprintf("%5.2f", ctx.amp_ratio[i]) : "---"
             @printf(f, "%s (%s) & %4.1f & %.3f & %.3f & %.3f & %s & \$%+.3f\$ \\\\\n",
                 tab_names[i], gs, ctx.share_vec[i]*100, dval,
-                ctx.network_mc[i], ctx.total_mc[i], amp_str, ctx.y_irf_impact[i])
+                ctx.network_mc[i], ctx.total_mc[i], amp_str, out_impact[i])
         end
         println(f, "\\midrule")
         @printf(f, "Agregado (ponderado por producto) & --- & %.3f & %.3f & %.3f & %5.2f & \$%+.3f\$ \\\\\n",
