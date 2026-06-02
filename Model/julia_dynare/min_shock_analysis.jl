@@ -256,16 +256,16 @@ if isfile(smm_est_file)
     @printf "  Loaded SMM estimates from %s\n" smm_est_file
 end
 
-# ---- Optional εY override (e.g. paper baseline εY = 0.8) ------------------ #
-# Set ENV["EPSY_OVERRIDE"] (e.g. `EPSY_OVERRIDE=0.8 julia --project=. …`) to
-# override the production-input elasticity AFTER the SMM load. εY<1 = inputs are
-# complements (paper baseline), εY>1 = substitutes. Propagates to the
-# subprocesses launched by run_all_shocks.jl.
-if haskey(ENV, "EPSY_OVERRIDE")
-    _epsY_ovr = parse(Float64, ENV["EPSY_OVERRIDE"])
-    modepsY = fill(_epsY_ovr, nsec)
-    @printf "  εY OVERRIDE active: εY = %.4f (overrides SMM/default)\n" _epsY_ovr
-end
+# ---- εY (production-input elasticity) — pinned default ------------------- #
+# Pinned to 0.5 for ALL runs, overriding the SMM estimate (εY=1.48). The SMM
+# value implied input SUBSTITUTABILITY (εY>1), which produced counterintuitive
+# supply-shock responses (rising employment / output after adverse shocks).
+# εY<1 = complements (gross-complementarity, the network-amplification regime).
+# Override per-run with ENV["EPSY_OVERRIDE"], e.g. `EPSY_OVERRIDE=0.8 julia …`.
+# Propagates to subprocesses launched by run_all_shocks.jl.
+_epsY_set = haskey(ENV, "EPSY_OVERRIDE") ? parse(Float64, ENV["EPSY_OVERRIDE"]) : 0.5
+modepsY   = fill(_epsY_set, nsec)
+@printf "  εY pinned: εY = %.4f (overrides SMM estimate)\n" _epsY_set
 
 
 # =========================================================================== #
