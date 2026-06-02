@@ -291,7 +291,10 @@ PVstar_ss       = 1.0    # steady-state foreign price (normalized)
 sigmaH_val      = 0.999  # Armington elasticity (home vs. foreign)
 
 # Export and home-bias
-modchiX   = fill(1/nsec, nsec)  # uniform export shares (placeholder)
+modchiX   = let   # sectoral export shares chi_i^X from Chilean 2021 supply-use table (Data/computed)
+    _f = joinpath(DATA_DIR, "computed", "export_shares_chile.csv")
+    isfile(_f) ? (v = Float64.(CSV.read(_f, DataFrame).chi_x); v ./ sum(v)) : fill(1/nsec, nsec)
+end
 modvarrho = var_rho              # home-bias parameters ϱ_i from data
 modA      = ones(nsec)           # TFP normalized to 1 in SS
 

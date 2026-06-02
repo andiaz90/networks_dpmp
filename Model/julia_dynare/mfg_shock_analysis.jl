@@ -202,7 +202,10 @@ kappaV_val = 1e13; epsilonV_val = 1e13; epsilonX_val = 1.0; omegaX_val = 1.0
 chii_b_val = 0.001; etastar_val = 3.5
 xi_rstar_val = 0.2; ystar_ss_val = 1.0; PVstar_ss = 1.0; sigmaH_val = 0.999
 
-modchiX   = fill(1/nsec, nsec)
+modchiX   = let   # sectoral export shares chi_i^X from Chilean 2021 supply-use table (Data/computed)
+    _f = joinpath(DATA_DIR, "computed", "export_shares_chile.csv")
+    isfile(_f) ? (v = Float64.(CSV.read(_f, DataFrame).chi_x); v ./ sum(v)) : fill(1/nsec, nsec)
+end
 modvarrho = var_rho
 modA      = ones(nsec)
 
