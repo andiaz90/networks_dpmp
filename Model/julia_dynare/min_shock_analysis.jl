@@ -181,7 +181,8 @@ modalphaV = alpha_V
 #  STRUCTURAL PARAMETERS                                                       #
 # =========================================================================== #
 
-beta_val = 0.986;  epsilon = 10.0;  gamma = 2.0;  psi = 1.0;  chi = 1.0
+beta_val = 0.986;  epsilon = 10.0;  gamma = 2.0;  chi = 1.0
+psi = haskey(ENV, "PSI_OVERRIDE") ? parse(Float64, ENV["PSI_OVERRIDE"]) : 0.5   # inverse Frisch; lower = flatter labor supply, wage reacts less
 # theta_vec is the FREQUENCY of price adjustment (fraction of firms that reset each
 # quarter). Calvo stickiness = probability of NOT adjusting = 1 - theta_vec.
 stick    = 1 .- theta_vec
