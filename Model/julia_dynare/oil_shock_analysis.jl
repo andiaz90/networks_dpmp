@@ -215,7 +215,7 @@ modA      = ones(nsec)
 # ---- Oil price shock parameters ----
 modalphaOil = [0.1635, 0.2164, 0.1890, 0.0871, 0.0417,
                0.0793, 0.3734, 0.0043, 0.0449, 0.0633, 0.0391, 0.0447]
-epsilonV_oil_val  = 0.5
+epsilonV_oil_val  = haskey(ENV, "OILSUB_OVERRIDE") ? parse(Float64, ENV["OILSUB_OVERRIDE"]) : 0.5   # oil↔non-oil import substitution (default 0.5: model solves)
 rho_postar_val    = 0.9
 sigma_postar_val  = 0.02
 POstar_ss_val     = 1.0
