@@ -1,39 +1,43 @@
 """
-mfg_shock_analysis.jl
+oil_shock_analysis.jl
 =====================
 NK-IOSOE 12-sector model for Chile — Manufacturing TFP Shock Analysis
 
-Computes the response of the Chilean economy to a 1% positive TFP shock in
-the Manufacturing sector (sector 3), generating publication-quality figures
-(PDF) that are saved directly to the Overleaf Dropbox folder.
+Computes the response of the Chilean economy to a 10% world oil price shock,
+decomposes the transmission into direct cost and network amplification channels,
+and generates publication-quality figures (PDF) and LaTeX tables.
 
 Workflow:
-  1.  Load sector-level data (same as main_SOE_gap.jl / oil_shock_analysis.jl)
-  2.  Set structural parameters (SMM estimates from smm_estimates.csv)
-  3.  Configure Exercise 2: Manufacturing TFP shock only (epsA_3)
+  1.  Load sector-level data (same as main_SOE_gap.jl)
+  2.  Set structural parameters (from SMM estimates or defaults)
+  3.  Configure Exercise 4: oil price shock only (eps_postar)
   4.  Solve steady state and write params_jl.mod
   5.  Run Dynare (subprocess) to get decision rules
-  6.  Compute IRFs to a 1% TFP improvement in sector 3
-  7.  Compute expenditure-weighted sectoral inflation decomposition
-  8.  Generate PDF figures to figures/mfg_shock/ AND Overleaf folder
-  9.  (Optional) Generate comparison figures vs. oil shock
+  6.  Compute IRFs to a 10% oil price shock
+  7.  Decompose: direct oil cost channel vs. IO network amplification
+  8.  Generate PDF figures and LaTeX tables
+  9.  Run "no-network" counterfactual (diagonal IO matrix)
 
 Usage:
-  julia --project=. mfg_shock_analysis.jl
+  julia --project=. oil_shock_analysis.jl
 
 REQUIREMENTS:
-  Same as oil_shock_analysis.jl (Julia >= 1.9, Dynare.jl, CSV, DataFrames, etc.)
+  Same as main_SOE_gap.jl (Julia >= 1.9, Dynare.jl, CSV, DataFrames, etc.)
 
-OUTPUT FILES:
-  figures/mfg_shock/irf_aggregate_mfg_shock.pdf       — GDP, CPI, Q, r, TB
-  figures/mfg_shock/irf_sectoral_Y_mfg_shock.pdf      — 12-sector output IRFs
-  figures/mfg_shock/irf_sectoral_inflation_mfg_shock.pdf — 12-sector ΔPH_i inflation
-  figures/mfg_shock/irf_aggregate_inflation_mfg_shock.pdf — goods/services/agg inflation
-  figures/mfg_shock/irf_comparison_oil_mfg.pdf        — comparison vs oil (if oil data exists)
-  figures/mfg_shock/irf_comparison_sectoral_inflation.pdf — sectoral comparison (if oil data exists)
-
-  All figures also copied to:
-  ../../Network DPMP-DME/Figures/mfg_shock/   (Overleaf Dropbox sync folder)
+OUTPUT FILES (saved to figures/oil_shock/ and tables/):
+  Figures:
+    irf_aggregate_oil_shock.pdf     — GDP, inflation, RER, trade balance
+    irf_sectoral_Y_oil_shock.pdf    — 12-sector output IRFs
+    irf_sectoral_PH_oil_shock.pdf   — 12-sector price IRFs
+    irf_sectoral_MC_oil_shock.pdf   — 12-sector marginal cost IRFs
+    decomposition_output_oil.pdf        — sectoral output and MC at impact
+    decomposition_mc_inflation_oil.pdf     — MC decomp (direct+network, stacked) + impact inflation diamonds
+    decomposition_mc_inflation_6m_oil.pdf  — same bars + 6-month cumulative inflation diamonds
+    decomposition_mc_inflation_12m_oil.pdf — same bars + 12-month cumulative inflation diamonds
+    oil_intensity_exposure.pdf          — sector oil exposure map
+  Tables:
+    oil_shock_decomposition.tex     — LaTeX table of direct/network/total effects
+    oil_shock_aggregates.tex        — Aggregate responses summary
 """
 
 # =========================================================================== #
@@ -43,13 +47,14 @@ OUTPUT FILES:
 using LinearAlgebra
 using Statistics
 using Printf
+using Logging
 using NLsolve
 using CSV
 using DataFrames
 using StatsBase
 
 # =========================================================================== #
-#  INCLUDE HELPERS                                                             #
+#  INCLUDE HELPERS                                                              #
 # =========================================================================== #
 
 SCRIPT_DIR = @__DIR__
@@ -57,21 +62,31 @@ SCRIPT_DIR = @__DIR__
 include(joinpath(SCRIPT_DIR, "steady_ntwsoe_system.jl"))
 include(joinpath(SCRIPT_DIR, "steady_ntwsoe.jl"))
 include(joinpath(SCRIPT_DIR, "utils.jl"))
+include(joinpath(SCRIPT_DIR, "shock_plots_common.jl"))   # shared figure/table/decomposition routines
 
 # Plotting (graceful failure if not installed)
 const _HAS_PLOTS = Ref(false)
 try
     @eval Main using Plots
+    @eval Main using StatsPlots
     @eval Main gr(dpi=200)
+    # Global font-size defaults (applied to every plot unless overridden)
+    @eval Main Plots.default(
+        titlefontsize  = 14,   # subplot / figure titles
+        guidefontsize  = 13,   # axis labels (ylabel, xlabel)
+        tickfontsize   = 12,   # tick labels
+        legendfontsize = 12,   # legend text
+        annotationfontsize = 12,
+    )
     _HAS_PLOTS[] = true
 catch
-    @warn "Plots.jl not available — figures will be skipped. Install with: ] add Plots"
+    @warn "Plots.jl or StatsPlots.jl not available — figures will be skipped. Install with: ] add Plots StatsPlots"
 end
 
 function _main()
 
 @printf "\n%s\n" repeat("=", 70)
-@printf "  NK-SOE 12-sector model — Manufacturing TFP Shock Analysis (1%%)\n"
+@printf "  NK-SOE 12-sector model — Manufacturing TFP Shock Analysis (-10%%)\n"
 @printf "%s\n\n" repeat("=", 70)
 
 
@@ -88,31 +103,30 @@ TABLES_DIR  = joinpath(SCRIPT_DIR, "tables")
 mkpath(FIGURES_DIR)
 mkpath(TABLES_DIR)
 
-# Overleaf Dropbox sync folder — figures are written here for direct inclusion
-OVERLEAF_DIR = get(ENV, "OVERLEAF_MFG",
+# Overleaf Dropbox sync — mirrors the mfg_shock_analysis.jl pattern.
+# Figures go to Figures/oil_shock/ and tables to tables/ inside the Overleaf project.
+OVERLEAF_ROOT    = get(ENV, "OVERLEAF_ROOT",
     abspath(joinpath(homedir(), "Library", "CloudStorage",
-        "Dropbox", "Apps", "Overleaf", "Network DPMP-DME", "Figures", "mfg_shock")))
-overleaf_ok = try mkpath(OVERLEAF_DIR); true catch; false end
+        "Dropbox", "Apps", "Overleaf", "Network DPMP-DME")))
+OVERLEAF_FIG_DIR = joinpath(OVERLEAF_ROOT, "Figures", "mfg_shock")
+OVERLEAF_TAB_DIR = joinpath(OVERLEAF_ROOT, "tables")
+overleaf_ok = try
+    mkpath(OVERLEAF_FIG_DIR)
+    mkpath(OVERLEAF_TAB_DIR)
+    true
+catch
+    false
+end
 if overleaf_ok
-    @printf "  Overleaf output: %s\n\n" OVERLEAF_DIR
+    @printf "  Overleaf figures : %s\n" OVERLEAF_FIG_DIR
+    @printf "  Overleaf tables  : %s\n\n" OVERLEAF_TAB_DIR
 else
     @printf "  [Overleaf folder not found — saving locally only]\n\n"
 end
 
-function save_fig(p, fname)
-    local_path = joinpath(FIGURES_DIR, fname)
-    @eval Main savefig($p, $local_path)
-    @printf "  Saved: %s\n" local_path
-    if overleaf_ok
-        ol_path = joinpath(OVERLEAF_DIR, fname)
-        @eval Main savefig($p, $ol_path)
-        @printf "  Synced: %s\n" ol_path
-    end
-end
-
 
 # =========================================================================== #
-#  READ DATA (identical to oil_shock_analysis.jl)                              #
+#  READ DATA (identical to main_SOE_gap.jl)                                    #
 # =========================================================================== #
 
 nsec = 12
@@ -192,64 +206,66 @@ modchiX   = fill(1/nsec, nsec)
 modvarrho = var_rho
 modA      = ones(nsec)
 
-# ---- Oil parameters (needed for params_jl.mod even in Exercise 2) ----
+# ---- Oil price shock parameters ----
 modalphaOil = [0.1635, 0.2164, 0.1890, 0.0871, 0.0417,
                0.0793, 0.3734, 0.0043, 0.0449, 0.0633, 0.0391, 0.0447]
-epsilonV_oil_val = 0.5
-rho_postar_val   = 0.9
-sigma_postar_val = 0.02
-POstar_ss_val    = 1.0
+epsilonV_oil_val  = 0.5
+rho_postar_val    = 0.9
+sigma_postar_val  = 0.02
+POstar_ss_val     = 1.0
 
-# ---- Exercise 2: MANUFACTURING TFP SHOCK ONLY ----
-mfg_sector = 3   # sector 3 = Manufacturing
-
+# ---- TFP SHOCK ONLY (sector 3 = Manufacturing) ----
+shock_sector = 3
 sigma_i_val     = 0.0
 rho_om1_val     = 0.1
 sigma_om_vec    = zeros(nsec)
-rho_tfp1_val    = 0.95;  rho_tfp2_val = 0.0   # Exercise 2 default persistence
+rho_tfp1_val    = 0.5; rho_tfp2_val = 0.0
 isigma_tfp_val  = zeros(nsec)
-isigma_tfp_val[mfg_sector] = 0.01              # only Manufacturing TFP active
 rho_val         = 0.1
 sigma_L_agg_val = 0.0
-rho_pvstar_val  = 0.9; sigma_pvstar_val = 0.0
-rho_xi_val      = 0.80; sigma_xi_val = 0.0
+rho_pvstar_val  = 0.9; sigma_pvstar_val = 0.0   # import price shock OFF
+rho_xi_val      = 0.80; sigma_xi_val = 0.0      # preference shock OFF
 
 # Shock activation flags
 shock_eps_om_vec     = zeros(nsec)
 shock_eps_i_val      = 0.0
 shock_eps_pvstar_val = 0.0
 shock_eps_xi_val     = 0.0
-shock_eps_postar_val = 0.0         # oil OFF
-shock_epsA_val       = zeros(nsec)
-shock_epsA_val[mfg_sector] = 1.0  # << Manufacturing TFP ON
+shock_eps_postar_val = 0.0   # oil OFF
+shock_epsA_val       = zeros(nsec); shock_epsA_val[shock_sector] = 1.0   # << TFP ON
 
-# ---- Load SMM estimates (override defaults) ----
+# Load SMM estimates if available (override structural params)
 smm_est_file = joinpath(DATA_DIR, "smm_estimates.csv")
 if isfile(smm_est_file)
     est_df = CSV.read(smm_est_file, DataFrame)
     est    = Dict(String(r.param) => Float64(r.value) for r in eachrow(est_df))
-    ilabcosts_val   = est["ilabcosts"]
-    modepsY         = fill(est["epsY"], nsec)
-    modepsM         = fill(est["epsM"], nsec)
-    kappaV_val      = exp(est["log_kappaV"])
-    rho_om1_val     = est["rho_om"]
-    rho_tfp1_val    = est["rho_A"]          # use SMM-estimated AR(1) persistence
-    isigma_tfp_val  = [est["isigma_tfp_$(i)"] for i in 1:nsec]
-    # Override: all TFP sigmas zero except Manufacturing
-    sigma_A3        = isigma_tfp_val[mfg_sector]   # keep for scale factor
-    fill!(isigma_tfp_val, 0.0)
-    isigma_tfp_val[mfg_sector] = sigma_A3
+    ilabcosts_val    = est["ilabcosts"]
+    modepsY          = fill(est["epsY"], nsec)
+    modepsM          = fill(est["epsM"], nsec)
+    kappaV_val       = exp(est["log_kappaV"])
+    rho_om1_val      = est["rho_om"]
+    rho_tfp1_val     = est["rho_A"]
+    isigma_tfp_val   = [est["isigma_tfp_$(i)"] for i in 1:nsec]
     haskey(est, "etastar") && (etastar_val = est["etastar"])
     @printf "  Loaded SMM estimates from %s\n" smm_est_file
-    @printf "  σ_A3 (Manufacturing TFP std) = %.5f\n" sigma_A3
-else
-    sigma_A3 = isigma_tfp_val[mfg_sector]
-    @printf "  SMM estimates not found — using defaults. σ_A3 = %.4f\n" sigma_A3
 end
 
 
 # =========================================================================== #
-#  STEADY STATE (identical to oil_shock_analysis.jl)                           #
+#  THREE ε_Y CASES: NEAR-LEONTIEF / BASELINE / HIGH SUBSTITUTION              #
+# =========================================================================== #
+
+# Use baseline εY from SMM estimates (no εY sensitivity loop)
+epsY_baseline = modepsY[1]
+nT = 40   # IRF horizon
+
+@printf "\n%s\n  Baseline εY = %.4f (from SMM estimates)\n%s\n" repeat("─",60) epsY_baseline repeat("─",60)
+
+# εY is already set in modepsY from the SMM parameter load — no override needed
+
+
+# =========================================================================== #
+#  STEADY STATE (same as main_SOE_gap.jl)                                      #
 # =========================================================================== #
 
 sigmaH     = sigmaH_val
@@ -290,6 +306,7 @@ w_ss  = ss_result.zero[nsec+1]
 Q_ss  = ss_result.zero[nsec+2]
 C_ss  = ss_result.zero[nsec+3]
 
+# Full SS evaluation (replicates main_SOE_gap.jl)
 PL_ss  = fill(w_ss, nsec)
 PV_ss  = Q_ss * PVstar_ss
 MCi_ss = (epsilon-1)/epsilon .* pH_ss
@@ -339,7 +356,7 @@ GDP_ss     = C_ss + TB_ss; N_ss = sum(L_ss)
 r_star_ss  = Rworld_ss; Bstar_ss = -TB_ss / (Q_ss * (1 - r_star_ss / Pistar_ss))
 bbar_val   = Q_ss * Bstar_ss / GDP_ss
 
-PO_ss      = Q_ss * POstar_ss_val
+PO_ss     = Q_ss * POstar_ss_val
 PIV_ss_vec = [
     (modalphaOil[i] * PO_ss^(1-epsilonV_oil_val)
      + (1-modalphaOil[i]) * PV_ss^(1-epsilonV_oil_val))^(1/(1-epsilonV_oil_val))
@@ -412,16 +429,20 @@ project_dir   = dirname(Base.active_project())
 
 @printf "--- Running Dynare.jl (subprocess) ---\n"
 dynare_out = IOBuffer()
-proc = run(pipeline(
-    `$julia_exe --project=$project_dir $dynare_script $MOD_DIR`,
-    stdout=dynare_out, stderr=stderr), wait=true)
+dynare_cmd = ignorestatus(`$julia_exe --project=$project_dir $dynare_script $MOD_DIR`)
+dynare_proc = run(pipeline(dynare_cmd, stdout=dynare_out, stderr=stderr), wait=true)
 
 dynare_stdout = String(take!(dynare_out))
 print(dynare_stdout)
 
-if !occursin("DYNARE_SUCCESS", dynare_stdout)
-    error("Dynare subprocess failed. See output above.")
+if !success(dynare_proc)
+    error("Dynare subprocess crashed (exit code $(dynare_proc.exitcode)). See stderr above.")
 end
+
+if !occursin("DYNARE_SUCCESS", dynare_stdout)
+    error("Dynare subprocess did not report success. See output above.")
+end
+
 @printf "\n--- Dynare completed ---\n\n"
 
 
@@ -449,45 +470,64 @@ endo_idx = Dict(nm => i for (i, nm) in enumerate(endo_names))
 
 @printf "  Variables: %d  States: %d  Shocks: %d\n" n_endo n_states n_shocks
 
-# varexo declaration order (from NK_SOE_lev_gap2.mod):
-#   eps_om(1) eps_i(2) epschi(3) eps_pvstar(4) eps_postar(5)
-#   epsA_1(6) epsA_2(7) epsA_3(8) ... epsA_12(17) eps_xi(18)
-mfg_col = 5 + mfg_sector   # = 8 for sector 3
-@printf "  Manufacturing TFP shock (epsA_%d) column: %d\n\n" mfg_sector mfg_col
+# Validate decision rules — detect Dynare solver failures (zero matrices)
+_nz_ghx = sum(abs.(ghx) .> 1e-12)
+_nz_ghu = sum(abs.(ghu) .> 1e-12)
+@printf "  Decision rule nonzeros:  ghx=%d  ghu=%d\n" _nz_ghx _nz_ghu
+if _nz_ghx == 0 || _nz_ghu == 0
+    @error """
+    ╔══════════════════════════════════════════════════════════════╗
+    ║  DECISION RULES ARE ALL ZEROS — Dynare solver failed!      ║
+    ║  This parameterization likely hit the ARM/aarch64 gees bug  ║
+    ║  or another Dynare.jl solver failure.                       ║
+    ║  IRFs for this εY case will be meaningless (flat at zero).  ║
+    ╚══════════════════════════════════════════════════════════════╝
+    """
+end
+
+# Identify eps_postar column
+# varexo order: eps_om eps_i epschi eps_pvstar eps_postar epsA_1..12 eps_xi
+# => eps_postar should be column 5
+shock_col = 5 + shock_sector
+@printf "  TFP shock (epsA_%d) column: %d\n\n" shock_sector shock_col
 
 
 # =========================================================================== #
-#  COMPUTE IRFs: 1% MANUFACTURING TFP IMPROVEMENT                              #
+#  COMPUTE IRFs: 10% OIL PRICE SHOCK                                           #
 #                                                                              #
-#  In the .mod: A_3 = rho_tfp1*A_3(-1) + isigma_tfp_3 * epsA_3              #
-#  A 1% improvement in TFP means d(log A_3) = 0.01 on impact.               #
-#  Scale: eps_A3 = 0.01 / sigma_A3   (sigma_A3 = isigma_tfp_val[3])          #
-#  IRF is linear: IRF(1%) = scale_factor * IRF(1 s.d.)                       #
+#  The shock size is chosen so that POstar jumps by 10% on impact.             #
+#  In the .mod file: log(POstar/POstar_ss) = rho*log(POstar(-1)/POstar_ss)    #
+#                                            + sigma_postar * eps_postar       #
+#  For a 10% shock: sigma_postar * eps_postar = log(1.10)                     #
+#  Since sigma_postar = 0.02, we need eps_postar = log(1.10) / 0.02 ≈ 4.76   #
+#  The IRFs are linear, so we scale: IRF(10%) = scale_factor * IRF(1 s.d.)    #
 # =========================================================================== #
 
-shock_pct    = 0.01   # 1% TFP improvement
-scale_factor = shock_pct / sigma_A3
+shock_pct = -0.10   # 10% negative productivity (TFP) shock
+# Scale the unit-epsA_k impulse so that A_k drops exactly 10% on impact.
+_a_unit = ghu[get(endo_idx, "A_$(shock_sector)", 0), shock_col]
+scale_factor = abs(_a_unit) > 1e-12 ? shock_pct / _a_unit : shock_pct / isigma_tfp_val[shock_sector]
 
-@printf "--- Computing IRFs (1%% Manufacturing TFP shock) ---\n"
-@printf "  σ_A3 = %.5f → scale factor = %.4f s.d.\n\n" sigma_A3 scale_factor
+@printf "--- Computing IRFs (-10%% TFP shock, sector %d) ---\n" shock_sector
+@printf "  A_%d unit response = %.5f -> scale factor = %.4f\n\n" shock_sector _a_unit scale_factor
 
 n_irf = 40   # quarters
 
 # State-space matrices
-A_mat = ghx[state_rows, :]  # n_states × n_states
-B_mat = ghu[state_rows, :]  # n_states × n_shocks
+A = ghx[state_rows, :]  # n_states × n_states
+B = ghu[state_rows, :]  # n_states × n_shocks
 
 # Compute scaled IRFs
-irf_mat = zeros(n_endo, n_irf)
+irf_mat = zeros(n_endo, n_irf)   # variable × period
 x = zeros(n_states)
 
 for h in 1:n_irf
     if h == 1
-        y_h = ghu[:, mfg_col] .* scale_factor
-        x   = B_mat[:, mfg_col] .* scale_factor
+        y_h = ghu[:, shock_col] .* scale_factor
+        x   = B[:, shock_col]   .* scale_factor
     else
         y_h = ghx * x
-        x   = A_mat * x
+        x   = A * x
     end
     irf_mat[:, h] .= y_h
 end
@@ -501,405 +541,125 @@ for i in 1:n_endo
     if ssv > 1e-10
         irf_pct[i, :] .= 100.0 .* irf_mat[i, :] ./ ssv
     else
+        # Gap variables (Ygap, GDPgap, Ngap, etc.) have SS = 0;
+        # linearized IRF is in log-deviation units → ×100 for pp.
         irf_pct[i, :] .= 100.0 .* irf_mat[i, :]
     end
 end
 
+# Helper to extract IRF for a variable
 function get_irf_var(varname::String)
     idx = get(endo_idx, varname, 0)
     idx == 0 && return zeros(n_irf)
     return irf_pct[idx, :]
 end
 
-# Extract aggregate CPI inflation immediately — needed for sectoral inflation.
-# pi in Dynare is gross quarterly CPI inflation (SS = 1); irf_pct gives % dev from SS,
-# so pi_cpi_irf[h] = 100*(Π_t - 1) = quarterly net CPI inflation in %.
-pi_cpi_irf = get_irf_var("pi")
+# =========================================================================== #
+#  EXTRACT IRFs, DECOMPOSE, AND GENERATE OUTPUTS (shared module)               #
+# =========================================================================== #
 
-# Sectoral nominal home-price inflation: π̂ᴴᵢₜ = Πₜ · PHᵢₜ/PHᵢₜ₋₁
-# PH_i in the model is a relative price (normalized by CPI P_t).
-# Nominal inflation = change in relative price + aggregate CPI inflation.
-# In log %: (ΔPH_i(h) + pi(h)) × 4  [annualised]
-function get_inflation_irf(i::Int)
-    ph = get_irf_var("PH_$(i)")
-    dph = similar(ph)
-    dph[1] = ph[1] + pi_cpi_irf[1]
-    for t in 2:n_irf
-        dph[t] = ph[t] - ph[t-1] + pi_cpi_irf[t]
-    end
-    return dph .* 4   # annualize
-end
+k = shock_sector
 
-# Build infl_irf as a proper (nsec × n_irf) Matrix — avoid hcat(...)' Adjoint issues
-infl_irf = zeros(nsec, n_irf)
+# Aggregate IRFs
+gdp_irf = get_irf_var("GDP");  pi_irf = get_irf_var("pi")
+q_irf   = get_irf_var("Q");    tb_irf = get_irf_var("TB")
+c_irf   = get_irf_var("C");    cg_irf = get_irf_var("C_g"); cs_irf = get_irf_var("C_s")
+n_irf_v = get_irf_var("N");    r_irf  = get_irf_var("r");   w_irf  = get_irf_var("w")
+pv_irf  = get_irf_var("PV")
+gdpgap_irf = get_irf_var("GDPgap")
+
+# Sectoral IRF matrices (nsec x n_irf)
+y_irf_mat    = vcat([permutedims(get_irf_var("Y_$(i)"))    for i in 1:nsec]...)
+ph_irf_mat   = vcat([permutedims(get_irf_var("PH_$(i)"))   for i in 1:nsec]...)
+mc_irf_mat   = vcat([permutedims(get_irf_var("MC_$(i)"))   for i in 1:nsec]...)
+l_irf_mat    = vcat([permutedims(get_irf_var("L_$(i)"))    for i in 1:nsec]...)
+ygap_irf_mat = vcat([permutedims(get_irf_var("Ygap_$(i)")) for i in 1:nsec]...)
+a_irf_mat    = vcat([permutedims(get_irf_var("A_$(i)"))    for i in 1:nsec]...)
+
+y_irf_impact  = y_irf_mat[:, 1]
+mc_irf_impact = mc_irf_mat[:, 1]
+ph_irf_impact = ph_irf_mat[:, 1]
+
+# Sectoral & group home-price inflation (shared helper)
+infl = compute_inflation_aggregates(ph_irf_mat, pi_irf, C_gi_ss, C_si_ss, nsec, n_irf)
+
+# Direct vs. network MC decomposition (Leontief):
+# the -10% productivity shock raises the shocked sector's own marginal cost by
+# +10% on impact (= -Ahat_k); zero direct push elsewhere.  Network propagation
+# of that cost increase to downstream sectors is the Leontief amplification.
+direct_mc = -a_irf_mat[:, 1]                 # own-sector cost push (%, impact)
+dec = leontief_decomp(direct_mc, modalpha, modbeta, Yi_ss)
+
+@printf "
+  %-30s %8s %8s %8s
+" "Sector" "Direct" "Network" "Total"
 for i in 1:nsec
-    infl_irf[i, :] .= get_inflation_irf(i)
+    @printf "  %-30s %7.3f%% %7.3f%% %7.3f%%
+" names_vec[i] dec.direct_mc[i] dec.network_mc[i] dec.total_mc[i]
 end
+@printf "
+"
 
-# Expenditure-weighted aggregate inflation
-# spend_good[i] = full-economy expenditure share for sector i (0 for services sectors)
-# spend_serv[i] = full-economy expenditure share for sector i (0 for goods sectors)
-# Using the full 12-element vectors avoids boolean-indexing dimension mismatches.
-omega_G = sum(spend_good)   # ≈ 0.57
-omega_S = sum(spend_serv)   # ≈ 0.43
+# Sanity check: confirm the shocked sector's TFP and output signs
+@printf "  Verificación shock: A_%d impacto = %+.2f%% (debe ser ≈ -10%%),  Y_%d impacto = %+.2f%% (debe ser negativo)\n" k a_irf_mat[k,1] k y_irf_impact[k]
 
-agg_infl_g   = (spend_good' * infl_irf)[:]  ./ omega_G  # within-goods weighted avg
-agg_infl_s   = (spend_serv' * infl_irf)[:]  ./ omega_S  # within-services weighted avg
-agg_infl_tot = omega_G .* agg_infl_g .+ omega_S .* agg_infl_s
+# 5-way GE marginal-cost decomposition at h = 1, 2, 4
+alpha_L_vec = 1.0 .- modalpha .- modalphaV
+ge_kwargs = (pv_irf=pv_irf, a_irf_mat=a_irf_mat)
+ge_h1 = ge_mc_components(:tfp, 1, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; ge_kwargs...)
+ge_h2 = ge_mc_components(:tfp, 2, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; ge_kwargs...)
+ge_h4 = ge_mc_components(:tfp, 4, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; ge_kwargs...)
+ge_colors, ge_labels = ge_component_style(:tfp)
 
+@printf "--- Aggregate IRFs (-10%% Manufacturing TFP shock, impact) ---
+"
+@printf "  GDP %+.3f%%   pi %+.3f ann.pp   Q %+.3f%%   r %+.3f ann.pp
 
-# =========================================================================== #
-#  PRINT KEY RESULTS                                                           #
-# =========================================================================== #
+" gdp_irf[1] (pi_irf[1]*4) q_irf[1] (r_irf[1]*4)
 
-gdp_irf = get_irf_var("GDP")
-pi_irf  = pi_cpi_irf          # already extracted above (= get_irf_var("pi"))
-q_irf   = get_irf_var("Q")
-tb_irf  = get_irf_var("TB")
-c_irf   = get_irf_var("C")
-cg_irf  = get_irf_var("C_g")   # goods consumption
-cs_irf  = get_irf_var("C_s")   # services consumption
-n_irf_v = get_irf_var("N")
-r_irf   = get_irf_var("r")
-w_irf   = get_irf_var("w")
+# Exposure of each sector to the shocked sector's output
+exposure_share = modbeta[:, k]                         # direct input share from sector k
+exposure_cost  = (modalpha .* modbeta[:, k]) .* 100    # share of total input cost
 
-@printf "--- Aggregate IRFs (1%% Manufacturing TFP shock, impact period) ---\n"
-@printf "  GDP      : %+.3f%%\n"   gdp_irf[1]
-@printf "  CPI (π)  : %+.3f ann pp\n" pi_irf[1] * 4
-@printf "  RER (Q)  : %+.3f%%\n"   q_irf[1]
-@printf "  r        : %+.3f ann pp\n" r_irf[1] * 4
-@printf "  TB/GDP   : %+.3f pp\n"  100 * (tb_irf[1] / 100 * TB_ss / GDP_ss)
-@printf "  PH_3     : %+.3f%%\n"   get_irf_var("PH_$(mfg_sector)")[1]
-@printf "\n"
-@printf "  Home-price inflation (annualized pp, impact):\n"
-@printf "    Goods    : %+.3f\n"  agg_infl_g[1]
-@printf "    Services : %+.3f\n"  agg_infl_s[1]
-@printf "    Aggregate: %+.3f\n"  agg_infl_tot[1]
-@printf "\n"
+ctx = (
+    HAS_PLOTS = _HAS_PLOTS[], tag = "mfg",
+    title_long = "Shock de Productividad en Manufactura (-10%)", title_short = "Shock PTF Manufactura",
+    nsec = nsec, nT = nT, names_vec = names_vec, goods = goods,
+    TB_ss = TB_ss, GDP_ss = GDP_ss,
+    FIGURES_DIR = FIGURES_DIR, TABLES_DIR = TABLES_DIR,
+    OVERLEAF_FIG_DIR = OVERLEAF_FIG_DIR, OVERLEAF_TAB_DIR = OVERLEAF_TAB_DIR,
+    overleaf_ok = overleaf_ok, fignames = standard_fignames("mfg"),
+    epsY_baseline = epsY_baseline,
+    baseline_label = "Base (εY=$(round(epsY_baseline,digits=2)))",
+    baseline_color = :steelblue, baseline_lw = 2.5,
+    gdp_irf=gdp_irf, pi_irf=pi_irf, q_irf=q_irf, tb_irf=tb_irf, c_irf=c_irf,
+    cg_irf=cg_irf, cs_irf=cs_irf, n_irf_v=n_irf_v, r_irf=r_irf, w_irf=w_irf,
+    gdpgap_irf=gdpgap_irf,
+    y_irf_mat=y_irf_mat, ph_irf_mat=ph_irf_mat, mc_irf_mat=mc_irf_mat,
+    l_irf_mat=l_irf_mat, ygap_irf_mat=ygap_irf_mat,
+    y_irf_impact=y_irf_impact, mc_irf_impact=mc_irf_impact, ph_irf_impact=ph_irf_impact,
+    pi_sec_mat=infl.pi_sec_mat, pi_agg_irf=infl.pi_agg_irf,
+    pi_goods_irf=infl.pi_goods_irf, pi_serv_irf=infl.pi_serv_irf,
+    infl_irf_impact=infl.infl_irf_impact, infl_6m=infl.infl_6m, infl_12m=infl.infl_12m,
+    direct_mc=dec.direct_mc, network_mc=dec.network_mc, total_mc=dec.total_mc,
+    amp_ratio=dec.amp_ratio, agg_direct=dec.agg_direct, agg_network=dec.agg_network,
+    agg_total=dec.agg_total, agg_amp=dec.agg_amp,
+    ge_h1=ge_h1, ge_h2=ge_h2, ge_h4=ge_h4, ge_colors=ge_colors, ge_labels=ge_labels,
+    exposure_vec = exposure_cost,
+    exposure_label = "Participación de costo de insumos desde Manufactura (%)",
+    exposure_ylabel = "Participación de costo (%)",
+    exposure_title = "Participación de Insumos desde Manufactura por Sector",
+    share_vec = exposure_share, modalphaV = modalphaV, Yi_ss = Yi_ss,
+    decomp_share_head = "Manuf.", decomp_share_sub = "Insumo (\\%)",
+    decomp_caption = "Descomposición Sectorial de un Shock Negativo de 10\\% a la PTF en Manufactura",
+    decomp_notes = "La participación de insumos es la fracción de los insumos intermedios del sector \$i\$ provenientes de Manufactura (matriz IP de Chile 2021). El CM directo es el empuje de costo por productividad propia \$-\\hat A_i\$, distinto de cero solo para el sector afectado. La red es el costo adicional propagado por encadenamientos IP bajo la aproximación de Leontief de equilibrio parcial. Total = Directo + Red. Razón de amplificación = Total/Directo (mostrada solo para el sector afectado). La IRF de producto es la respuesta sectorial en el período de impacto. B\\,=\\,Bienes, S\\,=\\,Servicios.",
+    agg_caption = "Respuestas Agregadas a un Shock Negativo de 10\\% a la PTF en Manufactura",
+    agg_notes = "PIB, consumo, empleo y TCR en \\% de desviación del estado estacionario; inflación y tasa de política en pp anualizados; balanza comercial en pp del PIB. El shock es una reducción única de 10\\% en la productividad total de factores del sector Manufactura con persistencia \$\\rho = $(round(rho_tfp1_val,digits=3))\$. Impacto = respuesta en el trimestre 1. Mín/Máx = respuesta extrema en 40 trimestres.",
+    get_irf = get_irf_var,
+)
 
-# Sectoral inflation impact
-@printf "  %-45s  %8s\n" "Sector" "ΔPH (pp)"
-@printf "  %s\n" repeat("-", 58)
-for i in 1:nsec
-    gs = goods[i] ? "G" : "S"
-    @printf "  %-43s (%s)  %+7.3f\n" names_vec[i] gs infl_irf[i, 1]
-end
-@printf "\n"
+generate_shock_outputs(ctx)
 
-
-# =========================================================================== #
-#  GENERATE FIGURES                                                            #
-# =========================================================================== #
-
-if !_HAS_PLOTS[]
-    @printf "\n  [Plots.jl not available — skipping figures]\n"
-else
-    @printf "\n--- Generating figures ---\n"
-    periods = 1:n_irf
-    short_names = [s[1:min(18, length(s))] for s in names_vec]
-    sector_colors = vcat(fill(:steelblue, 5), fill(:firebrick, 7))
-
-    # ------------------------------------------------------------------ #
-    # Figure 1: Aggregate IRFs (5 panels)                                 #
-    # ------------------------------------------------------------------ #
-    p_agg = Plots.plot(layout=(2, 5), size=(2000, 700),
-        plot_title="1% Manufacturing TFP Shock — Aggregate Responses",
-        titlefontsize=10, margin=5Plots.mm)
-
-    # Row 1: GDP, CPI, RER, TB, Goods Consumption
-    Plots.plot!(p_agg, periods, gdp_irf, subplot=1,
-        label="GDP", color=:steelblue, lw=2,
-        ylabel="% dev. from SS", title="GDP")
-    Plots.hline!(p_agg, [0.0], subplot=1, color=:black, lw=0.6, ls=:dash, label="")
-
-    Plots.plot!(p_agg, periods, pi_irf .* 4, subplot=2,
-        label="CPI inflation", color=:firebrick, lw=2,
-        title="CPI Inflation (ann. pp)")
-    Plots.hline!(p_agg, [0.0], subplot=2, color=:black, lw=0.6, ls=:dash, label="")
-
-    Plots.plot!(p_agg, periods, q_irf, subplot=3,
-        label="RER (Q)", color=:forestgreen, lw=2,
-        title="Real Exchange Rate")
-    Plots.hline!(p_agg, [0.0], subplot=3, color=:black, lw=0.6, ls=:dash, label="")
-
-    tb_gdp_irf = tb_irf .* (TB_ss / GDP_ss)
-    Plots.plot!(p_agg, periods, tb_gdp_irf, subplot=4,
-        label="TB/GDP", color=:darkorange, lw=2,
-        title="Trade Balance (% GDP)")
-    Plots.hline!(p_agg, [0.0], subplot=4, color=:black, lw=0.6, ls=:dash, label="")
-
-    Plots.plot!(p_agg, periods, cg_irf, subplot=5,
-        label="Goods C", color=:steelblue, lw=2,
-        title="Goods Consumption")
-    Plots.hline!(p_agg, [0.0], subplot=5, color=:black, lw=0.6, ls=:dash, label="")
-
-    # Row 2: Policy Rate, Real Wage, Goods Inflation, Services Inflation, Services Consumption
-    Plots.plot!(p_agg, periods, r_irf .* 4, subplot=6,
-        label="Policy rate", color=:darkorchid, lw=2,
-        xlabel="Quarters", ylabel="ann. pp dev.", title="Policy Rate")
-    Plots.hline!(p_agg, [0.0], subplot=6, color=:black, lw=0.6, ls=:dash, label="")
-
-    Plots.plot!(p_agg, periods, w_irf, subplot=7,
-        label="Real wage", color=:teal, lw=2,
-        xlabel="Quarters", title="Real Wage")
-    Plots.hline!(p_agg, [0.0], subplot=7, color=:black, lw=0.6, ls=:dash, label="")
-
-    Plots.plot!(p_agg, periods, agg_infl_g, subplot=8,
-        label="Goods", color=:steelblue, lw=2,
-        xlabel="Quarters", title="Goods Inflation (ann. pp)")
-    Plots.hline!(p_agg, [0.0], subplot=8, color=:black, lw=0.6, ls=:dash, label="")
-
-    Plots.plot!(p_agg, periods, agg_infl_s, subplot=9,
-        label="Services", color=:firebrick, lw=2,
-        xlabel="Quarters", title="Services Inflation (ann. pp)")
-    Plots.hline!(p_agg, [0.0], subplot=9, color=:black, lw=0.6, ls=:dash, label="")
-
-    Plots.plot!(p_agg, periods, cs_irf, subplot=10,
-        label="Services C", color=:firebrick, lw=2,
-        xlabel="Quarters", title="Services Consumption")
-    Plots.hline!(p_agg, [0.0], subplot=10, color=:black, lw=0.6, ls=:dash, label="")
-
-    save_fig(p_agg, "irf_aggregate_mfg_shock.pdf")
-
-
-    # ------------------------------------------------------------------ #
-    # Figure 2: Sectoral Output IRFs (4×3 panel)                          #
-    # ------------------------------------------------------------------ #
-    p_sec_y = Plots.plot(layout=(4, 3), size=(1200, 900),
-        plot_title="1% Manufacturing TFP Shock — Sectoral Output",
-        titlefontsize=8)
-    for i in 1:12
-        yi = get_irf_var("Y_$(i)")
-        Plots.plot!(p_sec_y, periods, yi, subplot=i,
-            label="", color=sector_colors[i], lw=1.8,
-            title=short_names[i], titlefontsize=7,
-            ylabel=(i % 3 == 1 ? "% dev." : ""))
-        Plots.hline!(p_sec_y, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
-    end
-    save_fig(p_sec_y, "irf_sectoral_Y_mfg_shock.pdf")
-
-
-    # ------------------------------------------------------------------ #
-    # Figure 3: Sectoral Home-Price Inflation IRFs (4×3 panel)            #
-    # ------------------------------------------------------------------ #
-    p_sec_pi = Plots.plot(layout=(4, 3), size=(1200, 900),
-        plot_title="1% Manufacturing TFP Shock — Sectoral Inflation (ann. pp)",
-        titlefontsize=8)
-    for i in 1:12
-        pi_i = get_inflation_irf(i)
-        Plots.plot!(p_sec_pi, periods, pi_i, subplot=i,
-            label="", color=sector_colors[i], lw=1.8,
-            title=short_names[i], titlefontsize=7,
-            ylabel=(i % 3 == 1 ? "ann. pp" : ""))
-        Plots.hline!(p_sec_pi, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
-    end
-    save_fig(p_sec_pi, "irf_sectoral_inflation_mfg_shock.pdf")
-
-
-    # ------------------------------------------------------------------ #
-    # Figure 4: Aggregate Inflation Decomposition (Goods/Services/Total)  #
-    # ------------------------------------------------------------------ #
-    p_agg_pi = Plots.plot(size=(800, 500),
-        title="1% Mfg TFP Shock — Expenditure-Weighted Home-Price Inflation",
-        titlefontsize=10, xlabel="Quarters", ylabel="Annualized pp dev. from SS",
-        legend=:topright, margin=5Plots.mm)
-    Plots.plot!(p_agg_pi, periods, agg_infl_tot, label="Aggregate",
-        color=:black, lw=2.5, ls=:solid)
-    Plots.plot!(p_agg_pi, periods, agg_infl_g, label="Goods (sectors 1–5)",
-        color=:steelblue, lw=2, ls=:dash)
-    Plots.plot!(p_agg_pi, periods, agg_infl_s, label="Services (sectors 6–12)",
-        color=:firebrick, lw=2, ls=:dot)
-    Plots.hline!(p_agg_pi, [0.0], color=:black, lw=0.6, ls=:dash, label="")
-    save_fig(p_agg_pi, "irf_aggregate_inflation_mfg_shock.pdf")
-
-
-    # ------------------------------------------------------------------ #
-    # Figure 4b: Aggregate Labor Market IRFs (N and w)                    #
-    # ------------------------------------------------------------------ #
-    w_irf_full = get_irf_var("w")
-    n_irf_lab  = get_irf_var("N")
-
-    p_lab_agg = Plots.plot(layout=(1, 2), size=(1000, 400),
-        plot_title="1% Manufacturing TFP Shock — Aggregate Labor Market",
-        titlefontsize=10, margin=5Plots.mm)
-
-    Plots.plot!(p_lab_agg, periods, n_irf_lab, subplot=1,
-        label="Employment (N)", color=:steelblue, lw=2,
-        xlabel="Quarters", ylabel="% dev. from SS", title="Aggregate Employment")
-    Plots.hline!(p_lab_agg, [0.0], subplot=1, color=:black, lw=0.6, ls=:dash, label="")
-
-    Plots.plot!(p_lab_agg, periods, w_irf_full, subplot=2,
-        label="Wage (w)", color=:firebrick, lw=2,
-        xlabel="Quarters", ylabel="% dev. from SS", title="Real Wage")
-    Plots.hline!(p_lab_agg, [0.0], subplot=2, color=:black, lw=0.6, ls=:dash, label="")
-
-    save_fig(p_lab_agg, "irf_labor_aggregate_mfg_shock.pdf")
-
-
-    # ------------------------------------------------------------------ #
-    # Figure 4c: Sectoral Employment IRFs (4×3 panel)                     #
-    # ------------------------------------------------------------------ #
-    p_sec_l = Plots.plot(layout=(4, 3), size=(1200, 900),
-        plot_title="1% Manufacturing TFP Shock — Sectoral Employment",
-        titlefontsize=8)
-    for i in 1:12
-        li = get_irf_var("L_$(i)")
-        clr = (i == mfg_sector) ? :firebrick : sector_colors[i]
-        lw_i = (i == mfg_sector) ? 2.5 : 1.8
-        Plots.plot!(p_sec_l, periods, li, subplot=i,
-            label="", color=clr, lw=lw_i,
-            title=short_names[i], titlefontsize=7,
-            ylabel=(i % 3 == 1 ? "% dev." : ""))
-        Plots.hline!(p_sec_l, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
-    end
-    save_fig(p_sec_l, "irf_sectoral_L_mfg_shock.pdf")
-
-
-    # ------------------------------------------------------------------ #
-    # Figure 4d: Aggregate Output Gap IRFs (Ygap and GDPgap)              #
-    # ------------------------------------------------------------------ #
-    ygap_irf   = get_irf_var("Ygap")
-    gdpgap_irf = get_irf_var("GDPgap")
-
-    p_gap_agg = Plots.plot(layout=(1, 2), size=(1000, 400),
-        plot_title="1% Manufacturing TFP Shock — Aggregate Output Gap",
-        titlefontsize=10, margin=5Plots.mm)
-
-    Plots.plot!(p_gap_agg, periods, ygap_irf, subplot=1,
-        label="Output gap (Ygap)", color=:steelblue, lw=2,
-        xlabel="Quarters", ylabel="% dev. from SS", title="Output Gap")
-    Plots.hline!(p_gap_agg, [0.0], subplot=1, color=:black, lw=0.6, ls=:dash, label="")
-
-    Plots.plot!(p_gap_agg, periods, gdpgap_irf, subplot=2,
-        label="GDP gap", color=:firebrick, lw=2,
-        xlabel="Quarters", ylabel="% dev. from SS", title="GDP Gap")
-    Plots.hline!(p_gap_agg, [0.0], subplot=2, color=:black, lw=0.6, ls=:dash, label="")
-
-    save_fig(p_gap_agg, "irf_outputgap_aggregate_mfg_shock.pdf")
-
-
-    # ------------------------------------------------------------------ #
-    # Figure 4e: Sectoral Output Gap IRFs (4×3 panel)                     #
-    # ------------------------------------------------------------------ #
-    p_sec_ygap = Plots.plot(layout=(4, 3), size=(1200, 900),
-        plot_title="1% Manufacturing TFP Shock — Sectoral Output Gap",
-        titlefontsize=8)
-    for i in 1:12
-        ygi = get_irf_var("Ygap_$(i)")
-        clr = (i == mfg_sector) ? :firebrick : sector_colors[i]
-        lw_i = (i == mfg_sector) ? 2.5 : 1.8
-        Plots.plot!(p_sec_ygap, periods, ygi, subplot=i,
-            label="", color=clr, lw=lw_i,
-            title=short_names[i], titlefontsize=7,
-            ylabel=(i % 3 == 1 ? "% dev." : ""))
-        Plots.hline!(p_sec_ygap, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
-    end
-    save_fig(p_sec_ygap, "irf_sectoral_Ygap_mfg_shock.pdf")
-
-
-    # ------------------------------------------------------------------ #
-    # Figure 5 & 6: Comparison with Oil Shock (if oil IRF data exists)    #
-    # ------------------------------------------------------------------ #
-    oil_irfs_path = joinpath(TABLES_DIR, "oil_shock_irfs.csv")
-    oil_decomp_path = joinpath(TABLES_DIR, "oil_shock_decomposition.csv")
-
-    if isfile(oil_irfs_path)
-        @printf "  Loading oil shock IRFs from %s\n" oil_irfs_path
-        df_oil = CSV.read(oil_irfs_path, DataFrame)
-
-        function get_oil_irf(varname::String)
-            sub = filter(r -> String(r.variable) == varname, df_oil)
-            isempty(sub) && return zeros(n_irf)
-            s = sort(sub, :period)
-            out = zeros(n_irf)
-            n = min(n_irf, nrow(s))
-            out[1:n] .= s.value[1:n]
-            return out
-        end
-
-        # Oil sectoral nominal inflation: π̂ᴴᵢₜ = Πₜ · PHᵢₜ/PHᵢₜ₋₁ (oil shock)
-        # Add oil-shock aggregate CPI inflation to recover nominal price change.
-        pi_oil_cpi = get_oil_irf("pi")
-        function get_oil_inflation_irf(i::Int)
-            ph = get_oil_irf("PH_$(i)")
-            dph = similar(ph)
-            dph[1] = ph[1] + pi_oil_cpi[1]
-            for t in 2:n_irf
-                dph[t] = ph[t] - ph[t-1] + pi_oil_cpi[t]
-            end
-            return dph .* 4
-        end
-
-        # --- Figure 5: Aggregate comparison (4 panels) ---
-        p_comp = Plots.plot(layout=(2, 2), size=(1000, 700),
-            plot_title="Oil Price Shock vs. Manufacturing TFP Shock",
-            titlefontsize=10, margin=5Plots.mm)
-
-        Plots.plot!(p_comp, periods, get_oil_irf("GDP"), subplot=1,
-            label="Oil shock (10%)", color=:darkorange, lw=2, ls=:solid)
-        Plots.plot!(p_comp, periods, gdp_irf, subplot=1,
-            label="Mfg TFP (1%)", color=:steelblue, lw=2, ls=:dash,
-            ylabel="% dev.", title="GDP")
-        Plots.hline!(p_comp, [0.0], subplot=1, color=:black, lw=0.5, ls=:dot, label="")
-
-        Plots.plot!(p_comp, periods, get_oil_irf("pi") .* 4, subplot=2,
-            label="Oil shock (10%)", color=:darkorange, lw=2, ls=:solid)
-        Plots.plot!(p_comp, periods, pi_irf .* 4, subplot=2,
-            label="Mfg TFP (1%)", color=:steelblue, lw=2, ls=:dash,
-            title="CPI Inflation (ann. pp)")
-        Plots.hline!(p_comp, [0.0], subplot=2, color=:black, lw=0.5, ls=:dot, label="")
-
-        Plots.plot!(p_comp, periods, get_oil_irf("Q"), subplot=3,
-            label="Oil shock (10%)", color=:darkorange, lw=2, ls=:solid)
-        Plots.plot!(p_comp, periods, q_irf, subplot=3,
-            label="Mfg TFP (1%)", color=:steelblue, lw=2, ls=:dash,
-            xlabel="Quarters", ylabel="% dev.", title="Real Exchange Rate (Q)")
-        Plots.hline!(p_comp, [0.0], subplot=3, color=:black, lw=0.5, ls=:dot, label="")
-
-        Plots.plot!(p_comp, periods, get_oil_irf("r") .* 4, subplot=4,
-            label="Oil shock (10%)", color=:darkorange, lw=2, ls=:solid)
-        Plots.plot!(p_comp, periods, r_irf .* 4, subplot=4,
-            label="Mfg TFP (1%)", color=:steelblue, lw=2, ls=:dash,
-            xlabel="Quarters", title="Policy Rate (ann. pp)")
-        Plots.hline!(p_comp, [0.0], subplot=4, color=:black, lw=0.5, ls=:dot, label="")
-
-        save_fig(p_comp, "irf_comparison_oil_mfg.pdf")
-
-
-        # --- Figure 6: Sectoral inflation comparison (4×3 panel) ---
-        p_comp_sec = Plots.plot(layout=(4, 3), size=(1200, 900),
-            plot_title="Sectoral Inflation: Oil vs. Mfg TFP Shock",
-            titlefontsize=8)
-        for i in 1:12
-            pi_oil_i = get_oil_inflation_irf(i)
-            pi_mfg_i = get_inflation_irf(i)
-            Plots.plot!(p_comp_sec, periods, pi_oil_i, subplot=i,
-                label=(i == 1 ? "Oil (10%)" : ""), color=:darkorange, lw=1.8, ls=:solid)
-            Plots.plot!(p_comp_sec, periods, pi_mfg_i, subplot=i,
-                label=(i == 1 ? "Mfg TFP (1%)" : ""), color=:steelblue, lw=1.8, ls=:dash,
-                title=short_names[i], titlefontsize=7,
-                ylabel=(i % 3 == 1 ? "ann. pp" : ""))
-            Plots.hline!(p_comp_sec, [0.0], subplot=i, color=:black, lw=0.5, ls=:dot, label="")
-        end
-        save_fig(p_comp_sec, "irf_comparison_sectoral_inflation.pdf")
-
-    else
-        @printf "  [Oil IRF data not found at %s — skipping comparison figures]\n" oil_irfs_path
-        @printf "  Run oil_shock_analysis.jl first to generate comparison figures.\n"
-    end
-
-end  # _HAS_PLOTS
-
-
-# =========================================================================== #
-#  SAVE IRF DATA AS CSV                                                        #
-# =========================================================================== #
-
-df_irf_out = DataFrame(period=repeat(1:n_irf, outer=n_endo))
-df_irf_out.variable = repeat(endo_names, inner=n_irf)
-df_irf_out.value    = vec(irf_pct')
-CSV.write(joinpath(TABLES_DIR, "mfg_shock_irfs.csv"), df_irf_out)
-@printf "\n  Saved: mfg_shock_irfs.csv\n"
 
 
 # =========================================================================== #
@@ -908,9 +668,14 @@ CSV.write(joinpath(TABLES_DIR, "mfg_shock_irfs.csv"), df_irf_out)
 
 @printf "\n%s\n" repeat("=", 70)
 @printf "  Manufacturing TFP shock analysis complete.\n"
-@printf "  Figures → %s\n" FIGURES_DIR
-if overleaf_ok; @printf "  Overleaf → %s\n" OVERLEAF_DIR; end
-@printf "  Tables  → %s\n" TABLES_DIR
+@printf "  Figures (local)   → %s\n" FIGURES_DIR
+@printf "  Tables  (local)   → %s\n" TABLES_DIR
+if overleaf_ok
+    @printf "  Figures (Overleaf) → %s\n" OVERLEAF_FIG_DIR
+    @printf "  Tables  (Overleaf) → %s\n" OVERLEAF_TAB_DIR
+else
+    @printf "  Overleaf sync     → not available (folder not found)\n"
+end
 @printf "%s\n\n" repeat("=", 70)
 
 end  # function _main()
