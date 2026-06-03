@@ -3,11 +3,11 @@ agrmin_shock_analysis.jl
 ========================
 NK-IOSOE 12-sector model for Chile — Joint Agriculture + Mining TFP Shock Analysis
 
-Applies a SIMULTANEOUS -10% total-factor-productivity shock to both Agriculture
+Applies a SIMULTANEOUS -1% total-factor-productivity shock to both Agriculture
 (sector 1) and Mining (sector 2) and traces the joint transmission through the
 input-output network, mirroring the single-sector TFP shock scripts.
 
-Computes the response of the Chilean economy to a SIMULTANEOUS -10% TFP shock
+Computes the response of the Chilean economy to a SIMULTANEOUS -1% TFP shock
 to Agriculture (sector 1) and Mining (sector 2), decomposes the transmission
 into direct cost and network amplification channels, and generates
 publication-quality figures (PDF) and LaTeX tables.
@@ -18,7 +18,7 @@ Workflow:
   3.  Turn on epsA_1 and epsA_2 (Agriculture + Mining TFP) simultaneously
   4.  Solve steady state and write params_jl.mod
   5.  Run Dynare (subprocess) to get decision rules
-  6.  Compute IRFs to the joint -10% TFP shock (superpose the two scaled impulses)
+  6.  Compute IRFs to the joint -1% TFP shock (superpose the two scaled impulses)
   7.  Decompose: direct own-cost push vs. IO network amplification (Leontief)
   8.  Generate PDF figures and LaTeX tables (shared shock_plots_common routines)
 
@@ -87,7 +87,7 @@ end
 function _main()
 
 @printf "\n%s\n" repeat("=", 70)
-@printf "  NK-SOE 12-sector model — Joint Agriculture + Mining TFP Shock Analysis (-10%%)\n"
+@printf "  NK-SOE 12-sector model — Joint Agriculture + Mining TFP Shock Analysis (-1%%)\n"
 @printf "%s\n\n" repeat("=", 70)
 
 
@@ -513,16 +513,16 @@ shock_cols = [5 + s for s in shock_sectors]
 
 
 # =========================================================================== #
-#  COMPUTE IRFs: JOINT -10% TFP SHOCK (Agriculture + Mining)                   #
+#  COMPUTE IRFs: JOINT -1% TFP SHOCK (Agriculture + Mining)                   #
 #                                                                              #
-#  Each shocked sector's own TFP is driven down by exactly 10% on impact.      #
+#  Each shocked sector's own TFP is driven down by exactly 1% on impact.      #
 #  The model is linear, so the joint response is the SUM of the two scaled     #
 #  single-sector impulses applied in the SAME period.  For each sector k we    #
-#  pick the scale so that A_k drops 10% on impact, then superpose.             #
+#  pick the scale so that A_k drops 1% on impact, then superpose.             #
 # =========================================================================== #
 
-shock_pct = -0.10   # 10% negative productivity (TFP) shock per shocked sector
-# Per-sector scale: drive each shocked sector's own A down exactly 10% on impact.
+shock_pct = -0.01   # 1% negative productivity (TFP) shock per shocked sector
+# Per-sector scale: drive each shocked sector's own A down exactly 1% on impact.
 scale_factors = Vector{Float64}(undef, length(shock_sectors))
 for (idx, s) in enumerate(shock_sectors)
     _a_unit = ghu[get(endo_idx, "A_$(s)", 0), shock_cols[idx]]
@@ -530,7 +530,7 @@ for (idx, s) in enumerate(shock_sectors)
     @printf "  A_%d unit response = %.5f -> scale factor = %.4f\n" s _a_unit scale_factors[idx]
 end
 
-@printf "\n--- Computing IRFs (joint -10%% TFP shock, sectors %s) ---\n\n" string(shock_sectors)
+@printf "\n--- Computing IRFs (joint -1%% TFP shock, sectors %s) ---\n\n" string(shock_sectors)
 
 n_irf = 40   # quarters
 
@@ -615,8 +615,8 @@ va_irf_impact = va_irf_mat[:, 1]
 infl = compute_inflation_aggregates(ph_irf_mat, pi_irf, C_gi_ss, C_si_ss, nsec, n_irf)
 
 # Direct vs. network MC decomposition (Leontief):
-# the joint -10% productivity shock raises BOTH shocked sectors' own marginal
-# cost by +10% on impact (= -Ahat_k); zero direct push elsewhere.  Network
+# the joint -1% productivity shock raises BOTH shocked sectors' own marginal
+# cost by +1% on impact (= -Ahat_k); zero direct push elsewhere.  Network
 # propagation of those cost increases downstream is the Leontief amplification.
 direct_mc = -a_irf_mat[:, 1]                 # own-sector cost push (%, impact)
 dec = leontief_decomp(direct_mc, modalpha, modbeta, Yi_ss)
@@ -633,7 +633,7 @@ end
 
 # Sanity check: confirm both shocked sectors' TFP and output signs
 for s in shock_sectors
-    @printf "  Verificación shock: A_%d impacto = %+.2f%% (debe ser ≈ -10%%),  VA_%d impacto = %+.2f%%\n" s a_irf_mat[s,1] s va_irf_impact[s]
+    @printf "  Verificación shock: A_%d impacto = %+.2f%% (debe ser ≈ -1%%),  VA_%d impacto = %+.2f%%\n" s a_irf_mat[s,1] s va_irf_impact[s]
 end
 
 # 5-way GE marginal-cost decomposition at h = 1, 2, 4
@@ -644,7 +644,7 @@ ge_h2 = ge_mc_components(:tfp, 2, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, moda
 ge_h4 = ge_mc_components(:tfp, 4, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; ge_kwargs...)
 ge_colors, ge_labels = ge_component_style(:tfp)
 
-@printf "--- Aggregate IRFs (joint -10%% Agriculture + Mining TFP shock, impact) ---
+@printf "--- Aggregate IRFs (joint -1%% Agriculture + Mining TFP shock, impact) ---
 "
 @printf "  GDP %+.3f%%   pi %+.3f ann.pp   Q %+.3f%%   r %+.3f ann.pp
 
@@ -657,7 +657,7 @@ exposure_cost  = (modalpha .* vec(sum(modbeta[:, shock_sectors], dims=2))) .* 10
 
 ctx = (
     HAS_PLOTS = _HAS_PLOTS[], tag = "agrmin",
-    title_long = "Shock Conjunto de Productividad en Agricultura y Minería (-10%)", title_short = "Shock PTF Agric.+Minería",
+    title_long = "Shock Conjunto de Productividad en Agricultura y Minería (-1%)", title_short = "Shock PTF Agric.+Minería",
     nsec = nsec, nT = nT, names_vec = names_vec, goods = goods,
     TB_ss = TB_ss, GDP_ss = GDP_ss,
     FIGURES_DIR = FIGURES_DIR, TABLES_DIR = TABLES_DIR,
@@ -675,6 +675,8 @@ ctx = (
     va_irf_impact=va_irf_impact, va_irf_mat=va_irf_mat,
     pi_sec_mat=infl.pi_sec_mat, pi_agg_irf=infl.pi_agg_irf,
     pi_goods_irf=infl.pi_goods_irf, pi_serv_irf=infl.pi_serv_irf,
+    cons_ss_all=infl.cons_ss_all, affected_sectors=shock_sectors,
+    affected_label="Agricultura y Minería",
     infl_irf_impact=infl.infl_irf_impact, infl_6m=infl.infl_6m, infl_12m=infl.infl_12m,
     direct_mc=dec.direct_mc, network_mc=dec.network_mc, total_mc=dec.total_mc,
     amp_ratio=dec.amp_ratio, agg_direct=dec.agg_direct, agg_network=dec.agg_network,

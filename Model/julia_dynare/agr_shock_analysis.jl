@@ -3,7 +3,7 @@ oil_shock_analysis.jl
 =====================
 NK-IOSOE 12-sector model for Chile — Agriculture TFP Shock Analysis
 
-Computes the response of the Chilean economy to a 10% world oil price shock,
+Computes the response of the Chilean economy to a -1% sectoral TFP shock,
 decomposes the transmission into direct cost and network amplification channels,
 and generates publication-quality figures (PDF) and LaTeX tables.
 
@@ -13,7 +13,7 @@ Workflow:
   3.  Configure Exercise 4: oil price shock only (eps_postar)
   4.  Solve steady state and write params_jl.mod
   5.  Run Dynare (subprocess) to get decision rules
-  6.  Compute IRFs to a 10% oil price shock
+  6.  Compute IRFs to a -1% sectoral TFP shock
   7.  Decompose: direct oil cost channel vs. IO network amplification
   8.  Generate PDF figures and LaTeX tables
   9.  Run "no-network" counterfactual (diagonal IO matrix)
@@ -86,7 +86,7 @@ end
 function _main()
 
 @printf "\n%s\n" repeat("=", 70)
-@printf "  NK-SOE 12-sector model — Agriculture TFP Shock Analysis (-10%%)\n"
+@printf "  NK-SOE 12-sector model — Agriculture TFP Shock Analysis (-1%%)\n"
 @printf "%s\n\n" repeat("=", 70)
 
 
@@ -511,22 +511,19 @@ shock_col = 5 + shock_sector
 
 
 # =========================================================================== #
-#  COMPUTE IRFs: 10% OIL PRICE SHOCK                                           #
+#  COMPUTE IRFs: -1% SECTORAL TFP SHOCK                                        #
 #                                                                              #
-#  The shock size is chosen so that POstar jumps by 10% on impact.             #
-#  In the .mod file: log(POstar/POstar_ss) = rho*log(POstar(-1)/POstar_ss)    #
-#                                            + sigma_postar * eps_postar       #
-#  For a 10% shock: sigma_postar * eps_postar = log(1.10)                     #
-#  Since sigma_postar = 0.02, we need eps_postar = log(1.10) / 0.02 ≈ 4.76   #
-#  The IRFs are linear, so we scale: IRF(10%) = scale_factor * IRF(1 s.d.)    #
+#  The unit-epsA impulse is rescaled so that the shocked sector's TFP (A_k)    #
+#  falls by exactly 1% on impact.  The IRFs are linear, so:                    #
+#  IRF(-1%) = scale_factor * IRF(1 s.d.)                                       #
 # =========================================================================== #
 
-shock_pct = -0.10   # 10% negative productivity (TFP) shock
-# Scale the unit-epsA_k impulse so that A_k drops exactly 10% on impact.
+shock_pct = -0.01   # 1% negative productivity (TFP) shock
+# Scale the unit-epsA_k impulse so that A_k drops exactly 1% on impact.
 _a_unit = ghu[get(endo_idx, "A_$(shock_sector)", 0), shock_col]
 scale_factor = abs(_a_unit) > 1e-12 ? shock_pct / _a_unit : shock_pct / isigma_tfp_val[shock_sector]
 
-@printf "--- Computing IRFs (-10%% TFP shock, sector %d) ---\n" shock_sector
+@printf "--- Computing IRFs (-1%% TFP shock, sector %d) ---\n" shock_sector
 @printf "  A_%d unit response = %.5f -> scale factor = %.4f\n\n" shock_sector _a_unit scale_factor
 
 n_irf = 40   # quarters
@@ -608,8 +605,8 @@ va_irf_impact = va_irf_mat[:, 1]
 infl = compute_inflation_aggregates(ph_irf_mat, pi_irf, C_gi_ss, C_si_ss, nsec, n_irf)
 
 # Direct vs. network MC decomposition (Leontief):
-# the -10% productivity shock raises the shocked sector's own marginal cost by
-# +10% on impact (= -Ahat_k); zero direct push elsewhere.  Network propagation
+# the -1% productivity shock raises the shocked sector's own marginal cost by
+# +1% on impact (= -Ahat_k); zero direct push elsewhere.  Network propagation
 # of that cost increase to downstream sectors is the Leontief amplification.
 direct_mc = -a_irf_mat[:, 1]                 # own-sector cost push (%, impact)
 dec = leontief_decomp(direct_mc, modalpha, modbeta, Yi_ss)
@@ -625,7 +622,7 @@ end
 "
 
 # Sanity check: confirm the shocked sector's TFP and output signs
-@printf "  Verificación shock: A_%d impacto = %+.2f%% (debe ser ≈ -10%%),  Y_%d impacto = %+.2f%% (debe ser negativo)\n" k a_irf_mat[k,1] k y_irf_impact[k]
+@printf "  Verificación shock: A_%d impacto = %+.2f%% (debe ser ≈ -1%%),  Y_%d impacto = %+.2f%% (debe ser negativo)\n" k a_irf_mat[k,1] k y_irf_impact[k]
 
 # 5-way GE marginal-cost decomposition at h = 1, 2, 4
 alpha_L_vec = 1.0 .- modalpha .- modalphaV
@@ -635,7 +632,7 @@ ge_h2 = ge_mc_components(:tfp, 2, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, moda
 ge_h4 = ge_mc_components(:tfp, 4, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; ge_kwargs...)
 ge_colors, ge_labels = ge_component_style(:tfp)
 
-@printf "--- Aggregate IRFs (-10%% Agriculture TFP shock, impact) ---
+@printf "--- Aggregate IRFs (-1%% Agriculture TFP shock, impact) ---
 "
 @printf "  GDP %+.3f%%   pi %+.3f ann.pp   Q %+.3f%%   r %+.3f ann.pp
 
@@ -647,7 +644,7 @@ exposure_cost  = (modalpha .* modbeta[:, k]) .* 100    # share of total input co
 
 ctx = (
     HAS_PLOTS = _HAS_PLOTS[], tag = "agr",
-    title_long = "Shock de Productividad en Agricultura (-10%)", title_short = "Shock PTF Agricultura",
+    title_long = "Shock de Productividad en Agricultura (-1%)", title_short = "Shock PTF Agricultura",
     nsec = nsec, nT = nT, names_vec = names_vec, goods = goods,
     TB_ss = TB_ss, GDP_ss = GDP_ss,
     FIGURES_DIR = FIGURES_DIR, TABLES_DIR = TABLES_DIR,
@@ -665,6 +662,8 @@ ctx = (
     va_irf_impact=va_irf_impact, va_irf_mat=va_irf_mat,
     pi_sec_mat=infl.pi_sec_mat, pi_agg_irf=infl.pi_agg_irf,
     pi_goods_irf=infl.pi_goods_irf, pi_serv_irf=infl.pi_serv_irf,
+    cons_ss_all=infl.cons_ss_all, affected_sectors=[shock_sector],
+    affected_label="Agricultura",
     infl_irf_impact=infl.infl_irf_impact, infl_6m=infl.infl_6m, infl_12m=infl.infl_12m,
     direct_mc=dec.direct_mc, network_mc=dec.network_mc, total_mc=dec.total_mc,
     amp_ratio=dec.amp_ratio, agg_direct=dec.agg_direct, agg_network=dec.agg_network,

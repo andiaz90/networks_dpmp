@@ -645,6 +645,10 @@ ctx = (
     va_irf_impact=va_irf_impact, va_irf_mat=va_irf_mat,
     pi_sec_mat=infl.pi_sec_mat, pi_agg_irf=infl.pi_agg_irf,
     pi_goods_irf=infl.pi_goods_irf, pi_serv_irf=infl.pi_serv_irf,
+    cons_ss_all=infl.cons_ss_all,
+    # "Affected" = sectors with above-average DIRECT oil cost share (αV·αOil).
+    affected_sectors=findall((modalphaV .* modalphaOil) .> mean(modalphaV .* modalphaOil)),
+    affected_label="Sectores intensivos en petróleo",
     infl_irf_impact=infl.infl_irf_impact, infl_6m=infl.infl_6m, infl_12m=infl.infl_12m,
     direct_mc=dec.direct_mc, network_mc=dec.network_mc, total_mc=dec.total_mc,
     amp_ratio=dec.amp_ratio, agg_direct=dec.agg_direct, agg_network=dec.agg_network,
