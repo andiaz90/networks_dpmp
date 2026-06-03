@@ -2,8 +2,9 @@
 """
 run_all_shocks.jl
 =================
-Runs the four shock-analysis scripts — oil price, agriculture / mining /
-manufacturing TFP — one after another, each in its OWN Julia subprocess.
+Runs the shock-analysis scripts — oil price, agriculture / mining /
+manufacturing TFP, and the joint agriculture+mining TFP shock — one after
+another, each in its OWN Julia subprocess.
 
 Running each script as a separate process (rather than `include`-ing them) keeps
 their global state and Dynare model cache isolated, exactly as if you launched
@@ -13,7 +14,7 @@ Usage:
   julia --project=. run_all_shocks.jl            # run all four
   julia --project=. run_all_shocks.jl oil mfg    # run only the named ones
 
-Tags: oil, agr, min, mfg
+Tags: oil, agr, min, mfg, agrmin
 """
 
 using Printf
@@ -22,10 +23,11 @@ const SCRIPT_DIR = @__DIR__
 
 # (tag, label, script file) — oil first so its IRF CSV exists for anything downstream.
 const ALL_SHOCKS = [
-    ("oil", "Petróleo",     "oil_shock_analysis.jl"),
-    ("agr", "Agricultura",  "agr_shock_analysis.jl"),
-    ("min", "Minería",      "min_shock_analysis.jl"),
-    ("mfg", "Manufactura",  "mfg_shock_analysis.jl"),
+    ("oil",    "Petróleo",            "oil_shock_analysis.jl"),
+    ("agr",    "Agricultura",         "agr_shock_analysis.jl"),
+    ("min",    "Minería",             "min_shock_analysis.jl"),
+    ("mfg",    "Manufactura",         "mfg_shock_analysis.jl"),
+    ("agrmin", "Agricultura+Minería", "agrmin_shock_analysis.jl"),
 ]
 
 # Optional CLI filter: keep only the shocks whose tag was passed as an argument.

@@ -56,6 +56,10 @@ function standard_fignames(tag::AbstractString)
         :decomp_mc_impact => "decomposition_mc_inflation_$(tag)_baseline.pdf",
         :decomp_mc_6m     => "decomposition_mc_inflation_6m_$(tag)_baseline.pdf",
         :decomp_mc_12m    => "decomposition_mc_inflation_12m_$(tag)_baseline.pdf",
+        # 3-way grouped version (direct / indirect / others)
+        :decomp_mc3_impact => "decomposition_mc3_inflation_$(tag)_baseline.pdf",
+        :decomp_mc3_6m     => "decomposition_mc3_inflation_6m_$(tag)_baseline.pdf",
+        :decomp_mc3_12m    => "decomposition_mc3_inflation_12m_$(tag)_baseline.pdf",
         :decomp_output    => "decomposition_output_$(tag)_baseline.pdf",
     )
 end
@@ -78,6 +82,10 @@ function oil_fignames()
         :decomp_mc_impact => "decomposition_mc_inflation_oil_baseline.pdf",
         :decomp_mc_6m     => "decomposition_mc_inflation_6m_oil_baseline.pdf",
         :decomp_mc_12m    => "decomposition_mc_inflation_12m_oil_baseline.pdf",
+        # 3-way grouped version (direct / indirect / others)
+        :decomp_mc3_impact => "decomposition_mc3_inflation_oil_baseline.pdf",
+        :decomp_mc3_6m     => "decomposition_mc3_inflation_6m_oil_baseline.pdf",
+        :decomp_mc3_12m    => "decomposition_mc3_inflation_12m_oil_baseline.pdf",
         :decomp_output    => "decomposition_output_oil_baseline.pdf",
     )
 end
@@ -233,6 +241,31 @@ function ge_component_style(kind::Symbol)
          "Trabajo (pp)", "Residual (pp)"] :
         ["PTF propia (pp)", "Red vía precios (pp)", "Importaciones (pp)",
          "Trabajo (pp)", "Residual (pp)"]
+    return colors, labels
+end
+
+"""
+    group3_components(comps5)
+
+Collapse the 5-way GE marginal-cost decomposition into three groups for the
+coarser "direct / indirect / others" figure:
+  * Directo   = own cost push (component 1: own TFP, or direct oil)
+  * Indirecto = network propagation via input prices (component 2)
+  * Otros     = imports + labour + residual (components 3 + 4 + 5)
+`comps5` is the 5-tuple of `nsec`-vectors returned in `ge_mc_components(...).comps`.
+Returns a 3-tuple `(direct, indirect, others)`.
+"""
+function group3_components(comps5)
+    direct   = copy(comps5[1])
+    indirect = copy(comps5[2])
+    others   = comps5[3] .+ comps5[4] .+ comps5[5]
+    return (direct, indirect, others)
+end
+
+"Colours and legend labels for the 3-way (direct / indirect / others) MC bars."
+function group3_style()
+    colors = [:darkorange, :steelblue, :gray60]
+    labels = ["Directo (pp)", "Indirecto / red (pp)", "Otros (pp)"]
     return colors, labels
 end
 
@@ -470,6 +503,27 @@ function generate_shock_figures(ctx)
         "$(ctx.title_short) — Descomposición EG del Costo Marginal (12 meses, εY=$(epsY_str))",
         "Puntos porcentuales", bar_names, nsec)
     shock_save_fig(p4, fn[:decomp_mc_12m], ctx)
+
+    # ---- Descomposición agrupada en 3: Directo / Indirecto / Otros ---- #
+    # Coarser version of the GE marginal-cost decomposition above, grouping the
+    # five channels into the direct cost push, the network (indirect) propagation
+    # via input prices, and everything else (imports + labour + residual).
+    g3c, g3l = group3_style()
+    p1g = make_ge_decomp_fig(group3_components(ctx.ge_h1.comps), g3c, g3l, ctx.infl_irf_impact,
+        "Inflación precios internos (pp t-a-t, t=1)",
+        "$(ctx.title_short) — Descomposición del Costo Marginal: Directo/Indirecto/Otros (Impacto, εY=$(epsY_str))",
+        "Puntos porcentuales (t = 1)", bar_names, nsec)
+    shock_save_fig(p1g, fn[:decomp_mc3_impact], ctx)
+    p2g = make_ge_decomp_fig(group3_components(ctx.ge_h2.comps), g3c, g3l, ctx.infl_6m,
+        "Inflación precios internos (acum. 6 meses, pp)",
+        "$(ctx.title_short) — Descomposición del Costo Marginal: Directo/Indirecto/Otros (6 meses, εY=$(epsY_str))",
+        "Puntos porcentuales", bar_names, nsec)
+    shock_save_fig(p2g, fn[:decomp_mc3_6m], ctx)
+    p4g = make_ge_decomp_fig(group3_components(ctx.ge_h4.comps), g3c, g3l, ctx.infl_12m,
+        "Inflación precios internos (acum. 12 meses, pp)",
+        "$(ctx.title_short) — Descomposición del Costo Marginal: Directo/Indirecto/Otros (12 meses, εY=$(epsY_str))",
+        "Puntos porcentuales", bar_names, nsec)
+    shock_save_fig(p4g, fn[:decomp_mc3_12m], ctx)
 
     # ---- Producto (valor agregado) e inflación sectorial en el impacto ---- #
     # Report sectoral VALUE ADDED under the "Y_i" label: gross output double-counts
