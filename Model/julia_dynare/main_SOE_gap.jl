@@ -628,6 +628,175 @@ sigma_psi_val = 0.001
 
 
 # =========================================================================== #
+#  SECTORAL GDP / VALUE-ADDED SHARES                                          #
+#  VA_net = Yi - M - Vi  (net of domestic materials AND imported inputs)      #
+#  VA_mdl = Yi - M       (model's VA_ss_val convention: domestic mats only)   #
+#  %GDP shares normalize by GDP_ss = C_ss + TB_ss (expenditure side).         #
+# =========================================================================== #
+
+VAnet_vec = Yi_ss .- M_ss .- Vi_ss
+VAmdl_vec = Yi_ss .- M_ss
+VAnet_tot = sum(VAnet_vec)
+VAmdl_tot = sum(VAmdl_vec)
+
+@printf "--- Sectoral GDP / value-added shares ---\n"
+@printf "  GDP_ss = %.4f   ΣVA(Y-M-V) = %.4f   ΣVA(Y-M) = %.4f\n\n" GDP_ss VAnet_tot VAmdl_tot
+@printf "%-32s %11s %8s %8s %11s %8s %8s\n" "Sector" "VA(Y-M-V)" "%GDP" "%ΣVA" "VA(Y-M)" "%GDP" "%ΣVA"
+@printf "%s\n" repeat("-", 92)
+for i in 1:nsec
+    @printf("%-32s %11.4f %7.2f%% %7.2f%% %11.4f %7.2f%% %7.2f%%\n",
+            names_vec[i],
+            VAnet_vec[i], 100*VAnet_vec[i]/GDP_ss, 100*VAnet_vec[i]/VAnet_tot,
+            VAmdl_vec[i], 100*VAmdl_vec[i]/GDP_ss, 100*VAmdl_vec[i]/VAmdl_tot)
+end
+@printf "%s\n" repeat("-", 92)
+@printf("%-32s %11.4f %7.2f%% %7.2f%% %11.4f %7.2f%% %7.2f%%\n",
+        "TOTAL",
+        VAnet_tot, 100*VAnet_tot/GDP_ss, 100.0,
+        VAmdl_tot, 100*VAmdl_tot/GDP_ss, 100.0)
+@printf "\n"
+
+# Save to tables/gdp_va_shares_<tag>.csv
+df_va_shares = DataFrame(
+    sector        = 1:nsec,
+    name          = names_vec,
+    VA_net        = VAnet_vec,                 # Yi - M - Vi
+    VA_mdl        = VAmdl_vec,                 # Yi - M
+    share_GDP_net = VAnet_vec ./ GDP_ss,
+    share_VA_net  = VAnet_vec ./ VAnet_tot,
+    share_GDP_mdl = VAmdl_vec ./ GDP_ss,
+    share_VA_mdl  = VAmdl_vec ./ VAmdl_tot,
+)
+CSV.write(joinpath(TABLES_DIR, "gdp_va_shares_$(tag).csv"), df_va_shares)
+@printf "  → saved to: %s\n\n" joinpath(TABLES_DIR, "gdp_va_shares_$(tag).csv")
+
+
+# =========================================================================== #
+#  EXPANDED VALUE ADDED  (VAE — "valor agregado expandido")                   #
+#  Method: Foster & Valdés (2012); BCCh Estudio Económico Estadístico N°148   #
+#  (Chovar & Leiva, 2026).                                                    #
+#                                                                             #
+#  Idea: a sector's relevance is not only its own value added but also the    #
+#  slices of OTHER sectors' value added that exist because of its position in #
+#  the production network — both as an input SUPPLIER (forward links) and as  #
+#  an input BUYER (backward links). Intra-sector links are excluded (they are #
+#  a zero-sum transfer already counted in the sector's own VA).               #
+#                                                                             #
+#  All quantities are NOMINAL (price × steady-state quantity).                #
+#    pY_j        = pH_j · Y_j                       (gross output, "TVT")      #
+#    VA_j        = pY_j − PMi_j·M_j − PV·Vi_j       (traditional value added)  #
+#    Z[i,j]      = nominal intermediates sector i buys from sector j          #
+#                = Γ_{i,j}·PMi_i^{εm}·pH_j^{1-εm}·M_i   (CES cost-min, ΣⱼZ=PMi·M)#
+#    totinput_j  = PMi_j·M_j + PV·Vi_j              (all intermediates: nat+imp)#
+#                                                                             #
+#  Forward (eq. 5): sector j buys S's output ⇒ slice of VA_j credited to S    #
+#    ΔVAᶠ_j(S) = [Z[j,S]/totinput_j] · VA_j                                    #
+#  Backward (eq. 6): S buys from j ⇒ slice of VA_j credited to S              #
+#    ΔVAᵇ_j(S) = [Z[S,j]/pY_j]      · VA_j                                     #
+#  Expanded: VAE_S = VA_S + Σ_{j≠S} ΔVAᶠ_j(S) + Σ_{j≠S} ΔVAᵇ_j(S)             #
+#                                                                             #
+#  NOTE / open issue (flag for Agustín): in this model ALL bilateral inter-   #
+#  mediate flows are domestic (modbeta is the domestic IO matrix); imported   #
+#  inputs Vi are an aggregate composite, not a bilateral flow. Hence the      #
+#  national/total ratios Xᴺ/Xᵀ in eqs (5)-(6) collapse to 1, so model VAE is  #
+#  an upper bound vs the data version that discounts imported-input content.  #
+# =========================================================================== #
+
+pY_ss_nom   = pH_ss .* Yi_ss                       # nominal gross output (TVT_j)
+matcost_nom = PMi_ss .* M_ss                       # domestic materials cost
+impcost_nom = PV_ss .* Vi_ss                       # imported-input cost
+VA_nom      = pY_ss_nom .- matcost_nom .- impcost_nom   # traditional nominal VA
+totinput    = matcost_nom .+ impcost_nom           # total intermediate cost (nat+imp)
+VA_nom_tot  = sum(VA_nom)
+
+# Bilateral nominal domestic intermediate-flow matrix: Z[i,j] = i buys from j
+Zflow = [ modbeta[i, j] * PMi_ss[i]^epsM_vec[i] * pH_ss[j]^(1 - epsM_vec[i]) * M_ss[i]
+          for i in 1:nsec, j in 1:nsec ]
+
+# Import discounts (proxy for the paper's national/total ratio Xᴺ/Xᵀ, which the
+# model lacks at the bilateral level). matcost/totinput = domestic share of a
+# sector's intermediate bill (buyer side); (1-α_V) = domestic share (supplier side).
+dom_input_share  = [totinput[j] > 0 ? matcost_nom[j] / totinput[j] : 1.0 for j in 1:nsec]
+dom_supply_share = 1 .- modalphaV
+
+VAE_fwd = zeros(nsec)   # forward-link contributions received by each sector S
+VAE_bwd = zeros(nsec)   # backward-link contributions received by each sector S
+VAE_fwd_adj = zeros(nsec)   # import-adjusted versions
+VAE_bwd_adj = zeros(nsec)
+for S in 1:nsec, j in 1:nsec
+    j == S && continue
+    fwd = (totinput[j]   > 0 ? Zflow[j, S] / totinput[j]   : 0.0) * VA_nom[j]
+    bwd = (pY_ss_nom[j]  > 0 ? Zflow[S, j] / pY_ss_nom[j]  : 0.0) * VA_nom[j]
+    VAE_fwd[S] += fwd
+    VAE_bwd[S] += bwd
+    VAE_fwd_adj[S] += fwd * dom_input_share[j]   # discount by buyer j's domestic-input share
+    VAE_bwd_adj[S] += bwd * dom_supply_share[j]  # discount by supplier j's domestic share (1-α_V)
+end
+VAE_vec     = VA_nom .+ VAE_fwd     .+ VAE_bwd
+VAE_vec_adj = VA_nom .+ VAE_fwd_adj .+ VAE_bwd_adj
+
+@printf "--- Expanded value added (VAE — Foster & Valdés 2012 / EEE-148) ---\n"
+@printf "  Shares are %% of total nominal value added (ΣVA = %.4f).\n" VA_nom_tot
+@printf "  VAE shares do NOT sum to 100%% — VAE is a network-influence measure, not a partition.\n\n"
+@printf "%-32s %8s %8s %8s %8s %9s\n" "Sector" "VA(dir)" "Fwd" "Bwd" "VAE" "VAE/VA"
+@printf "%s\n" repeat("-", 80)
+for i in 1:nsec
+    @printf("%-32s %7.2f%% %7.2f%% %7.2f%% %7.2f%% %8.2fx\n",
+            names_vec[i],
+            100*VA_nom[i]/VA_nom_tot,
+            100*VAE_fwd[i]/VA_nom_tot,
+            100*VAE_bwd[i]/VA_nom_tot,
+            100*VAE_vec[i]/VA_nom_tot,
+            VA_nom[i] > 0 ? VAE_vec[i]/VA_nom[i] : NaN)
+end
+@printf "%s\n" repeat("-", 80)
+@printf("%-32s %7.2f%% %7.2f%% %7.2f%% %7.2f%%\n",
+        "TOTAL (direct sums to 100%)",
+        100*sum(VA_nom)/VA_nom_tot, 100*sum(VAE_fwd)/VA_nom_tot,
+        100*sum(VAE_bwd)/VA_nom_tot, 100*sum(VAE_vec)/VA_nom_tot)
+@printf "\n"
+
+# Import-adjusted VAE (discounts imported-input content; comparable to EEE-148)
+@printf "--- Import-adjusted VAE (fwd × buyer domestic-input share; bwd × supplier (1-α_V)) ---\n"
+@printf "%-32s %8s %8s %8s %8s %9s\n" "Sector" "VA(dir)" "Fwd*" "Bwd*" "VAE*" "VAE*/VA"
+@printf "%s\n" repeat("-", 80)
+for i in 1:nsec
+    @printf("%-32s %7.2f%% %7.2f%% %7.2f%% %7.2f%% %8.2fx\n",
+            names_vec[i],
+            100*VA_nom[i]/VA_nom_tot,
+            100*VAE_fwd_adj[i]/VA_nom_tot,
+            100*VAE_bwd_adj[i]/VA_nom_tot,
+            100*VAE_vec_adj[i]/VA_nom_tot,
+            VA_nom[i] > 0 ? VAE_vec_adj[i]/VA_nom[i] : NaN)
+end
+@printf "%s\n" repeat("-", 80)
+@printf("%-32s %7.2f%% %7.2f%% %7.2f%% %7.2f%%\n",
+        "TOTAL",
+        100*sum(VA_nom)/VA_nom_tot, 100*sum(VAE_fwd_adj)/VA_nom_tot,
+        100*sum(VAE_bwd_adj)/VA_nom_tot, 100*sum(VAE_vec_adj)/VA_nom_tot)
+@printf "\n"
+
+df_vae = DataFrame(
+    sector            = 1:nsec,
+    name              = names_vec,
+    VA_direct         = VA_nom,                        # own nominal value added
+    fwd_links         = VAE_fwd,                       # forward-link VA received (raw)
+    bwd_links         = VAE_bwd,                        # backward-link VA received (raw)
+    VAE               = VAE_vec,                        # expanded value added (raw)
+    fwd_links_adj     = VAE_fwd_adj,                    # forward, import-adjusted
+    bwd_links_adj     = VAE_bwd_adj,                    # backward, import-adjusted
+    VAE_adj           = VAE_vec_adj,                    # expanded VA, import-adjusted
+    share_VA_direct   = VA_nom      ./ VA_nom_tot,      # direct share of total VA
+    share_VAE         = VAE_vec     ./ VA_nom_tot,      # expanded share (raw)
+    share_VAE_adj     = VAE_vec_adj ./ VA_nom_tot,      # expanded share (import-adjusted)
+    vae_multiplier    = VAE_vec     ./ VA_nom,          # raw VAE / direct VA
+    vae_multiplier_adj= VAE_vec_adj ./ VA_nom,          # adjusted VAE / direct VA
+)
+CSV.write(joinpath(TABLES_DIR, "vae_$(tag).csv"), df_vae)
+@printf "  → saved to: %s\n\n" joinpath(TABLES_DIR, "vae_$(tag).csv")
+
+
+# =========================================================================== #
 #  WRITE params_jl.mod  (read by NK_SOE_lev_gap2.mod via @#include)          #
 #  Dynare.jl processes this as a Dynare parameter file — no MATLAB/Octave.   #
 # =========================================================================== #

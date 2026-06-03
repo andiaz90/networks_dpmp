@@ -441,19 +441,19 @@ Price_costs = (
                                + (1-alpha_@{i}-alphaV_@{i})^(1/epsY_@{i})*(L_f_@{i})^((epsY_@{i}-1)/epsY_@{i}))^(epsY_@{i}/(epsY_@{i}-1));
 
     //% Intermediates Demand
-        MC_@{i}*(alpha_@{i}*Y_@{i}/M_@{i})^(1/epsY_@{i}) = PM_@{i};
+        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*(alpha_@{i}*Y_@{i}/M_@{i})^(1/epsY_@{i}) = PM_@{i};
     //% Intermediates Demand
-        MC_f_@{i}*(alpha_@{i}*Y_f_@{i}/M_f_@{i})^(1/epsY_@{i}) = PM_f_@{i};
+        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_f_@{i}*(alpha_@{i}*Y_f_@{i}/M_f_@{i})^(1/epsY_@{i}) = PM_f_@{i};
 
     //% Demand for imports
-        MC_@{i}*(alphaV_@{i}*Y_@{i}/V_@{i})^(1/epsY_@{i}) = PV;    
+        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*(alphaV_@{i}*Y_@{i}/V_@{i})^(1/epsY_@{i}) = PV;    
     //% Demand for imports
-        MC_f_@{i}*(alphaV_@{i}*Y_f_@{i}/V_f_@{i})^(1/epsY_@{i}) = PV_f;    
+        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_f_@{i}*(alphaV_@{i}*Y_f_@{i}/V_f_@{i})^(1/epsY_@{i}) = PV_f;    
 
     //% Labor Demand
-        MC_@{i}*((1-alpha_@{i}-alphaV_@{i})*Y_@{i}/L_@{i})^(1/epsY_@{i}) = PL_@{i};
+        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*((1-alpha_@{i}-alphaV_@{i})*Y_@{i}/L_@{i})^(1/epsY_@{i}) = PL_@{i};
     //% Labor Demand
-        MC_f_@{i}*((1-alpha_@{i}-alphaV_@{i})*Y_f_@{i}/L_f_@{i})^(1/epsY_@{i}) = PL_f_@{i};
+        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_f_@{i}*((1-alpha_@{i}-alphaV_@{i})*Y_f_@{i}/L_f_@{i})^(1/epsY_@{i}) = PL_f_@{i};
 
 
     //% Market Clearing in Each Sector

@@ -440,14 +440,14 @@ Price_costs = (
                                + (1-alpha_@{i}-alphaV_@{i})^(1/epsY_@{i})*(L_f_@{i})^((epsY_@{i}-1)/epsY_@{i}))^(epsY_@{i}/(epsY_@{i}-1));
 
     //% Intermediates Demand
-        MC_@{i}*(alpha_@{i}*Y_@{i}/M_@{i})^(1/epsY_@{i}) = PM_@{i};
+        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*(alpha_@{i}*Y_@{i}/M_@{i})^(1/epsY_@{i}) = PM_@{i};
     //% Intermediates Demand
-        MC_f_@{i}*(alpha_@{i}*Y_f_@{i}/M_f_@{i})^(1/epsY_@{i}) = PM_f_@{i};
+        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_f_@{i}*(alpha_@{i}*Y_f_@{i}/M_f_@{i})^(1/epsY_@{i}) = PM_f_@{i};
 
     //% Demand for imports (composite intermediate imports V_@{i} at sector-specific price PIV_@{i})
-        MC_@{i}*(alphaV_@{i}*Y_@{i}/V_@{i})^(1/epsY_@{i}) = PIV_@{i};
+        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*(alphaV_@{i}*Y_@{i}/V_@{i})^(1/epsY_@{i}) = PIV_@{i};
     //% Demand for imports (flex-price)
-        MC_f_@{i}*(alphaV_@{i}*Y_f_@{i}/V_f_@{i})^(1/epsY_@{i}) = PIV_f_@{i};
+        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_f_@{i}*(alphaV_@{i}*Y_f_@{i}/V_f_@{i})^(1/epsY_@{i}) = PIV_f_@{i};
 
     //% Sector-specific composite import price index (CES between oil and non-oil imports)
     //% PIV^(1-eps) = alphaOil * PO^(1-eps) + (1-alphaOil) * PV^(1-eps)
@@ -461,9 +461,9 @@ Price_costs = (
     VNon_f_@{i} = (1-alphaOilShare_@{i})*(PIV_f_@{i}/PV_f)^epsilonV_oil*V_f_@{i};
 
     //% Labor Demand
-        MC_@{i}*((1-alpha_@{i}-alphaV_@{i})*Y_@{i}/L_@{i})^(1/epsY_@{i}) = PL_@{i};
+        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*((1-alpha_@{i}-alphaV_@{i})*Y_@{i}/L_@{i})^(1/epsY_@{i}) = PL_@{i};
     //% Labor Demand
-        MC_f_@{i}*((1-alpha_@{i}-alphaV_@{i})*Y_f_@{i}/L_f_@{i})^(1/epsY_@{i}) = PL_f_@{i};
+        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_f_@{i}*((1-alpha_@{i}-alphaV_@{i})*Y_f_@{i}/L_f_@{i})^(1/epsY_@{i}) = PL_f_@{i};
 
 
     //% Market Clearing in Each Sector
