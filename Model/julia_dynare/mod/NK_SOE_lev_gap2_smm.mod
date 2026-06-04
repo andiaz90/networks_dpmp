@@ -135,6 +135,7 @@ Bstar_ss Q_ss TB_ss PX_ss V_ss CF_ss CFg_total_ss CFs_total_ss
         alphaV_@{i}
         varrho_@{i}
         isigma_tfp_@{i}
+        rho_tfp1_@{i}
         PL_ss@{i}
         shock_epsA_@{i}
         // Sectoral SS values used in initval block

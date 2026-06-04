@@ -61,6 +61,13 @@ function standard_fignames(tag::AbstractString)
         :decomp_mc3_impact => "decomposition_mc3_inflation_$(tag)_baseline.pdf",
         :decomp_mc3_6m     => "decomposition_mc3_inflation_6m_$(tag)_baseline.pdf",
         :decomp_mc3_12m    => "decomposition_mc3_inflation_12m_$(tag)_baseline.pdf",
+        # sectoral-INFLATION (first-difference) versions of the price decompositions
+        :decomp_pi_impact  => "decomposition_pi_$(tag)_baseline.pdf",
+        :decomp_pi_6m      => "decomposition_pi_6m_$(tag)_baseline.pdf",
+        :decomp_pi_12m     => "decomposition_pi_12m_$(tag)_baseline.pdf",
+        :decomp_pi3_impact => "decomposition_pi3_$(tag)_baseline.pdf",
+        :decomp_pi3_6m     => "decomposition_pi3_6m_$(tag)_baseline.pdf",
+        :decomp_pi3_12m    => "decomposition_pi3_12m_$(tag)_baseline.pdf",
         :decomp_output    => "decomposition_output_$(tag)_baseline.pdf",
     )
 end
@@ -88,6 +95,13 @@ function oil_fignames()
         :decomp_mc3_impact => "decomposition_mc3_inflation_oil_baseline.pdf",
         :decomp_mc3_6m     => "decomposition_mc3_inflation_6m_oil_baseline.pdf",
         :decomp_mc3_12m    => "decomposition_mc3_inflation_12m_oil_baseline.pdf",
+        # sectoral-INFLATION (first-difference) versions of the price decompositions
+        :decomp_pi_impact  => "decomposition_pi_oil_baseline.pdf",
+        :decomp_pi_6m      => "decomposition_pi_6m_oil_baseline.pdf",
+        :decomp_pi_12m     => "decomposition_pi_12m_oil_baseline.pdf",
+        :decomp_pi3_impact => "decomposition_pi3_oil_baseline.pdf",
+        :decomp_pi3_6m     => "decomposition_pi3_6m_oil_baseline.pdf",
+        :decomp_pi3_12m    => "decomposition_pi3_12m_oil_baseline.pdf",
         :decomp_output    => "decomposition_output_oil_baseline.pdf",
     )
 end
@@ -108,6 +122,18 @@ const SHOCK_TAB_NAMES = [
     "Construcción", "Comercio y Hoteles", "Transporte y Com.", "Finanzas",
     "Inmobiliario", "Serv.\\ Empresariales", "Serv.\\ Personales", "Adm.\\ Pública",
 ]
+
+# --------------------------------------------------------------------------- #
+#  IPoM (BCCh) chart palette — sampled from IPoM Diciembre 2025, Gráfico I.8   #
+#  ("Contribuciones a la variación anual del IPC total", incidence bars).      #
+#  Black diamond = total, as in the IPoM incidence charts.                     #
+# --------------------------------------------------------------------------- #
+const IPOM_NAVY      = "#1F2E58"   # dark navy   (Energía volátiles)
+const IPOM_LIGHTBLUE = "#4DB3E9"   # light blue  (Resto volátiles)
+const IPOM_RED       = "#C21E24"   # red         (Servicios sin volátiles)
+const IPOM_ORANGE    = "#ED6331"   # orange      (Alimentos volátiles)
+const IPOM_GREEN     = "#3BB957"   # green       (Bienes sin volátiles)
+const IPOM_YELLOW    = "#E7EB13"   # yellow      (Alimentos sin volátiles)
 
 
 # =========================================================================== #
@@ -243,14 +269,14 @@ function ge_mc_components(kind::Symbol, h::Int, ph_irf_mat, mc_irf_mat, w_irf,
             mc=copy(mc_h), price=copy(ph_h))
 end
 
-"Colours and legend labels for the 6-way price decomposition bars."
+"Colours (IPoM palette) and legend labels for the 6-way price decomposition bars."
 function ge_component_style(kind::Symbol)
-    colors = [:darkorange, :steelblue, :forestgreen, :crimson, :gray60, :mediumpurple]
+    colors = [IPOM_NAVY, IPOM_LIGHTBLUE, IPOM_GREEN, IPOM_ORANGE, IPOM_YELLOW, IPOM_RED]
     labels = kind === :price ?
-        ["Petróleo directo (pp)", "Red vía precios (pp)", "Import. no-petróleo (pp)",
-         "Trabajo (pp)", "Residual (pp)", "Margen (pp)"] :
-        ["PTF propia (pp)", "Red vía precios (pp)", "Importaciones (pp)",
-         "Trabajo (pp)", "Residual (pp)", "Margen (pp)"]
+        ["Petróleo directo", "Red vía precios", "Import. no-petróleo",
+         "Trabajo", "Residual", "Margen"] :
+        ["PTF propia", "Red vía precios", "Importaciones",
+         "Trabajo", "Residual", "Margen"]
     return colors, labels
 end
 
@@ -274,11 +300,34 @@ function group3_components(comps6)
     return (direct, indirect, markup, others)
 end
 
-"Colours and legend labels for the grouped (direct / indirect / markup / others) bars."
+"Colours (IPoM palette) and legend labels for the grouped (direct / indirect / markup / others) bars."
 function group3_style()
-    colors = [:darkorange, :steelblue, :mediumpurple, :gray60]
-    labels = ["Directo (pp)", "Indirecto / red (pp)", "Margen (pp)", "Otros (pp)"]
+    colors = [IPOM_NAVY, IPOM_LIGHTBLUE, IPOM_RED, IPOM_ORANGE]
+    labels = ["Directo", "Indirecto/Network", "Márgenes + Expectativas", "Otros Costos Marginales"]
     return colors, labels
+end
+
+"""
+    ge_inflation_components(geh, gehm1, pi_h, nsec)
+
+First-difference (INFLATION) version of the GE price decomposition at one
+horizon.  Sectoral nominal home-price inflation (annualised, pp) is
+    π_i[h] = 4·(p̂H_i[h] − p̂H_i[h−1] + π[h]),
+where p̂H is the relative home price and π is aggregate CPI inflation.  Since
+the price components sum exactly to p̂H at each horizon, differencing each of
+the six components (×4) preserves additivity.  The common nominal-drift term
+4·π[h] (identical across sectors) is folded into the RESIDUAL component rather
+than shown as an explicit bar, so the stack still sums exactly to sectoral
+inflation π_i[h] and the figure keeps the same 6 bars as the price version.
+Pass `gehm1 = nothing` for h = 1 (pre-shock components are zero).
+Returns a 6-tuple of `nsec`-vectors (order as in `ge_mc_components`).
+"""
+function ge_inflation_components(geh, gehm1, pi_h, nsec)
+    base = gehm1 === nothing ?
+        [4.0 .* c for c in geh.comps] :
+        [4.0 .* (c .- cm) for (c, cm) in zip(geh.comps, gehm1.comps)]
+    base[5] = base[5] .+ 4.0 * pi_h     # aggregate CPI inflation → residual
+    return Tuple(base)
 end
 
 
@@ -332,7 +381,8 @@ shock_bar_rect(x, y0, y1, w=0.65) = Main.Plots.Shape(
 # =========================================================================== #
 
 function make_ge_decomp_fig(comps, comp_colors, comp_labels, infl_h, infl_label,
-                            title_str, ylabel_str, bar_names, nsec)
+                            title_str, ylabel_str, bar_names, nsec;
+                            axis2_sectors=Int[])
     P = Main.Plots
     # Drop Public Administration from the decomposition figures.
     keep = [i for i in 1:nsec if !occursin("blica", bar_names[i])]
@@ -341,26 +391,61 @@ function make_ge_decomp_fig(comps, comp_colors, comp_labels, infl_h, infl_label,
     bar_names = bar_names[keep]
     nsec = length(keep)
     comp_mat = hcat(comps...)                 # nsec × ncomp
+    # ---- Optional secondary axis -------------------------------------------- #
+    # The sectors in `axis2_sectors` (original 1:12 indices, e.g. the sectors
+    # directly hit by the shock) are MOVED TO THE LEFTMOST bars and read on the
+    # LEFT axis (true values).  The remaining sectors are drawn rescaled UP by a
+    # round factor `s_ax2` and read on the right-hand axis (= left limits ÷
+    # s_ax2), so their much smaller responses stay visible.  A dashed separator
+    # and group labels (added below) mark which sectors read on which axis.
+    ax2pos = findall(i -> i in axis2_sectors, keep)
+    s_ax2 = 1.0
+    if !isempty(ax2pos) && length(ax2pos) < nsec
+        ord = vcat(ax2pos, setdiff(1:nsec, ax2pos))   # shocked sectors → leftmost
+        comp_mat  = comp_mat[ord, :]
+        infl_h    = infl_h[ord]
+        bar_names = bar_names[ord]
+        ax2pos = collect(1:length(ax2pos))
+        oth    = setdiff(1:nsec, ax2pos)
+        extreme(idx) = maximum(vcat(
+            vec(sum(max.(comp_mat[idx, :], 0.0), dims=2)),
+            .-vec(sum(min.(comp_mat[idx, :], 0.0), dims=2)),
+            abs.(infl_h[idx]), [1e-12]))
+        ratio = extreme(ax2pos) / extreme(oth)
+        if ratio > 1.5
+            # round the scale factor up to 1–2–5×10^k
+            m = 10.0^floor(log10(ratio)); v = ratio / m
+            s_ax2 = (v <= 1.0 ? 1.0 : v <= 2.0 ? 2.0 : v <= 5.0 ? 5.0 : 10.0) * m
+            comp_mat[oth, :] .*= s_ax2     # draw the small group on the left scale
+            infl_h[oth] .*= s_ax2          # right axis shows their true values
+        end
+    end
     pos_mat  = max.(comp_mat, 0.0)
     neg_mat  = min.(comp_mat, 0.0)
     pos_tops = vec(sum(pos_mat, dims=2))
     neg_tops = vec(sum(neg_mat, dims=2))
     all_vals = vcat(pos_tops, neg_tops, infl_h, [0.0])
     # Additive padding around the true data range, always including zero so the
-    # negative (deflationary) part of the response is never clipped.
+    # negative (deflationary) part of the response is never clipped.  Extra top
+    # padding when the dual-axis group labels are drawn inside the plot.
     dmin = minimum(all_vals); dmax = maximum(all_vals)
     span = max(dmax - dmin, 1e-6)
     ylo = min(dmin, 0.0) - 0.10 * span
-    yhi = max(dmax, 0.0) + 0.14 * span
+    yhi = max(dmax, 0.0) + (s_ax2 > 1.0 ? 0.28 : 0.14) * span
+    # IPoM-style: title + units line in navy (no ylabel), frameless legend on
+    # top, no grid, solid thin zero line — mirrors the BCCh incidence charts.
     p = P.plot(
         xticks=(1:nsec, bar_names), xrotation=55,
-        ylabel=ylabel_str, title=title_str, titlefontsize=12,
-        size=(1400, 720), legend=:outerbottom, legend_columns=4,
-        legendfontsize=9, ylims=(ylo, yhi),
-        bottom_margin=8P.mm, left_margin=14P.mm,
-        right_margin=8P.mm, top_margin=3P.mm,
+        title="$(title_str)\n($(ylabel_str))",
+        titlefontsize=12, titlefontcolor=IPOM_NAVY, titlelocation=:left,
+        size=(1400, 760), legend=:outertop, legend_columns=3,
+        legendfontsize=9, foreground_color_legend=nothing,
+        background_color_legend=nothing, grid=false,
+        ylims=(ylo, yhi),
+        bottom_margin=8P.mm, left_margin=10P.mm,
+        right_margin=(s_ax2 > 1.0 ? 14 : 8)P.mm, top_margin=4P.mm,
         xlims=(0.3, nsec + 0.7))
-    P.hline!(p, [0.0], color=:black, lw=0.6, ls=:dash, label="")
+    P.hline!(p, [0.0], color=:black, lw=0.8, label="")
     ncomp = length(comps); bw = 0.65
     for k in 1:ncomp
         pos_bot = k > 1 ? vec(sum(pos_mat[:, 1:k-1], dims=2)) : zeros(nsec)
@@ -387,6 +472,20 @@ function make_ge_decomp_fig(comps, comp_colors, comp_labels, infl_h, infl_label,
     end
     P.scatter!(p, 1:nsec, infl_h, color=:black, markershape=:diamond,
                markersize=7, markerstrokewidth=1, label=infl_label)
+    # Right-hand axis for the rescaled (non-shocked) sectors: same axis area,
+    # ylims divided by the scale factor, so those bars read true values on the
+    # right.  Dashed separator + group labels show which axis applies.
+    if s_ax2 > 1.0
+        xsep = last(ax2pos) + 0.5
+        P.vline!(p, [xsep], color=:gray40, ls=:dash, lw=1.2, label="")
+        P.annotate!(p, (1 + last(ax2pos)) / 2, yhi - 0.04 * (yhi - ylo),
+            P.text("Sectores afectados\n(eje izquierdo)", 9, :gray30, :center))
+        P.annotate!(p, (xsep + 0.5 + nsec) / 2, yhi - 0.04 * (yhi - ylo),
+            P.text("Resto de sectores (eje derecho)", 9, :gray30, :center))
+        sp2 = P.twinx(p)
+        P.plot!(sp2, [NaN], [NaN], label="", grid=false,
+                ylims=(ylo / s_ax2, yhi / s_ax2), xlims=(0.3, nsec + 0.7))
+    end
     return p
 end
 
@@ -473,8 +572,8 @@ function generate_shock_figures(ctx)
         titlefontsize=11, xlabel="Trimestres", ylabel="Desv. pp anual del EE",
         legend=:topright, margin=5P.mm)
     P.plot!(p_gs, periods, ctx.pi_agg_irf,   label="Agregada", color=:black, lw=2.5)
-    P.plot!(p_gs, periods, ctx.pi_goods_irf, label="Bienes (sectores 1–5)", color=:steelblue, lw=2, ls=:dash)
-    P.plot!(p_gs, periods, ctx.pi_serv_irf,  label="Servicios (sectores 6–12)", color=:firebrick, lw=2, ls=:dot)
+    P.plot!(p_gs, periods, ctx.pi_goods_irf, label="Bienes (sectores 1–5)", color=IPOM_NAVY, lw=2, ls=:dash)
+    P.plot!(p_gs, periods, ctx.pi_serv_irf,  label="Servicios (sectores 6–12)", color=IPOM_RED, lw=2, ls=:dot)
     P.hline!(p_gs, [0.0], color=:black, lw=0.5, ls=:dash, label="")
     shock_save_fig(p_gs, fn[:gs_inflation], ctx)
 
@@ -507,8 +606,8 @@ function generate_shock_figures(ctx)
             titlefontsize=11, xlabel="Trimestres", ylabel="Desv. pp anual del EE",
             legend=:topright, ylims=(ylo, yhi), margin=5P.mm)
         P.plot!(p_aff, periods, ctx.pi_agg_irf, label="Agregada", color=:black, lw=2.5)
-        P.plot!(p_aff, periods, pi_aff, label="$(aff_lbl) (afectado)", color=:firebrick, lw=2, ls=:dash)
-        P.plot!(p_aff, periods, pi_oth, label="Otros sectores", color=:steelblue, lw=2, ls=:dot)
+        P.plot!(p_aff, periods, pi_aff, label="$(aff_lbl) (afectado)", color=IPOM_RED, lw=2, ls=:dash)
+        P.plot!(p_aff, periods, pi_oth, label="Otros sectores", color=IPOM_LIGHTBLUE, lw=2, ls=:dot)
         P.hline!(p_aff, [0.0], color=:black, lw=0.5, ls=:dash, label="")
         # Footnote inside the axis naming the affected sectors explicitly
         # (essential for the oil shock, where the set is data-determined).
@@ -540,7 +639,7 @@ function generate_shock_figures(ctx)
     # ---- Mapa de exposición (barra específica del shock) ---- #
     p_exp = P.bar(1:nsec, ctx.exposure_vec,
         xticks=(1:nsec, bar_names),
-        xrotation=45, label=ctx.exposure_label, color=:darkorange,
+        xrotation=45, label=ctx.exposure_label, color=IPOM_ORANGE,
         ylabel=ctx.exposure_ylabel, title=ctx.exposure_title,
         titlefontsize=14, size=(900, 450), bottom_margin=10P.mm)
     shock_save_fig(p_exp, fn[:exposure], ctx)
@@ -550,19 +649,19 @@ function generate_shock_figures(ctx)
     # the relative home-price IRF p̂H, shown as the black diamond.
     cc, cl = ctx.ge_colors, ctx.ge_labels
     p1 = make_ge_decomp_fig(ctx.ge_h1.comps, cc, cl, ctx.ge_h1.price,
-        "Δ precio interno relativo (pp, t=1)",
-        "$(ctx.title_short) — Descomposición EG del Precio Interno (Impacto, εY=$(epsY_str))",
-        "Puntos porcentuales (t = 1)", bar_names, nsec)
+        "Precio interno relativo al impacto",
+        "$(ctx.title_short) — Descomposición EG del Precio Interno (Impacto)",
+        "desviación del EE, puntos porcentuales", bar_names, nsec)
     shock_save_fig(p1, fn[:decomp_mc_impact], ctx)
     p2 = make_ge_decomp_fig(ctx.ge_h2.comps, cc, cl, ctx.ge_h2.price,
-        "Δ precio interno relativo (pp, 6 meses)",
-        "$(ctx.title_short) — Descomposición EG del Precio Interno (6 meses, εY=$(epsY_str))",
-        "Puntos porcentuales", bar_names, nsec)
+        "Precio interno relativo a 6 meses",
+        "$(ctx.title_short) — Descomposición EG del Precio Interno (6 meses)",
+        "desviación del EE, puntos porcentuales", bar_names, nsec)
     shock_save_fig(p2, fn[:decomp_mc_6m], ctx)
     p4 = make_ge_decomp_fig(ctx.ge_h4.comps, cc, cl, ctx.ge_h4.price,
-        "Δ precio interno relativo (pp, 12 meses)",
-        "$(ctx.title_short) — Descomposición EG del Precio Interno (12 meses, εY=$(epsY_str))",
-        "Puntos porcentuales", bar_names, nsec)
+        "Precio interno relativo a 12 meses",
+        "$(ctx.title_short) — Descomposición EG del Precio Interno (12 meses)",
+        "desviación del EE, puntos porcentuales", bar_names, nsec)
     shock_save_fig(p4, fn[:decomp_mc_12m], ctx)
 
     # ---- Descomposición agrupada: Directo / Indirecto / Margen / Otros ---- #
@@ -571,20 +670,49 @@ function generate_shock_figures(ctx)
     # prices, the markup, and everything else (imports + labour + residual).
     g3c, g3l = group3_style()
     p1g = make_ge_decomp_fig(group3_components(ctx.ge_h1.comps), g3c, g3l, ctx.ge_h1.price,
-        "Δ precio interno relativo (pp, t=1)",
-        "$(ctx.title_short) — Descomposición del Precio: Directo/Indirecto/Margen/Otros (Impacto, εY=$(epsY_str))",
-        "Puntos porcentuales (t = 1)", bar_names, nsec)
+        "Precio interno relativo al impacto",
+        "$(ctx.title_short) — Descomposición del Precio Interno (Impacto)",
+        "desviación del EE, puntos porcentuales", bar_names, nsec)
     shock_save_fig(p1g, fn[:decomp_mc3_impact], ctx)
     p2g = make_ge_decomp_fig(group3_components(ctx.ge_h2.comps), g3c, g3l, ctx.ge_h2.price,
-        "Δ precio interno relativo (pp, 6 meses)",
-        "$(ctx.title_short) — Descomposición del Precio: Directo/Indirecto/Margen/Otros (6 meses, εY=$(epsY_str))",
-        "Puntos porcentuales", bar_names, nsec)
+        "Precio interno relativo a 6 meses",
+        "$(ctx.title_short) — Descomposición del Precio Interno (6 meses)",
+        "desviación del EE, puntos porcentuales", bar_names, nsec)
     shock_save_fig(p2g, fn[:decomp_mc3_6m], ctx)
     p4g = make_ge_decomp_fig(group3_components(ctx.ge_h4.comps), g3c, g3l, ctx.ge_h4.price,
-        "Δ precio interno relativo (pp, 12 meses)",
-        "$(ctx.title_short) — Descomposición del Precio: Directo/Indirecto/Margen/Otros (12 meses, εY=$(epsY_str))",
-        "Puntos porcentuales", bar_names, nsec)
+        "Precio interno relativo a 12 meses",
+        "$(ctx.title_short) — Descomposición del Precio Interno (12 meses)",
+        "desviación del EE, puntos porcentuales", bar_names, nsec)
     shock_save_fig(p4g, fn[:decomp_mc3_12m], ctx)
+
+    # ---- Descomposición EG de la INFLACIÓN sectorial (impacto / 6m / 12m) ---- #
+    # First-difference version of the price decompositions above: the bars stack
+    # the change in each cost channel (annualised, ×4); the common aggregate CPI
+    # term 4·π[h] is folded into the residual bar, so the stack sums exactly to
+    # sectoral home-price inflation π_i (black diamond = ctx.pi_sec_mat) with the
+    # same 6 bars and colours as the price figures.  For the sectoral TFP shocks
+    # the caller supplies `pi_decomp_axis2` (the shocked sector(s)), which are
+    # rescaled onto a right-hand axis so the smaller responses stay legible.
+    ge_fun = get(ctx, :ge_fun, nothing)
+    if ge_fun !== nothing
+        ge_h3 = ge_fun(3)                       # needed for the 12-month difference
+        ax2 = collect(Int, get(ctx, :pi_decomp_axis2, Int[]))
+        for (h, geh, gehm1, k6, k4, lab, dlbl) in (
+                (1, ctx.ge_h1, nothing,    :decomp_pi_impact, :decomp_pi3_impact, "Impacto",  "Inflación Sectorial al Impacto"),
+                (2, ctx.ge_h2, ctx.ge_h1,  :decomp_pi_6m,     :decomp_pi3_6m,     "6 meses",  "Inflación Sectorial a 6 Meses"),
+                (4, ctx.ge_h4, ge_h3,      :decomp_pi_12m,    :decomp_pi3_12m,    "12 meses", "Inflación Sectorial a 12 Meses"))
+            comps6 = ge_inflation_components(geh, gehm1, ctx.pi_irf[h], nsec)
+            pih    = ctx.pi_sec_mat[:, h]
+            p6 = make_ge_decomp_fig(comps6, cc, cl, pih, dlbl,
+                "$(ctx.title_short) — Descomposición EG de la Inflación Sectorial ($(lab))",
+                "desviación del EE, puntos porcentuales anualizados", bar_names, nsec; axis2_sectors=ax2)
+            shock_save_fig(p6, fn[k6], ctx)
+            p4c = make_ge_decomp_fig(group3_components(comps6), g3c, g3l, pih, dlbl,
+                "$(ctx.title_short) — Descomposición de la Inflación Sectorial ($(lab))",
+                "desviación del EE, puntos porcentuales anualizados", bar_names, nsec; axis2_sectors=ax2)
+            shock_save_fig(p4c, fn[k4], ctx)
+        end
+    end
 
     # ---- Producto (valor agregado) e inflación sectorial en el impacto ---- #
     # Report sectoral VALUE ADDED under the "Y_i" label: gross output double-counts
@@ -595,9 +723,9 @@ function generate_shock_figures(ctx)
     p_out = Main.groupedbar(
         [out_impact pi_sec_impact],
         xticks=(1:nsec, bar_names), xrotation=55,
-        label=["Producto Y_i (% desv.)" "Inflación π_i (pp anual)"], color=[:steelblue :firebrick],
+        label=["Producto Y_i (% desv.)" "Inflación π_i (pp anual)"], color=[IPOM_NAVY IPOM_RED],
         ylabel="Respuesta en el impacto (t = 1)",
-        title="$(ctx.title_short) — Impacto: Producto e Inflación Sectorial (εY=$(epsY_str))",
+        title="$(ctx.title_short) — Impacto: Producto e Inflación Sectorial",
         titlefontsize=12, size=(1400, 600), legend=:topright,
         ylims=padlims(vcat(out_impact, pi_sec_impact)),
         bottom_margin=24P.mm, left_margin=14P.mm, right_margin=5P.mm)

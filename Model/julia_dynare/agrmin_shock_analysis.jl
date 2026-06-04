@@ -259,6 +259,16 @@ if isfile(smm_est_file)
     @printf "  Loaded SMM estimates from %s\n" smm_est_file
 end
 
+# ---- Agriculture TFP persistence: half-life of HALF A QUARTER ------------- #
+# ρ^h = 0.5 with h = 0.5  →  ρ_agr = 0.25.  Sector-specific: only Agriculture
+# (sector 1) gets the transitory persistence; Mining (sector 2) and all other
+# sectors keep the common (SMM) value.  rho_tfp1_val becomes an nsec-vector,
+# written as rho_tfp1_<i> by write_params_mod and used sector-by-sector in the
+# lev mod.
+rho_tfp_agr  = 0.25
+rho_tfp1_val = let v = fill(Float64(rho_tfp1_val), nsec); v[1] = rho_tfp_agr; v end
+@printf "  ρ_tfp Agricultura = %.2f (vida media: medio trimestre); Minería y resto = %.3f\n" rho_tfp_agr rho_tfp1_val[2]
+
 # ---- εY (production-input elasticity) — pinned default ------------------- #
 # Pinned to 0.5 for ALL runs, overriding the SMM estimate (εY=1.48). The SMM
 # value implied input SUBSTITUTABILITY (εY>1), which produced counterintuitive
@@ -642,6 +652,7 @@ ge_kwargs = (pv_irf=pv_irf, a_irf_mat=a_irf_mat)
 ge_h1 = ge_mc_components(:tfp, 1, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; ge_kwargs...)
 ge_h2 = ge_mc_components(:tfp, 2, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; ge_kwargs...)
 ge_h4 = ge_mc_components(:tfp, 4, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; ge_kwargs...)
+ge_fun = h -> ge_mc_components(:tfp, h, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; ge_kwargs...)
 ge_colors, ge_labels = ge_component_style(:tfp)
 
 @printf "--- Aggregate IRFs (joint -1%% Agriculture + Mining TFP shock, impact) ---
@@ -665,7 +676,7 @@ ctx = (
     overleaf_ok = overleaf_ok, fignames = standard_fignames("agrmin"),
     epsY_baseline = epsY_baseline,
     baseline_label = "Base (εY=$(round(epsY_baseline,digits=2)))",
-    baseline_color = :steelblue, baseline_lw = 2.5,
+    baseline_color = IPOM_NAVY, baseline_lw = 2.5,   # IPoM palette (shock_plots_common.jl)
     gdp_irf=gdp_irf, pi_irf=pi_irf, q_irf=q_irf, tb_irf=tb_irf, c_irf=c_irf,
     cg_irf=cg_irf, cs_irf=cs_irf, n_irf_v=n_irf_v, r_irf=r_irf, w_irf=w_irf,
     gdpgap_irf=gdpgap_irf,
@@ -676,12 +687,13 @@ ctx = (
     pi_sec_mat=infl.pi_sec_mat, pi_agg_irf=infl.pi_agg_irf,
     pi_goods_irf=infl.pi_goods_irf, pi_serv_irf=infl.pi_serv_irf,
     cons_ss_all=infl.cons_ss_all, affected_sectors=shock_sectors,
+    pi_decomp_axis2=shock_sectors,   # shocked sectors on a right-hand axis in the inflation decomps
     affected_label="Agricultura y Minería",
     infl_irf_impact=infl.infl_irf_impact, infl_6m=infl.infl_6m, infl_12m=infl.infl_12m,
     direct_mc=dec.direct_mc, network_mc=dec.network_mc, total_mc=dec.total_mc,
     amp_ratio=dec.amp_ratio, agg_direct=dec.agg_direct, agg_network=dec.agg_network,
     agg_total=dec.agg_total, agg_amp=dec.agg_amp,
-    ge_h1=ge_h1, ge_h2=ge_h2, ge_h4=ge_h4, ge_colors=ge_colors, ge_labels=ge_labels,
+    ge_h1=ge_h1, ge_h2=ge_h2, ge_h4=ge_h4, ge_fun=ge_fun, ge_colors=ge_colors, ge_labels=ge_labels,
     exposure_vec = exposure_cost,
     exposure_label = "Participación de costo de insumos desde Agricultura + Minería (%)",
     exposure_ylabel = "Participación de costo (%)",
@@ -691,7 +703,7 @@ ctx = (
     decomp_caption = "Descomposición Sectorial de un Shock Conjunto Negativo de 10\\% a la PTF en Agricultura y Minería",
     decomp_notes = "La participación de insumos es la fracción de los insumos intermedios del sector \$i\$ provenientes de Agricultura y Minería combinadas (matriz IP de Chile 2021). El CM directo es el empuje de costo por productividad propia \$-\\hat A_i\$, distinto de cero solo para los sectores afectados (Agricultura y Minería). La red es el costo adicional propagado por encadenamientos IP bajo la aproximación de Leontief de equilibrio parcial. Total = Directo + Red. Razón de amplificación = Total/Directo (mostrada solo para los sectores afectados). La IRF de producto es la respuesta sectorial en el período de impacto. B\\,=\\,Bienes, S\\,=\\,Servicios.",
     agg_caption = "Respuestas Agregadas a un Shock Conjunto Negativo de 10\\% a la PTF en Agricultura y Minería",
-    agg_notes = "PIB, consumo, empleo y TCR en \\% de desviación del estado estacionario; inflación y tasa de política en pp anualizados; balanza comercial en pp del PIB. El shock es una reducción única y simultánea de 10\\% en la productividad total de factores de los sectores Agricultura y Minería con persistencia \$\\rho = $(round(rho_tfp1_val,digits=3))\$. Impacto = respuesta en el trimestre 1. Mín/Máx = respuesta extrema en 40 trimestres.",
+    agg_notes = "PIB, consumo, empleo y TCR en \\% de desviación del estado estacionario; inflación y tasa de política en pp anualizados; balanza comercial en pp del PIB. El shock es una reducción única y simultánea de 10\\% en la productividad total de factores de los sectores Agricultura y Minería, con persistencia \$\\rho_{Agr} = $(round(rho_tfp_agr,digits=3))\$ (vida media de medio trimestre) y \$\\rho_{Min} = $(round(rho_tfp1_val[2],digits=3))\$. Impacto = respuesta en el trimestre 1. Mín/Máx = respuesta extrema en 40 trimestres.",
     get_irf = get_irf_var,
 )
 

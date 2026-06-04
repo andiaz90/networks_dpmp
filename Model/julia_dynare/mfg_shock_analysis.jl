@@ -630,6 +630,7 @@ ge_kwargs = (pv_irf=pv_irf, a_irf_mat=a_irf_mat)
 ge_h1 = ge_mc_components(:tfp, 1, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; ge_kwargs...)
 ge_h2 = ge_mc_components(:tfp, 2, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; ge_kwargs...)
 ge_h4 = ge_mc_components(:tfp, 4, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; ge_kwargs...)
+ge_fun = h -> ge_mc_components(:tfp, h, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; ge_kwargs...)
 ge_colors, ge_labels = ge_component_style(:tfp)
 
 @printf "--- Aggregate IRFs (-1%% Manufacturing TFP shock, impact) ---
@@ -652,7 +653,7 @@ ctx = (
     overleaf_ok = overleaf_ok, fignames = standard_fignames("mfg"),
     epsY_baseline = epsY_baseline,
     baseline_label = "Base (εY=$(round(epsY_baseline,digits=2)))",
-    baseline_color = :steelblue, baseline_lw = 2.5,
+    baseline_color = IPOM_NAVY, baseline_lw = 2.5,   # IPoM palette (shock_plots_common.jl)
     gdp_irf=gdp_irf, pi_irf=pi_irf, q_irf=q_irf, tb_irf=tb_irf, c_irf=c_irf,
     cg_irf=cg_irf, cs_irf=cs_irf, n_irf_v=n_irf_v, r_irf=r_irf, w_irf=w_irf,
     gdpgap_irf=gdpgap_irf,
@@ -663,12 +664,13 @@ ctx = (
     pi_sec_mat=infl.pi_sec_mat, pi_agg_irf=infl.pi_agg_irf,
     pi_goods_irf=infl.pi_goods_irf, pi_serv_irf=infl.pi_serv_irf,
     cons_ss_all=infl.cons_ss_all, affected_sectors=[shock_sector],
+    pi_decomp_axis2=[shock_sector],   # shocked sector on a right-hand axis in the inflation decomps
     affected_label="Manufactura",
     infl_irf_impact=infl.infl_irf_impact, infl_6m=infl.infl_6m, infl_12m=infl.infl_12m,
     direct_mc=dec.direct_mc, network_mc=dec.network_mc, total_mc=dec.total_mc,
     amp_ratio=dec.amp_ratio, agg_direct=dec.agg_direct, agg_network=dec.agg_network,
     agg_total=dec.agg_total, agg_amp=dec.agg_amp,
-    ge_h1=ge_h1, ge_h2=ge_h2, ge_h4=ge_h4, ge_colors=ge_colors, ge_labels=ge_labels,
+    ge_h1=ge_h1, ge_h2=ge_h2, ge_h4=ge_h4, ge_fun=ge_fun, ge_colors=ge_colors, ge_labels=ge_labels,
     exposure_vec = exposure_cost,
     exposure_label = "Participación de costo de insumos desde Manufactura (%)",
     exposure_ylabel = "Participación de costo (%)",

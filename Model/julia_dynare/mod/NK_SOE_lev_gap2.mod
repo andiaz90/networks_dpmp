@@ -134,6 +134,7 @@ Bstar_ss Q_ss TB_ss PX_ss V_ss CF_ss CFg_total_ss CFs_total_ss
         alphaV_@{i}
         varrho_@{i}
         isigma_tfp_@{i}
+        rho_tfp1_@{i}
         PL_ss@{i}
         shock_epsA_@{i}
         alphaOilShare_@{i}
@@ -552,7 +553,7 @@ xi = (1-rho_xi) + rho_xi*xi(-1) + sigma_xi*eps_xi;
 
 @#for i in 1:nsec
     //% TFP
-    exp(A_@{i}) = (1+rho_tfp2-rho_tfp1) + rho_tfp1*exp(A_@{i}(-1)) - rho_tfp2*exp(A_@{i}(-2)) + isigma_tfp_@{i}*epsA_@{i};
+    exp(A_@{i}) = (1+rho_tfp2-rho_tfp1_@{i}) + rho_tfp1_@{i}*exp(A_@{i}(-1)) - rho_tfp2*exp(A_@{i}(-2)) + isigma_tfp_@{i}*epsA_@{i};
 @#endfor
 
 //% Small open economy equations

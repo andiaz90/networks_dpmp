@@ -54,7 +54,16 @@ function write_params_mod(mod_dir::String, p::NamedTuple)
         _wp(io, "epsilon",      10.0)
         _wp(io, "rho",          p.rho_val)
         _wp(io, "rho_om1",      p.rho_om1_val)
-        _wp(io, "rho_tfp1",     p.rho_tfp1_val)
+        # rho_tfp1 accepts a scalar (common TFP persistence) or an nsec-vector
+        # (sector-specific, e.g. transitory agriculture shock with half-life of
+        # half a quarter → ρ = 0.25).  The lev mod uses the sectoral parameters
+        # rho_tfp1_<i> (written in the loop below); the scalar alias is kept for
+        # the SMM mod, whose equations use the common rho_tfp1.  When a vector
+        # is passed, the alias takes the LAST entry (an unshocked sector =
+        # common persistence) — it is unused by the lev mod in that case.
+        _rho_tfp1_vec = p.rho_tfp1_val isa AbstractVector ?
+            collect(Float64, p.rho_tfp1_val) : fill(Float64(p.rho_tfp1_val), p.nsec)
+        _wp(io, "rho_tfp1",     _rho_tfp1_vec[end])
         _wp(io, "rho_tfp2",     p.rho_tfp2_val)
         _wp(io, "rhoi",         0.5)          # rhoi = 0.5 + 0*rhoi_val
         _wp(io, "rhoirule",     p.rhoirule_val)
@@ -153,6 +162,7 @@ function write_params_mod(mod_dir::String, p::NamedTuple)
             _wp(io, "alphaV_$(i)",       p.modalphaV[i])
             _wp(io, "varrho_$(i)",       p.modvarrho[i])
             _wp(io, "isigma_tfp_$(i)",   p.isigma_tfp_val[i])
+            _wp(io, "rho_tfp1_$(i)",     _rho_tfp1_vec[i])
             _wp(io, "shock_epsA_$(i)",   p.shock_epsA_val[i])
             _wp(io, "alphaOilShare_$(i)", p.modalphaOil[i])
             _wp(io, "PIV_ss$(i)",         p.PIV_ss_vec[i])
