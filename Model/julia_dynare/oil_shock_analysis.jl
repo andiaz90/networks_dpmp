@@ -51,6 +51,7 @@ using Logging
 using NLsolve
 using CSV
 using DataFrames
+using XLSX
 using StatsBase
 
 # =========================================================================== #

@@ -68,6 +68,10 @@ function standard_fignames(tag::AbstractString)
         :decomp_pi3_impact => "decomposition_pi3_$(tag)_baseline.pdf",
         :decomp_pi3_6m     => "decomposition_pi3_6m_$(tag)_baseline.pdf",
         :decomp_pi3_12m    => "decomposition_pi3_12m_$(tag)_baseline.pdf",
+        # simplified 2-way MC version (direct / encadenamientos only)
+        :decomp_mc2_impact => "decomposition_mc2_$(tag)_baseline.pdf",
+        :decomp_mc2_6m     => "decomposition_mc2_6m_$(tag)_baseline.pdf",
+        :decomp_mc2_12m    => "decomposition_mc2_12m_$(tag)_baseline.pdf",
         :decomp_output    => "decomposition_output_$(tag)_baseline.pdf",
     )
 end
@@ -102,6 +106,10 @@ function oil_fignames()
         :decomp_pi3_impact => "decomposition_pi3_oil_baseline.pdf",
         :decomp_pi3_6m     => "decomposition_pi3_6m_oil_baseline.pdf",
         :decomp_pi3_12m    => "decomposition_pi3_12m_oil_baseline.pdf",
+        # simplified 2-way MC version (direct / encadenamientos only)
+        :decomp_mc2_impact => "decomposition_mc2_oil_baseline.pdf",
+        :decomp_mc2_6m     => "decomposition_mc2_6m_oil_baseline.pdf",
+        :decomp_mc2_12m    => "decomposition_mc2_12m_oil_baseline.pdf",
         :decomp_output    => "decomposition_output_oil_baseline.pdf",
     )
 end
@@ -303,7 +311,14 @@ end
 "Colours (IPoM palette) and legend labels for the grouped (direct / indirect / markup / others) bars."
 function group3_style()
     colors = [IPOM_NAVY, IPOM_LIGHTBLUE, IPOM_RED, IPOM_ORANGE]
-    labels = ["Directo", "Indirecto/Network", "Márgenes + Expectativas", "Otros Costos Marginales"]
+    labels = ["Directo", "Encadenamientos", "Márgenes + Expectativas", "Otros Costos Marginales"]
+    return colors, labels
+end
+
+"Colours and labels for the simplified 2-way (direct / encadenamientos) bars."
+function group2_style()
+    colors = [IPOM_NAVY, IPOM_LIGHTBLUE]
+    labels = ["Efectos directos del shock", "Efectos de encadenamiento"]
     return colors, labels
 end
 
@@ -359,6 +374,37 @@ function shock_save_fig(p, fname, ctx)
         cp(local_path, ol_path; force=true)
         @printf "  → Overleaf: %s\n" ol_path
     end
+end
+
+"""
+    save_gs_inflation_excel(periods, ctx, fig_fname)
+
+Write an Excel workbook with the exact series plotted in the goods-vs-services
+home-price inflation figure (`fig_fname`). Columns: horizon plus aggregate,
+goods and services inflation (deviations in annual pp from steady state). The
+file is saved alongside the figure in `ctx.FIGURES_DIR` with the same base name
+(`.pdf` → `.xlsx`). `XLSX`/`DataFrame` are resolved lazily from `Main`; if XLSX
+is unavailable the data are written as CSV so nothing is lost.
+"""
+function save_gs_inflation_excel(periods, ctx, fig_fname)
+    hor   = collect(periods)
+    agg   = collect(Float64, ctx.pi_agg_irf[periods])
+    goods = collect(Float64, ctx.pi_goods_irf[periods])
+    serv  = collect(Float64, ctx.pi_serv_irf[periods])
+    base  = replace(fig_fname, r"\.pdf$" => "")
+    cols  = ["Trimestre", "Inflacion_Agregada", "Inflacion_Bienes", "Inflacion_Servicios"]
+    data  = Any[hor, agg, goods, serv]
+    if isdefined(Main, :XLSX)
+        xlsx_path = joinpath(ctx.FIGURES_DIR, "$(base).xlsx")
+        Main.XLSX.writetable(xlsx_path, data, cols; overwrite=true,
+                             sheetname="inflacion_bienes_servicios")
+        @printf "  Saved: %s\n" basename(xlsx_path)
+    else
+        csv_path = joinpath(ctx.FIGURES_DIR, "$(base).csv")
+        Main.CSV.write(csv_path, Main.DataFrame(data, cols))
+        @printf "  Saved: %s (XLSX no disponible, se guardó CSV)\n" basename(csv_path)
+    end
+    return nothing
 end
 
 function shock_sync_table(fname, ctx)
@@ -442,7 +488,7 @@ function make_ge_decomp_fig(comps, comp_colors, comp_labels, infl_h, infl_label,
         legendfontsize=9, foreground_color_legend=nothing,
         background_color_legend=nothing, grid=false,
         ylims=(ylo, yhi),
-        bottom_margin=8P.mm, left_margin=10P.mm,
+        bottom_margin=20P.mm, left_margin=10P.mm,
         right_margin=(s_ax2 > 1.0 ? 14 : 8)P.mm, top_margin=4P.mm,
         xlims=(0.3, nsec + 0.7))
     P.hline!(p, [0.0], color=:black, lw=0.8, label="")
@@ -550,7 +596,11 @@ function generate_shock_figures(ctx)
         shock_save_fig(p, fname, ctx)
     end
 
-    sectoral_panel(ctx.y_irf_mat,    "Producto Sectorial",                    fn[:sec_Y])
+    # Sectoral "output" panel reports VALUE ADDED (GDP-consistent), matching the
+    # decomposition_output bars: gross output Y_i double-counts intermediates and
+    # can rise under a negative TFP shock even as VA and GDP fall.  Falls back to
+    # gross output if the caller did not supply va_irf_mat.
+    sectoral_panel(get(ctx, :va_irf_mat, ctx.y_irf_mat), "Producto Sectorial (Valor Agregado)", fn[:sec_Y])
     sectoral_panel(ctx.ph_irf_mat,   "Precios Internos Sectoriales",          fn[:sec_PH])
     sectoral_panel(ctx.pi_sec_mat,   "Inflación de Precios Internos Sectorial", fn[:sec_inflation])
     sectoral_panel(ctx.mc_irf_mat,   "Costo Marginal Sectorial",              fn[:sec_MC])
@@ -576,6 +626,8 @@ function generate_shock_figures(ctx)
     P.plot!(p_gs, periods, ctx.pi_serv_irf,  label="Servicios (sectores 6–12)", color=IPOM_RED, lw=2, ls=:dot)
     P.hline!(p_gs, [0.0], color=:black, lw=0.5, ls=:dash, label="")
     shock_save_fig(p_gs, fn[:gs_inflation], ctx)
+    # Excel con los datos exactos graficados en la figura bienes vs servicios.
+    save_gs_inflation_excel(periods, ctx, fn[:gs_inflation])
 
     # ---- Inflación: sector(es) afectado(s) vs resto ---- #
     # Three lines: aggregate home-price inflation, the consumption-weighted
@@ -668,21 +720,25 @@ function generate_shock_figures(ctx)
     # Coarser version of the GE price decomposition above, grouping the channels
     # into the direct cost push, the network (indirect) propagation via input
     # prices, the markup, and everything else (imports + labour + residual).
+    # Same dual-axis layout as the inflation decompositions: the shocked
+    # sector(s) (ctx.pi_decomp_axis2) read on the left axis, the rest rescaled
+    # onto a right-hand axis so their smaller responses stay legible.
+    ax2 = collect(Int, get(ctx, :pi_decomp_axis2, Int[]))
     g3c, g3l = group3_style()
     p1g = make_ge_decomp_fig(group3_components(ctx.ge_h1.comps), g3c, g3l, ctx.ge_h1.price,
         "Precio interno relativo al impacto",
         "$(ctx.title_short) — Descomposición del Precio Interno (Impacto)",
-        "desviación del EE, puntos porcentuales", bar_names, nsec)
+        "desviación del EE, puntos porcentuales", bar_names, nsec; axis2_sectors=ax2)
     shock_save_fig(p1g, fn[:decomp_mc3_impact], ctx)
     p2g = make_ge_decomp_fig(group3_components(ctx.ge_h2.comps), g3c, g3l, ctx.ge_h2.price,
         "Precio interno relativo a 6 meses",
         "$(ctx.title_short) — Descomposición del Precio Interno (6 meses)",
-        "desviación del EE, puntos porcentuales", bar_names, nsec)
+        "desviación del EE, puntos porcentuales", bar_names, nsec; axis2_sectors=ax2)
     shock_save_fig(p2g, fn[:decomp_mc3_6m], ctx)
     p4g = make_ge_decomp_fig(group3_components(ctx.ge_h4.comps), g3c, g3l, ctx.ge_h4.price,
         "Precio interno relativo a 12 meses",
         "$(ctx.title_short) — Descomposición del Precio Interno (12 meses)",
-        "desviación del EE, puntos porcentuales", bar_names, nsec)
+        "desviación del EE, puntos porcentuales", bar_names, nsec; axis2_sectors=ax2)
     shock_save_fig(p4g, fn[:decomp_mc3_12m], ctx)
 
     # ---- Descomposición EG de la INFLACIÓN sectorial (impacto / 6m / 12m) ---- #
@@ -696,21 +752,34 @@ function generate_shock_figures(ctx)
     ge_fun = get(ctx, :ge_fun, nothing)
     if ge_fun !== nothing
         ge_h3 = ge_fun(3)                       # needed for the 12-month difference
-        ax2 = collect(Int, get(ctx, :pi_decomp_axis2, Int[]))
-        for (h, geh, gehm1, k6, k4, lab, dlbl) in (
-                (1, ctx.ge_h1, nothing,    :decomp_pi_impact, :decomp_pi3_impact, "Impacto",  "Inflación Sectorial al Impacto"),
-                (2, ctx.ge_h2, ctx.ge_h1,  :decomp_pi_6m,     :decomp_pi3_6m,     "6 meses",  "Inflación Sectorial a 6 Meses"),
-                (4, ctx.ge_h4, ge_h3,      :decomp_pi_12m,    :decomp_pi3_12m,    "12 meses", "Inflación Sectorial a 12 Meses"))
+        g2c, g2l = group2_style()
+        for (h, geh, gehm1, k6, k4, k2, lab, dlbl) in (
+                (1, ctx.ge_h1, nothing,    :decomp_pi_impact, :decomp_pi3_impact, :decomp_mc2_impact, "Impacto",  "Inflación Sectorial al Impacto"),
+                (2, ctx.ge_h2, ctx.ge_h1,  :decomp_pi_6m,     :decomp_pi3_6m,     :decomp_mc2_6m,     "6 meses",  "Inflación Sectorial a 6 Meses"),
+                (4, ctx.ge_h4, ge_h3,      :decomp_pi_12m,    :decomp_pi3_12m,    :decomp_mc2_12m,    "12 meses", "Inflación Sectorial a 12 Meses"))
             comps6 = ge_inflation_components(geh, gehm1, ctx.pi_irf[h], nsec)
             pih    = ctx.pi_sec_mat[:, h]
             p6 = make_ge_decomp_fig(comps6, cc, cl, pih, dlbl,
                 "$(ctx.title_short) — Descomposición EG de la Inflación Sectorial ($(lab))",
                 "desviación del EE, puntos porcentuales anualizados", bar_names, nsec; axis2_sectors=ax2)
             shock_save_fig(p6, fn[k6], ctx)
-            p4c = make_ge_decomp_fig(group3_components(comps6), g3c, g3l, pih, dlbl,
+            comps4 = group3_components(comps6)
+            p4c = make_ge_decomp_fig(comps4, g3c, g3l, pih, dlbl,
                 "$(ctx.title_short) — Descomposición de la Inflación Sectorial ($(lab))",
                 "desviación del EE, puntos porcentuales anualizados", bar_names, nsec; axis2_sectors=ax2)
             shock_save_fig(p4c, fn[k4], ctx)
+            # Simplified 2-way MC version: only the direct cost push and the
+            # network (encadenamientos) bars from the MARGINAL-COST
+            # decomposition (levels, not first differences); the black diamond
+            # is the relative home-price response p̂H ("Efecto del shock en
+            # precios"), which sits near zero because prices are sticky —
+            # large cost shocks, small price pass-through.  Single shared axis
+            # for all sectors (no right-hand rescaled axis).
+            p2c = make_ge_decomp_fig((geh.comps[1], geh.comps[2]), g2c, g2l, geh.price,
+                "Efecto del shock en precios",
+                "$(ctx.title_short) — Efectos Directos y de Encadenamiento en el Costo Marginal Sectorial ($(lab))",
+                "desviación del EE, puntos porcentuales", bar_names, nsec)
+            shock_save_fig(p2c, fn[k2], ctx)
         end
     end
 
