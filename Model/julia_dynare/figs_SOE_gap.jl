@@ -181,7 +181,7 @@ function generate_figures(;
             Plots.hline!(p, [0.0], subplot=k,
                         color=:black, lw=0.8, ls=:dash, label="")
         end
-        fname = joinpath(FIGURES_DIR, "irf_aggregate_$(tag)_$(shock).pdf")
+        fname = joinpath(FIGURES_DIR, "irf_aggregate_$(tag)_$(shock).png")
         _savefig_safe(p, fname)
     end
 
@@ -196,7 +196,7 @@ function generate_figures(;
         Plots.hline!(p_Y, [0.0], subplot=i,
                     color=:black, lw=0.5, ls=:dash, label="")
     end
-    _savefig_safe(p_Y, joinpath(FIGURES_DIR, "irf_sectoral_Y_$(tag).pdf"))
+    _savefig_safe(p_Y, joinpath(FIGURES_DIR, "irf_sectoral_Y_$(tag).png"))
 
     # 4c. Sectoral prices
     p_PH = Plots.plot(layout=(4,3), size=(1200,900), titlefontsize=8,
@@ -209,7 +209,7 @@ function generate_figures(;
         Plots.hline!(p_PH, [0.0], subplot=i,
                     color=:black, lw=0.5, ls=:dash, label="")
     end
-    _savefig_safe(p_PH, joinpath(FIGURES_DIR, "irf_sectoral_PH_$(tag).pdf"))
+    _savefig_safe(p_PH, joinpath(FIGURES_DIR, "irf_sectoral_PH_$(tag).png"))
 
     # 4d. Sectoral employment
     p_L = Plots.plot(layout=(4,3), size=(1200,900), titlefontsize=8,
@@ -222,7 +222,7 @@ function generate_figures(;
         Plots.hline!(p_L, [0.0], subplot=i,
                     color=:black, lw=0.5, ls=:dash, label="")
     end
-    _savefig_safe(p_L, joinpath(FIGURES_DIR, "irf_sectoral_L_$(tag).pdf"))
+    _savefig_safe(p_L, joinpath(FIGURES_DIR, "irf_sectoral_L_$(tag).png"))
 
     # 4e. Output gap (Ygap variables — deviation of NK from flex-price)
     gap_vars_exist = any(r -> String(r.variable) == "Ygap_1", eachrow(df_irf))
@@ -237,7 +237,7 @@ function generate_figures(;
             Plots.hline!(p_gap, [0.0], subplot=i,
                         color=:black, lw=0.5, ls=:dash, label="")
         end
-        _savefig_safe(p_gap, joinpath(FIGURES_DIR, "irf_output_gap_$(tag).pdf"))
+        _savefig_safe(p_gap, joinpath(FIGURES_DIR, "irf_output_gap_$(tag).png"))
     end
 
     @printf "\n--- Figures complete ---\n"

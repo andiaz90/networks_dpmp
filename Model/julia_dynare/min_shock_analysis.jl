@@ -26,15 +26,15 @@ REQUIREMENTS:
 
 OUTPUT FILES (saved to figures/oil_shock/ and tables/):
   Figures:
-    irf_aggregate_oil_shock.pdf     — GDP, inflation, RER, trade balance
-    irf_sectoral_Y_oil_shock.pdf    — 12-sector output IRFs
-    irf_sectoral_PH_oil_shock.pdf   — 12-sector price IRFs
-    irf_sectoral_MC_oil_shock.pdf   — 12-sector marginal cost IRFs
-    decomposition_output_oil.pdf        — sectoral output and MC at impact
-    decomposition_mc_inflation_oil.pdf     — MC decomp (direct+network, stacked) + impact inflation diamonds
-    decomposition_mc_inflation_6m_oil.pdf  — same bars + 6-month cumulative inflation diamonds
-    decomposition_mc_inflation_12m_oil.pdf — same bars + 12-month cumulative inflation diamonds
-    oil_intensity_exposure.pdf          — sector oil exposure map
+    irf_aggregate_oil_shock.png     — GDP, inflation, RER, trade balance
+    irf_sectoral_Y_oil_shock.png    — 12-sector output IRFs
+    irf_sectoral_PH_oil_shock.png   — 12-sector price IRFs
+    irf_sectoral_MC_oil_shock.png   — 12-sector marginal cost IRFs
+    decomposition_output_oil.png        — sectoral output and MC at impact
+    decomposition_mc_inflation_oil.png     — MC decomp (direct+network, stacked) + impact inflation diamonds
+    decomposition_mc_inflation_6m_oil.png  — same bars + 6-month cumulative inflation diamonds
+    decomposition_mc_inflation_12m_oil.png — same bars + 12-month cumulative inflation diamonds
+    oil_intensity_exposure.png          — sector oil exposure map
   Tables:
     oil_shock_decomposition.tex     — LaTeX table of direct/network/total effects
     oil_shock_aggregates.tex        — Aggregate responses summary

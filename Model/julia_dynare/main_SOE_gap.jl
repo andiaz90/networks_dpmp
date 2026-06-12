@@ -1316,8 +1316,8 @@ sec_results_for_figs = DataFrame(
 
 # ---- figs_SOE_gap.jl: Dynare-style IRF plots → figures/irfs/ -----------
 # These mirror what MATLAB Dynare would auto-generate:
-#   irf_aggregate_<tag>_<shock>.pdf  — GDP, π, Q, TB per shock
-#   irf_sectoral_Y/PH/L_<tag>.pdf   — 12-sector IRF panels
+#   irf_aggregate_<tag>_<shock>.png  — GDP, π, Q, TB per shock
+#   irf_sectoral_Y/PH/L_<tag>.png   — 12-sector IRF panels
 generate_figures(
     MOD_DIR        = MOD_DIR,
     FIGURES_DIR    = FIGURES_IRF_DIR,   # → figures/irfs/

@@ -30,12 +30,12 @@ REQUIREMENTS:
 
 OUTPUT FILES (saved to figures/agrmin_shock/ and tables/):
   Figures (tag = agrmin):
-    irf_aggregate_agrmin_shock.pdf        — GDP, inflation, RER, trade balance
-    irf_sectoral_{Y,PH,MC,L}_agrmin_shock.pdf — 12-sector IRFs
-    decomposition_mc_inflation_{,6m_,12m_}agrmin_baseline.pdf  — 5-way GE MC decomp
-    decomposition_mc3_inflation_{,6m_,12m_}agrmin_baseline.pdf — 3-way direct/indirect/others
-    decomposition_output_agrmin_baseline.pdf — sectoral value added + inflation at impact
-    agrmin_intensity_exposure.pdf         — combined Agriculture+Mining input exposure
+    irf_aggregate_agrmin_shock.png        — GDP, inflation, RER, trade balance
+    irf_sectoral_{Y,PH,MC,L}_agrmin_shock.png — 12-sector IRFs
+    decomposition_mc_inflation_{,6m_,12m_}agrmin_baseline.png  — 5-way GE MC decomp
+    decomposition_mc3_inflation_{,6m_,12m_}agrmin_baseline.png — 3-way direct/indirect/others
+    decomposition_output_agrmin_baseline.png — sectoral value added + inflation at impact
+    agrmin_intensity_exposure.png         — combined Agriculture+Mining input exposure
   Tables:
     agrmin_shock_decomposition.tex        — direct/network/total effects
     agrmin_shock_aggregates.tex           — aggregate responses summary

@@ -19,7 +19,7 @@ Helper builders exposed for the callers:
   * `compute_inflation_aggregates(...)`  — sectoral & group home-price inflation
   * `leontief_decomp(...)`               — direct / network / total MC decomposition
   * `ge_mc_components(...)`              — 5-way marginal-cost decomposition (per horizon)
-  * `standard_fignames(tag)`             — `<base>_<tag>_shock.pdf` naming scheme
+  * `standard_fignames(tag)`             — `<base>_<tag>_shock.png` naming scheme
   * `oil_fignames()`                     — legacy oil filenames (paper-compatible)
 
 The plotting code resolves `Plots` / `groupedbar` from `Main` at call time, so
@@ -38,90 +38,90 @@ using Logging
 #  FILENAME SCHEMES                                                            #
 # =========================================================================== #
 
-"Standardised `<base>_<tag>_shock.pdf` filenames used by the TFP shock scripts."
+"Standardised `<base>_<tag>_shock.png` filenames used by the TFP shock scripts."
 function standard_fignames(tag::AbstractString)
     Dict{Symbol,String}(
-        :agg              => "irf_aggregate_$(tag)_shock.pdf",
-        :sec_Y            => "irf_sectoral_Y_$(tag)_shock.pdf",
-        :sec_PH           => "irf_sectoral_PH_$(tag)_shock.pdf",
-        :sec_inflation    => "irf_sectoral_inflation_$(tag)_shock.pdf",
-        :agg_inflation    => "irf_aggregate_inflation_$(tag)_shock.pdf",
-        :gs_inflation     => "irf_goods_vs_services_inflation_$(tag)_shock.pdf",
-        :affected_inflation => "irf_affected_vs_other_inflation_$(tag)_shock.pdf",
-        :sec_MC           => "irf_sectoral_MC_$(tag)_shock.pdf",
-        :labor_agg        => "irf_labor_aggregate_$(tag)_shock.pdf",
-        :sec_L            => "irf_sectoral_L_$(tag)_shock.pdf",
-        :gdpgap_agg       => "irf_gdpgap_aggregate_$(tag)_shock.pdf",
-        :sec_Ygap         => "irf_sectoral_Ygap_$(tag)_shock.pdf",
-        :exposure         => "$(tag)_intensity_exposure.pdf",
-        :decomp_mc_impact => "decomposition_mc_inflation_$(tag)_baseline.pdf",
-        :decomp_mc_6m     => "decomposition_mc_inflation_6m_$(tag)_baseline.pdf",
-        :decomp_mc_12m    => "decomposition_mc_inflation_12m_$(tag)_baseline.pdf",
+        :agg              => "irf_aggregate_$(tag)_shock.png",
+        :sec_Y            => "irf_sectoral_Y_$(tag)_shock.png",
+        :sec_PH           => "irf_sectoral_PH_$(tag)_shock.png",
+        :sec_inflation    => "irf_sectoral_inflation_$(tag)_shock.png",
+        :agg_inflation    => "irf_aggregate_inflation_$(tag)_shock.png",
+        :gs_inflation     => "irf_goods_vs_services_inflation_$(tag)_shock.png",
+        :affected_inflation => "irf_affected_vs_other_inflation_$(tag)_shock.png",
+        :sec_MC           => "irf_sectoral_MC_$(tag)_shock.png",
+        :labor_agg        => "irf_labor_aggregate_$(tag)_shock.png",
+        :sec_L            => "irf_sectoral_L_$(tag)_shock.png",
+        :gdpgap_agg       => "irf_gdpgap_aggregate_$(tag)_shock.png",
+        :sec_Ygap         => "irf_sectoral_Ygap_$(tag)_shock.png",
+        :exposure         => "$(tag)_intensity_exposure.png",
+        :decomp_mc_impact => "decomposition_mc_inflation_$(tag)_baseline.png",
+        :decomp_mc_6m     => "decomposition_mc_inflation_6m_$(tag)_baseline.png",
+        :decomp_mc_12m    => "decomposition_mc_inflation_12m_$(tag)_baseline.png",
         # 3-way grouped version (direct / indirect / others)
-        :decomp_mc3_impact => "decomposition_mc3_inflation_$(tag)_baseline.pdf",
-        :decomp_mc3_6m     => "decomposition_mc3_inflation_6m_$(tag)_baseline.pdf",
-        :decomp_mc3_12m    => "decomposition_mc3_inflation_12m_$(tag)_baseline.pdf",
+        :decomp_mc3_impact => "decomposition_mc3_inflation_$(tag)_baseline.png",
+        :decomp_mc3_6m     => "decomposition_mc3_inflation_6m_$(tag)_baseline.png",
+        :decomp_mc3_12m    => "decomposition_mc3_inflation_12m_$(tag)_baseline.png",
         # sectoral-INFLATION (first-difference) versions of the price decompositions
-        :decomp_pi_impact  => "decomposition_pi_$(tag)_baseline.pdf",
-        :decomp_pi_6m      => "decomposition_pi_6m_$(tag)_baseline.pdf",
-        :decomp_pi_12m     => "decomposition_pi_12m_$(tag)_baseline.pdf",
-        :decomp_pi3_impact => "decomposition_pi3_$(tag)_baseline.pdf",
-        :decomp_pi3_6m     => "decomposition_pi3_6m_$(tag)_baseline.pdf",
-        :decomp_pi3_12m    => "decomposition_pi3_12m_$(tag)_baseline.pdf",
+        :decomp_pi_impact  => "decomposition_pi_$(tag)_baseline.png",
+        :decomp_pi_6m      => "decomposition_pi_6m_$(tag)_baseline.png",
+        :decomp_pi_12m     => "decomposition_pi_12m_$(tag)_baseline.png",
+        :decomp_pi3_impact => "decomposition_pi3_$(tag)_baseline.png",
+        :decomp_pi3_6m     => "decomposition_pi3_6m_$(tag)_baseline.png",
+        :decomp_pi3_12m    => "decomposition_pi3_12m_$(tag)_baseline.png",
         # simplified 2-way MC version (direct / encadenamientos only)
-        :decomp_mc2_impact => "decomposition_mc2_$(tag)_baseline.pdf",
-        :decomp_mc2_6m     => "decomposition_mc2_6m_$(tag)_baseline.pdf",
-        :decomp_mc2_12m    => "decomposition_mc2_12m_$(tag)_baseline.pdf",
-        :decomp_output    => "decomposition_output_$(tag)_baseline.pdf",
+        :decomp_mc2_impact => "decomposition_mc2_$(tag)_baseline.png",
+        :decomp_mc2_6m     => "decomposition_mc2_6m_$(tag)_baseline.png",
+        :decomp_mc2_12m    => "decomposition_mc2_12m_$(tag)_baseline.png",
+        :decomp_output    => "decomposition_output_$(tag)_baseline.png",
     )
 end
 
 "Legacy oil filenames (kept verbatim so existing \\includegraphics in the paper resolve)."
 function oil_fignames()
     Dict{Symbol,String}(
-        :agg              => "irf_aggregate_oil_shock.pdf",
-        :sec_Y            => "irf_sectoral_Y_oil_shock.pdf",
-        :sec_PH           => "irf_sectoral_PH_oil_shock.pdf",
-        :sec_inflation    => "irf_sectoral_inflation_oil.pdf",
-        :agg_inflation    => "irf_aggregate_inflation_oil.pdf",
-        :gs_inflation     => "irf_goods_vs_services_inflation_oil.pdf",
-        :affected_inflation => "irf_affected_vs_other_inflation_oil.pdf",
-        :sec_MC           => "irf_sectoral_MC_oil_shock.pdf",
-        :labor_agg        => "irf_labor_aggregate_oil_shock.pdf",
-        :sec_L            => "irf_sectoral_L_oil_shock.pdf",
-        :gdpgap_agg       => "irf_gdpgap_aggregate_oil_shock.pdf",
-        :sec_Ygap         => "irf_sectoral_Ygap_oil_shock.pdf",
-        :exposure         => "oil_intensity_exposure.pdf",
-        :decomp_mc_impact => "decomposition_mc_inflation_oil_baseline.pdf",
-        :decomp_mc_6m     => "decomposition_mc_inflation_6m_oil_baseline.pdf",
-        :decomp_mc_12m    => "decomposition_mc_inflation_12m_oil_baseline.pdf",
+        :agg              => "irf_aggregate_oil_shock.png",
+        :sec_Y            => "irf_sectoral_Y_oil_shock.png",
+        :sec_PH           => "irf_sectoral_PH_oil_shock.png",
+        :sec_inflation    => "irf_sectoral_inflation_oil.png",
+        :agg_inflation    => "irf_aggregate_inflation_oil.png",
+        :gs_inflation     => "irf_goods_vs_services_inflation_oil.png",
+        :affected_inflation => "irf_affected_vs_other_inflation_oil.png",
+        :sec_MC           => "irf_sectoral_MC_oil_shock.png",
+        :labor_agg        => "irf_labor_aggregate_oil_shock.png",
+        :sec_L            => "irf_sectoral_L_oil_shock.png",
+        :gdpgap_agg       => "irf_gdpgap_aggregate_oil_shock.png",
+        :sec_Ygap         => "irf_sectoral_Ygap_oil_shock.png",
+        :exposure         => "oil_intensity_exposure.png",
+        :decomp_mc_impact => "decomposition_mc_inflation_oil_baseline.png",
+        :decomp_mc_6m     => "decomposition_mc_inflation_6m_oil_baseline.png",
+        :decomp_mc_12m    => "decomposition_mc_inflation_12m_oil_baseline.png",
         # 3-way grouped version (direct / indirect / others)
-        :decomp_mc3_impact => "decomposition_mc3_inflation_oil_baseline.pdf",
-        :decomp_mc3_6m     => "decomposition_mc3_inflation_6m_oil_baseline.pdf",
-        :decomp_mc3_12m    => "decomposition_mc3_inflation_12m_oil_baseline.pdf",
+        :decomp_mc3_impact => "decomposition_mc3_inflation_oil_baseline.png",
+        :decomp_mc3_6m     => "decomposition_mc3_inflation_6m_oil_baseline.png",
+        :decomp_mc3_12m    => "decomposition_mc3_inflation_12m_oil_baseline.png",
         # sectoral-INFLATION (first-difference) versions of the price decompositions
-        :decomp_pi_impact  => "decomposition_pi_oil_baseline.pdf",
-        :decomp_pi_6m      => "decomposition_pi_6m_oil_baseline.pdf",
-        :decomp_pi_12m     => "decomposition_pi_12m_oil_baseline.pdf",
-        :decomp_pi3_impact => "decomposition_pi3_oil_baseline.pdf",
-        :decomp_pi3_6m     => "decomposition_pi3_6m_oil_baseline.pdf",
-        :decomp_pi3_12m    => "decomposition_pi3_12m_oil_baseline.pdf",
+        :decomp_pi_impact  => "decomposition_pi_oil_baseline.png",
+        :decomp_pi_6m      => "decomposition_pi_6m_oil_baseline.png",
+        :decomp_pi_12m     => "decomposition_pi_12m_oil_baseline.png",
+        :decomp_pi3_impact => "decomposition_pi3_oil_baseline.png",
+        :decomp_pi3_6m     => "decomposition_pi3_6m_oil_baseline.png",
+        :decomp_pi3_12m    => "decomposition_pi3_12m_oil_baseline.png",
         # simplified 2-way MC version (direct / encadenamientos only)
-        :decomp_mc2_impact => "decomposition_mc2_oil_baseline.pdf",
-        :decomp_mc2_6m     => "decomposition_mc2_6m_oil_baseline.pdf",
-        :decomp_mc2_12m    => "decomposition_mc2_12m_oil_baseline.pdf",
-        :decomp_output    => "decomposition_output_oil_baseline.pdf",
+        :decomp_mc2_impact => "decomposition_mc2_oil_baseline.png",
+        :decomp_mc2_6m     => "decomposition_mc2_6m_oil_baseline.png",
+        :decomp_mc2_12m    => "decomposition_mc2_12m_oil_baseline.png",
+        :decomp_output    => "decomposition_output_oil_baseline.png",
     )
 end
 
 # Standard sector display names in Spanish (consistent across every figure/table).
 const SHOCK_BAR_NAMES = [
-    "Agric. y Pesca", "Minería", "Manufactura", "Electricidad",
+    "Agric. y Pesca", "Minería", "Manufactura", "EGA",
     "Construcción", "Comercio y Hot.", "Transp. y Com.", "Finanzas",
     "Inmobiliario", "Serv. Empres.", "Serv. Pers.", "Adm. Pública",
 ]
 const SHOCK_PANEL_NAMES = [
-    "Agricultura y Pesca", "Minería", "Manufactura", "Electricidad y Agua",
+    "Agricultura y Pesca", "Minería", "Manufactura", "EGA",
     "Construcción", "Comercio y Hoteles", "Transporte y Com.", "Finanzas",
     "Inmobiliario", "Serv. Empresariales", "Serv. Personales", "Adm. Pública",
 ]
@@ -383,7 +383,7 @@ Write an Excel workbook with the exact series plotted in the goods-vs-services
 home-price inflation figure (`fig_fname`). Columns: horizon plus aggregate,
 goods and services inflation (deviations in annual pp from steady state). The
 file is saved alongside the figure in `ctx.FIGURES_DIR` with the same base name
-(`.pdf` → `.xlsx`). `XLSX`/`DataFrame` are resolved lazily from `Main`; if XLSX
+(`.png` → `.xlsx`). `XLSX`/`DataFrame` are resolved lazily from `Main`; if XLSX
 is unavailable the data are written as CSV so nothing is lost.
 """
 function save_gs_inflation_excel(periods, ctx, fig_fname)
@@ -391,7 +391,7 @@ function save_gs_inflation_excel(periods, ctx, fig_fname)
     agg   = collect(Float64, ctx.pi_agg_irf[periods])
     goods = collect(Float64, ctx.pi_goods_irf[periods])
     serv  = collect(Float64, ctx.pi_serv_irf[periods])
-    base  = replace(fig_fname, r"\.pdf$" => "")
+    base  = replace(fig_fname, r"\.png$" => "")
     cols  = ["Trimestre", "Inflacion_Agregada", "Inflacion_Bienes", "Inflacion_Servicios"]
     data  = Any[hor, agg, goods, serv]
     if isdefined(Main, :XLSX)
@@ -688,12 +688,35 @@ function generate_shock_figures(ctx)
     P.hline!(p_gap, [0.0], color=:black, lw=0.6, ls=:dash, label="")
     shock_save_fig(p_gap, fn[:gdpgap_agg], ctx)
 
-    # ---- Mapa de exposición (barra específica del shock) ---- #
-    p_exp = P.bar(1:nsec, ctx.exposure_vec,
-        xticks=(1:nsec, bar_names),
-        xrotation=45, label=ctx.exposure_label, color=IPOM_ORANGE,
-        ylabel=ctx.exposure_ylabel, title=ctx.exposure_title,
-        titlefontsize=14, size=(900, 450), bottom_margin=10P.mm)
+    # ---- Mapa de exposición (barra específica del shock, estilo IPoM) ---- #
+    # Same house style as the GE-decomposition bars (make_ge_decomp_fig): navy
+    # left-aligned title with the units on a second line, frameless top legend,
+    # no grid, solid thin black zero line, IPoM-navy bars with thin white edges.
+    # Public Administration is dropped so the x-axis matches the decomposition
+    # figures (decomposition_pi3_*), with which this map is read side by side.
+    exp_keep  = [i for i in 1:nsec if !occursin("blica", bar_names[i])]
+    exp_vals  = ctx.exposure_vec[exp_keep]
+    exp_names = bar_names[exp_keep]
+    nexp      = length(exp_keep)
+    exp_dmax  = maximum(vcat(exp_vals, 0.0)); exp_span = max(exp_dmax, 1e-6)
+    p_exp = P.plot(
+        xticks=(1:nexp, exp_names), xrotation=55,
+        title="$(ctx.exposure_title)\n($(ctx.exposure_ylabel))",
+        titlefontsize=12, titlefontcolor=IPOM_NAVY, titlelocation=:left,
+        size=(1400, 760), legend=:outertop, legend_columns=3,
+        legendfontsize=9, foreground_color_legend=nothing,
+        background_color_legend=nothing, grid=false,
+        ylims=(0.0, exp_dmax + 0.14 * exp_span),
+        bottom_margin=20P.mm, left_margin=10P.mm, right_margin=8P.mm,
+        top_margin=4P.mm, xlims=(0.3, nexp + 0.7))
+    P.hline!(p_exp, [0.0], color=:black, lw=0.8, label="")
+    lbl_used = false
+    for i in 1:nexp
+        s = shock_bar_rect(i, 0.0, exp_vals[i], 0.65)
+        P.plot!(p_exp, s, color=IPOM_NAVY, label=(lbl_used ? "" : ctx.exposure_label),
+                alpha=0.85, linecolor=:white, linewidth=0.3)
+        lbl_used = true
+    end
     shock_save_fig(p_exp, fn[:exposure], ctx)
 
     # ---- Descomposición EG del precio interno (impacto / 6m / 12m) ---- #

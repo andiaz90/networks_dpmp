@@ -86,7 +86,7 @@ function plot_output_gaps(df_irf, main_shock, names_vec, FIGURES_DIR, tag; nT=40
             xlabel="Quarters", ylabel="% dev. from SS",
             title="Aggregate Output Gap — $main_shock", legend=:topright)
         Plots.hline!(p, [0.0], color=:black, lw=0.8, ls=:dash, label="")
-        savefig2(p, joinpath(FIGURES_DIR, "aggregate_output_gap_$(tag).pdf"))
+        savefig2(p, joinpath(FIGURES_DIR, "aggregate_output_gap_$(tag).png"))
     end
 
     # ---- Sectoral output gaps (4×3 panel) --------------------------------
@@ -102,7 +102,7 @@ function plot_output_gaps(df_irf, main_shock, names_vec, FIGURES_DIR, tag; nT=40
                        color=:steelblue, lw=2, xlabel="Q", ylabel="% dev.")
             Plots.hline!(p2, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
         end
-        savefig2(p2, joinpath(FIGURES_DIR, "sectoral_output_gaps_$(tag).pdf"))
+        savefig2(p2, joinpath(FIGURES_DIR, "sectoral_output_gaps_$(tag).png"))
     end
 end
 
@@ -140,7 +140,7 @@ function plot_manufacturing_shock(df_irf, names_vec, FIGURES_DIR, tag; nT=40)
                        color=:steelblue, lw=2, xlabel="Q", ylabel="% dev.")
             Plots.hline!(p_a, [0.0], subplot=k, color=:black, lw=0.5, ls=:dash, label="")
         end
-        savefig2(p_a, joinpath(FIGURES_DIR, "manufacturing_macro_$(tag).pdf"))
+        savefig2(p_a, joinpath(FIGURES_DIR, "manufacturing_macro_$(tag).png"))
     end
 
     # ---- (b) Aggregate output gaps 1×3 ----------------------------------
@@ -156,7 +156,7 @@ function plot_manufacturing_shock(df_irf, names_vec, FIGURES_DIR, tag; nT=40)
                        color=:firebrick, lw=2, xlabel="Q", ylabel="% dev.")
             Plots.hline!(p_b, [0.0], subplot=k, color=:black, lw=0.5, ls=:dash, label="")
         end
-        savefig2(p_b, joinpath(FIGURES_DIR, "gap_aggregate_mfg_$(tag).pdf"))
+        savefig2(p_b, joinpath(FIGURES_DIR, "gap_aggregate_mfg_$(tag).png"))
     end
 
     # ---- (c) Goods vs services (2×3) ------------------------------------
@@ -175,7 +175,7 @@ function plot_manufacturing_shock(df_irf, names_vec, FIGURES_DIR, tag; nT=40)
                        color=clr, lw=2, xlabel="Q", ylabel="% dev.")
             Plots.hline!(p_c, [0.0], subplot=k, color=:black, lw=0.5, ls=:dash, label="")
         end
-        savefig2(p_c, joinpath(FIGURES_DIR, "gap_goods_services_mfg_$(tag).pdf"))
+        savefig2(p_c, joinpath(FIGURES_DIR, "gap_goods_services_mfg_$(tag).png"))
     end
 
     # ---- (d) Sectoral output gaps — manufacturing highlighted in red -----
@@ -193,7 +193,7 @@ function plot_manufacturing_shock(df_irf, names_vec, FIGURES_DIR, tag; nT=40)
                        color=clr, lw=lw, xlabel="Q", ylabel="% dev.")
             Plots.hline!(p_d, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
         end
-        savefig2(p_d, joinpath(FIGURES_DIR, "gap_sectoral_mfg_$(tag).pdf"))
+        savefig2(p_d, joinpath(FIGURES_DIR, "gap_sectoral_mfg_$(tag).png"))
     end
 end
 
@@ -233,7 +233,7 @@ function plot_figure7(df_irf, names_vec, FIGURES_DIR, tag; nT=40)
                        color=clr, lw=2, xlabel="Q", ylabel="% dev.")
             Plots.hline!(p7a, [0.0], subplot=k, color=:black, lw=0.5, ls=:dash, label="")
         end
-        savefig2(p7a, joinpath(FIGURES_DIR, "figure7a_$(tag).pdf"))
+        savefig2(p7a, joinpath(FIGURES_DIR, "figure7a_$(tag).png"))
     end
 
     # ---- Figure 7b: Aggregate macro effects (3×4) -----------------------
@@ -252,7 +252,7 @@ function plot_figure7(df_irf, names_vec, FIGURES_DIR, tag; nT=40)
                        color=:steelblue, lw=2, xlabel="Q", ylabel="% dev.")
             Plots.hline!(p7b, [0.0], subplot=k, color=:black, lw=0.5, ls=:dash, label="")
         end
-        savefig2(p7b, joinpath(FIGURES_DIR, "figure7b_$(tag).pdf"))
+        savefig2(p7b, joinpath(FIGURES_DIR, "figure7b_$(tag).png"))
     end
 
     # ---- Figure 7c: Sectoral imports (4×3) — manufacturing in red -------
@@ -269,7 +269,7 @@ function plot_figure7(df_irf, names_vec, FIGURES_DIR, tag; nT=40)
                        color=clr, lw=lw, xlabel="Q", ylabel="% dev.")
             Plots.hline!(p7c, [0.0], subplot=i, color=:black, lw=0.5, ls=:dash, label="")
         end
-        savefig2(p7c, joinpath(FIGURES_DIR, "figure7c_sectoral_imports_$(tag).pdf"))
+        savefig2(p7c, joinpath(FIGURES_DIR, "figure7c_sectoral_imports_$(tag).png"))
     end
 end
 
@@ -320,7 +320,7 @@ function plot_shock_effects(df_irf, EXERCISE, FIGURES_DIR, tag; nT=40)
                        color=:firebrick, lw=2, ls=:dash)
             Plots.hline!(p, [0.0], subplot=k, color=:black, lw=0.5, ls=:dot, label="")
         end
-        savefig2(p, joinpath(FIGURES_DIR, "shock_comparison_$(tag).pdf"))
+        savefig2(p, joinpath(FIGURES_DIR, "shock_comparison_$(tag).png"))
     end
 end
 

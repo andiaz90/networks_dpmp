@@ -166,7 +166,7 @@ Plots.plot!(p_comp, periods, get_irf(df_agr, "r") .* 4, subplot=4,
     xlabel="Quarters", title="Policy Rate (ann. pp)")
 Plots.hline!(p_comp, [0.0], subplot=4, color=:black, lw=0.5, ls=:dot, label="")
 
-save_fig(p_comp, "irf_comparison_oil_agr.pdf")
+save_fig(p_comp, "irf_comparison_oil_agr.png")
 
 
 # =========================================================================== #
@@ -189,7 +189,7 @@ for i in 1:12
     Plots.hline!(p_comp_sec, [0.0], subplot=i, color=:black, lw=0.5, ls=:dot, label="")
 end
 
-save_fig(p_comp_sec, "irf_comparison_sectoral_inflation.pdf")
+save_fig(p_comp_sec, "irf_comparison_sectoral_inflation.png")
 
 
 # =========================================================================== #
@@ -211,7 +211,7 @@ if any(abs.(_gdpgap_oil) .> 1e-12) || any(abs.(_gdpgap_agr) .> 1e-12)
     Plots.plot!(p_gap, periods, _gdpgap_agr,
         label="Agr TFP (−10%)", color=:steelblue, lw=2, ls=:dash)
     Plots.hline!(p_gap, [0.0], color=:black, lw=0.6, ls=:dash, label="")
-    save_fig(p_gap, "irf_comparison_gdpgap.pdf")
+    save_fig(p_gap, "irf_comparison_gdpgap.png")
 else
     @printf "  [GDPgap not found in IRF data — skipping GDP gap comparison]\n"
 end
@@ -237,7 +237,7 @@ for i in 1:12
     Plots.hline!(p_comp_y, [0.0], subplot=i, color=:black, lw=0.5, ls=:dot, label="")
 end
 
-save_fig(p_comp_y, "irf_comparison_sectoral_output.pdf")
+save_fig(p_comp_y, "irf_comparison_sectoral_output.png")
 
 
 # =========================================================================== #
