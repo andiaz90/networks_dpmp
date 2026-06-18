@@ -9,6 +9,9 @@
 var chi xi Lab_costs Price_costs w VA C Ctot Ctotg Ctots M C_g C_s p_g p_s N pi pi_g pi_s r om_g om_s vi Y
 PV r_star Rworld pi_e Bstar Pipstar Q TB PX X Ystar V PVstar GDP IMP mkupV CFs CFg
 POstar PO VOil VNon
+// Sectoral demand (taste) shocks om_1..om_nsec and basket normalizers norm_g, norm_s.
+// At steady state om_i = 0 and norm_g = norm_s = 1, so the SS is unchanged.
+om_1 om_2 om_3 om_4 om_5 om_6 om_7 om_8 om_9 om_10 om_11 om_12 norm_g norm_s
 
     @#for i in 1:nsec
         PH_@{i}
@@ -94,23 +97,36 @@ var Ygap Ngap GDPgap
     ;
 
 
-varexo eps_om eps_i epschi eps_pvstar eps_postar
+// Unified shock set: monetary, labour-supply, import-price, oil-price,
+// sectoral TFP, aggregate demand, and 12 sectoral demand (taste) shocks.
+// Canonical order (used to map Sigma_e by NAME in the SMM code):
+//   1=eps_i 2=epschi 3=eps_pvstar 4=eps_postar 5..16=epsA_1..12
+//   17=eps_xi 18..29=eps_om_1..12
+varexo eps_i epschi eps_pvstar eps_postar
     @#for i in 1:nsec
         epsA_@{i}
     @#endfor
     eps_xi
+    @#for i in 1:nsec
+        eps_om_@{i}
+    @#endfor
 ;
 
 
-parameters gamma psi beta phi epsilon rho rho_om1 rho_tfp1 rho_om2 rho_tfp2 ombar
-rhoi rhoirule ilabcosts sigma_i sigma_om sigma_L_agg Rworld_ss
+parameters gamma psi beta phi epsilon rho rho_om1 rho_tfp1 rho_tfp2 ombar
+rhoi rhoirule ilabcosts sigma_i sigma_L_agg Rworld_ss
 bbar chii_b omegaX epsilonX ystar_ss etastar kappaV epsilonV sigmaH Pistar_ss PVstar_ss
 rho_pvstar sigma_pvstar rho_xi sigma_xi
 // Oil sector parameters
 epsilonV_oil rho_postar sigma_postar POstar_ss shock_eps_postar
 Ctot_ss Ctotg_ss Ctots_ss VA_ss M_tot_ss Y_ss IMP_ss
 // Shock activation parameters (set by params_jl.mod; 0=off, 1=on)
-shock_eps_om shock_eps_i shock_eps_pvstar shock_eps_xi
+shock_eps_i shock_eps_pvstar shock_eps_xi
+// Sectoral demand (Option-A): 12 demand-shock std devs + 12 activation flags
+sigma_om_1 sigma_om_2 sigma_om_3 sigma_om_4 sigma_om_5 sigma_om_6
+sigma_om_7 sigma_om_8 sigma_om_9 sigma_om_10 sigma_om_11 sigma_om_12
+shock_eps_om_1 shock_eps_om_2 shock_eps_om_3 shock_eps_om_4 shock_eps_om_5 shock_eps_om_6
+shock_eps_om_7 shock_eps_om_8 shock_eps_om_9 shock_eps_om_10 shock_eps_om_11 shock_eps_om_12
 // Scalar SS values used in initval block (set by params_jl.mod)
 pi_ss r_ss w_ss N_ss GDP_ss C_ss C_g_ss C_s_ss p_g_ss p_s_ss
 Bstar_ss Q_ss TB_ss PX_ss V_ss CF_ss CFg_total_ss CFs_total_ss
@@ -227,14 +243,16 @@ p_s_f = (1
 @#endfor
 );
 
+// Option-A: sectoral demand with taste shocks om_j (normalized by norm_g/norm_s
+// so the goods/services budget is preserved: sum_j P_j*Cg_j = p_g*C_g).
 @#for j in 1:nsec
-    Cg_@{j}=gammag_@{j}*(p_g/P_@{j})*C_g;
-    Cs_@{j}=gammas_@{j}*(p_s/P_@{j})*C_s;
+    Cg_@{j}=gammag_@{j}*exp(om_@{j})/norm_g*(p_g/P_@{j})*C_g;
+    Cs_@{j}=gammas_@{j}*exp(om_@{j})/norm_s*(p_s/P_@{j})*C_s;
 @#endfor
 
 @#for j in 1:nsec
-    Cg_f_@{j}=gammag_@{j}*(p_g_f/P_f_@{j})*C_g_f;
-    Cs_f_@{j}=gammas_@{j}*(p_s_f/P_f_@{j})*C_s_f;
+    Cg_f_@{j}=gammag_@{j}*exp(om_@{j})/norm_g*(p_g_f/P_f_@{j})*C_g_f;
+    Cs_f_@{j}=gammas_@{j}*exp(om_@{j})/norm_s*(p_s_f/P_f_@{j})*C_s_f;
 @#endfor
 
 
@@ -322,17 +340,17 @@ Y_f = (
 
 
 
-//% Total Consumption (Note: = Value Added)
+//% Total Consumption (Note: = Value Added) — Option-A effective shares gammag_i*exp(om_i)/norm_g
 Ctot = (
 @#for i in 1:nsec
-    +gammag_@{i}*C_g*p_g/P_@{i} + gammas_@{i}*C_s*p_s/P_@{i}
+    +gammag_@{i}*exp(om_@{i})/norm_g*C_g*p_g/P_@{i} + gammas_@{i}*exp(om_@{i})/norm_s*C_s*p_s/P_@{i}
 @#endfor
 );
 
 //% Total Consumption (Note: = Value Added)
 Ctot_f = (
 @#for i in 1:nsec
-    +gammag_@{i}*C_g_f*p_g_f/P_f_@{i} + gammas_@{i}*C_s_f*p_s_f/P_f_@{i}
+    +gammag_@{i}*exp(om_@{i})/norm_g*C_g_f*p_g_f/P_f_@{i} + gammas_@{i}*exp(om_@{i})/norm_s*C_s_f*p_s_f/P_f_@{i}
 @#endfor
 );
 
@@ -340,21 +358,21 @@ Ctot_f = (
 //% Total Consumption: Services
 Ctots = (
 @#for i in 1:nsec
-    +gammas_@{i}*C_s*p_s/P_@{i}
+    +gammas_@{i}*exp(om_@{i})/norm_s*C_s*p_s/P_@{i}
 @#endfor
 );
 
 //% Total Consumption: Services
 Ctots_f = (
 @#for i in 1:nsec
-    +gammas_@{i}*C_s_f*p_s_f/P_f_@{i}
+    +gammas_@{i}*exp(om_@{i})/norm_s*C_s_f*p_s_f/P_f_@{i}
 @#endfor
 );
 
 //% Total Consumption: Goods
 Ctotg = (
 @#for i in 1:nsec
-    +gammag_@{i}*C_g*p_g/P_@{i}
+    +gammag_@{i}*exp(om_@{i})/norm_g*C_g*p_g/P_@{i}
 @#endfor
 );
 
@@ -362,7 +380,7 @@ Ctotg = (
 //% Total Consumption: Goods
 Ctotg_f = (
 @#for i in 1:nsec
-    +gammag_@{i}*C_g_f*p_g_f/P_f_@{i}
+    +gammag_@{i}*exp(om_@{i})/norm_g*C_g_f*p_g_f/P_f_@{i}
 @#endfor
 );
 
@@ -542,9 +560,29 @@ r = (1-rhoirule)*(1/beta) + rhoirule*r(-1)
 //% Shock processes
 vi = rhoi*vi(-1) + sigma_i*eps_i;
 
-//% Goods/Services Demand Process
-exp(om_g) = (1+rho_om2-rho_om1)*ombar + rho_om1*exp(om_g(-1)) - rho_om2*exp(om_g(-2)) + sigma_om*eps_om;
-exp(om_s) = (1+rho_om2-rho_om1)*(1-ombar) + rho_om1*exp(om_s(-1)) - rho_om2*exp(om_s(-2))- sigma_om*eps_om;
+//% Goods/Services level-1 shares fixed at SS (aggregate demand shock removed;
+//% demand fluctuations are now sectoral, via om_1..om_nsec below).
+exp(om_g) = ombar;
+exp(om_s) = 1 - ombar;
+
+//% Normalizers for the sectoral demand taste shocks (preserve goods/services
+//% budgets; equal 1 at SS because om_i = 0). sum_j gammag_j = sum_j gammas_j = 1.
+norm_g = (0
+@#for j in 1:nsec
+    + gammag_@{j}*exp(om_@{j})
+@#endfor
+);
+norm_s = (0
+@#for j in 1:nsec
+    + gammas_@{j}*exp(om_@{j})
+@#endfor
+);
+
+//% 12 sector-specific demand (taste) shock AR(1) processes (SS: om_i = 0).
+//% Common persistence rho_om1 (estimated); sector-specific std dev sigma_om_i.
+@#for i in 1:nsec
+    om_@{i} = rho_om1*om_@{i}(-1) + sigma_om_@{i}*eps_om_@{i};
+@#endfor
 
 chi = (1-rho) + rho*chi(-1) + sigma_L_agg*epschi;
 
@@ -707,7 +745,6 @@ Cgap_s  = log(Ctots) - log(Ctots_f);
 end;
 
 initval;
-eps_om = 0;
 eps_pvstar = 0;
 eps_xi = 0;
 pi_g = 1;
@@ -721,6 +758,11 @@ vi = 0;
 
 om_g=log(ombar);     // SS: exp(om_g) = ombar, so om_g = log(ombar)
 om_s=log(1-ombar);  // SS: exp(om_s) = 1-ombar
+// Sectoral demand taste shocks at SS = 0; normalizers = 1
+om_1=0; om_2=0; om_3=0; om_4=0; om_5=0; om_6=0;
+om_7=0; om_8=0; om_9=0; om_10=0; om_11=0; om_12=0;
+norm_g=1;
+norm_s=1;
 
 r_star=Rworld_ss; 
 r_star_f=Rworld_ss; 
@@ -915,7 +957,6 @@ steady;
 
 // Shocks
 shocks;
-var eps_om=shock_eps_om;
 var eps_i=shock_eps_i;
 var epschi=0.0;
 var eps_pvstar=shock_eps_pvstar;
@@ -923,6 +964,10 @@ var eps_postar=shock_eps_postar;
 var eps_xi=shock_eps_xi;
 @#for z in 1:nsec
    var epsA_@{z}=shock_epsA_@{z};
+@#endfor
+// Option-A: 12 sectoral demand shocks
+@#for z in 1:nsec
+   var eps_om_@{z}=shock_eps_om_@{z};
 @#endfor
 end;
 

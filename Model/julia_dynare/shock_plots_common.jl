@@ -35,6 +35,60 @@ using LinearAlgebra
 using Logging
 
 # =========================================================================== #
+#  EXOGENOUS-SHOCK COLUMN LOOKUP (name -> ghu column)                          #
+# =========================================================================== #
+# ghu / g1_3 columns follow the exogenous DECLARATION order, which is exactly the
+# modfile.json "exogenous" array. Resolving the shock column BY NAME keeps the
+# IRF scripts correct regardless of the .mod shock ordering (e.g. after adding the
+# 12 sectoral demand shocks, eps_postar moved from column 5 to column 4).
+
+const _SHOCK_EXO_NAMES = Ref{Vector{String}}(String[])
+
+function exo_shock_names(mod_dir::AbstractString)
+    isempty(_SHOCK_EXO_NAMES[]) || return _SHOCK_EXO_NAMES[]
+    mf = joinpath(mod_dir, "NK_SOE_lev_gap2", "model", "json", "modfile.json")
+    names = String[]
+    if isfile(mf)
+        try
+            raw = read(mf, String)
+            key = findfirst("\"exogenous\"", raw)   # exact key (not exogenous_deterministic)
+            if key !== nothing
+                lb = findnext('[', raw, key[end] + 1)
+                depth = 0; rb = lb
+                for p in lb:lastindex(raw)
+                    c = raw[p]
+                    c == '[' && (depth += 1)
+                    if c == ']'
+                        depth -= 1
+                        depth == 0 && (rb = p; break)
+                    end
+                end
+                names = [String(m.captures[1]) for m in eachmatch(r"\"name\"\s*:\s*\"([^\"]+)\"", raw[lb:rb])]
+            end
+        catch; end
+    end
+    _SHOCK_EXO_NAMES[] = names
+    return names
+end
+
+"""
+    exo_col(shock_name, mod_dir) -> Int
+
+Column of `shock_name` in ghu (= position in the model's exogenous declaration
+order). Errors clearly if the shock is absent (usually means the context is stale
+— rebuild with main_SOE_gap.jl).
+"""
+function exo_col(shock_name::AbstractString, mod_dir::AbstractString)
+    exo = exo_shock_names(mod_dir)
+    k = findfirst(==(shock_name), exo)
+    k === nothing && error(
+        "Shock '$shock_name' not found in the model's exogenous list " *
+        "($(length(exo)) shocks: $(isempty(exo) ? "<none — modfile.json missing?>" : join(exo, ", "))). " *
+        "Recompile the unified model: julia --project=. main_SOE_gap.jl")
+    return k
+end
+
+# =========================================================================== #
 #  FILENAME SCHEMES                                                            #
 # =========================================================================== #
 

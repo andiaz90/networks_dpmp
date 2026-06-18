@@ -23,6 +23,7 @@ include(joinpath(SCRIPT_DIR, "steady_ntwsoe.jl"))
 include(joinpath(SCRIPT_DIR, "utils.jl"))
 include(joinpath(SCRIPT_DIR, "smm_model_moments.jl"))
 include(joinpath(SCRIPT_DIR, "smm_estimation.jl"))
+include(joinpath(SCRIPT_DIR, "smm_inference.jl"))
 
 
 function _main()
@@ -42,12 +43,12 @@ function _main()
     end
     @printf "--- Step 1: Data moments OK ---\n\n"
 
-    # Step 2: Load Dynare context
-    main_ctx = joinpath(SCRIPT_DIR, "mod", "nk_iosoe_context.jls")
-    smm_ctx  = joinpath(SCRIPT_DIR, "mod", "nk_iosoe_smm_context.jls")
-    ctx_path = isfile(main_ctx) ? main_ctx : smm_ctx
+    # Step 2: Load Dynare context.
+    # Single unified model now (NK_SOE_lev_gap2.mod); the separate _smm context
+    # was retired. main_SOE_gap.jl compiles the unified model to this context.
+    ctx_path = joinpath(SCRIPT_DIR, "mod", "nk_iosoe_context.jls")
     !isfile(ctx_path) && error("""
-        No Dynare context found. Run main_SOE_gap.jl first:
+        No Dynare context found at $(ctx_path). Run main_SOE_gap.jl first:
           julia --project=. main_SOE_gap.jl
         """)
 

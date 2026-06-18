@@ -28,14 +28,14 @@ mkdir -p "$STAGE/Model/julia_dynare/mod" "$STAGE/Data/computed" "$STAGE/cluster"
 
 # --- Julia source (no compiled artifacts) ---
 JL_FILES=(compute_data_moments.jl main_SOE_gap.jl run_smm_estimation.jl
-  smm_estimation.jl smm_model_moments.jl steady_ntwsoe.jl steady_ntwsoe_system.jl
-  utils.jl figs_SOE_gap.jl plot_scripts.jl run_dynare_subprocess.jl
-  run_dynare_smm_subprocess.jl run_all_shocks.jl shock_plots_common.jl
+  smm_estimation.jl smm_model_moments.jl smm_inference.jl steady_ntwsoe.jl steady_ntwsoe_system.jl
+  utils.jl smoke_test.jl figs_SOE_gap.jl plot_scripts.jl run_dynare_subprocess.jl
+  run_all_shocks.jl shock_plots_common.jl
   oil_shock_analysis.jl agr_shock_analysis.jl min_shock_analysis.jl mfg_shock_analysis.jl)
 for f in "${JL_FILES[@]}"; do cp "$JD/$f" "$STAGE/Model/julia_dynare/"; done
 
 # --- mod/ source only ---
-MOD_FILES=(NK_SOE_lev_gap2.mod NK_SOE_lev_gap2_smm.mod definition_block_nsec.mod
+MOD_FILES=(NK_SOE_lev_gap2.mod definition_block_nsec.mod
   definition_block_io.mod definition_block_lab.mod solution_block.mod run_dynare_model.jl)
 for f in "${MOD_FILES[@]}"; do cp "$JD/mod/$f" "$STAGE/Model/julia_dynare/mod/"; done
 

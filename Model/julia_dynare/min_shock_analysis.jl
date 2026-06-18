@@ -503,10 +503,8 @@ if _nz_ghx == 0 || _nz_ghu == 0
     """
 end
 
-# Identify eps_postar column
-# varexo order: eps_om eps_i epschi eps_pvstar eps_postar epsA_1..12 eps_xi
-# => eps_postar should be column 5
-shock_col = 5 + shock_sector
+# Identify the epsA_<sector> column BY NAME (robust to .mod shock-order changes).
+shock_col = exo_col("epsA_$(shock_sector)", MOD_DIR)
 @printf "  TFP shock (epsA_%d) column: %d\n\n" shock_sector shock_col
 
 

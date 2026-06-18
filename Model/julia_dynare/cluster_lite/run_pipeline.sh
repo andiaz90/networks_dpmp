@@ -35,6 +35,9 @@ NTHREADS="${NTHREADS:-$(nproc 2>/dev/null || echo 1)}"
 # Threading: Julia threads for the estimation; BLAS pinned to 1 to avoid contention.
 export JULIA_NUM_THREADS="$NTHREADS"
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 BLIS_NUM_THREADS=1
+export GKSwstype="${GKSwstype:-100}"   # headless GR for the shock plots (no X11)
+# SMM_MAX_HOURS (wall-clock self-limit for the estimator) is read from the
+# environment by smm_estimation.jl; the SLURM wrapper sets it. Inherited as-is.
 
 # Collect all shock figures/tables into results/ (instead of the local Dropbox/
 # Overleaf path the scripts default to, which does not exist on the cluster).
@@ -52,13 +55,15 @@ echo "======================================================"
 _run() { echo; echo ">>> $*"; "$@"; }
 
 stage_moments() {
-  _run "$JULIA" --project="$ROOT" "$JD/compute_data_moments.jl"
+  _run "$JULIA" --startup-file=no --project="$ROOT" "$JD/compute_data_moments.jl"
 }
 stage_compile() {
-  _run "$JULIA" --project="$ROOT" "$JD/main_SOE_gap.jl"
+  _run "$JULIA" --startup-file=no --project="$ROOT" "$JD/main_SOE_gap.jl"
 }
 stage_estimate() {
-  _run "$JULIA" --project="$ROOT" --threads="$NTHREADS" --heap-size-hint=100G \
+  # stdbuf -oL keeps the live progress log streaming to tail -f over many hours.
+  _run stdbuf -oL -eL "$JULIA" --startup-file=no --project="$ROOT" \
+       --threads="$NTHREADS" --heap-size-hint=100G \
        "$JD/run_smm_estimation.jl"
 }
 stage_shocks() {
@@ -69,7 +74,7 @@ stage_shocks() {
     echo "         estimated parametrization."
   fi
   [ -f "$ROOT/Data/sectoral_moments.csv" ] || stage_moments
-  _run "$JULIA" --project="$ROOT" "$JD/run_all_shocks.jl"
+  _run "$JULIA" --startup-file=no --project="$ROOT" "$JD/run_all_shocks.jl"
 }
 
 case "$STAGE" in

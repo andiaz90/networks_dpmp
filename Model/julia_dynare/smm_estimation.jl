@@ -28,6 +28,18 @@ using LinearAlgebra, Statistics, StatsBase, Printf
 using NLsolve, CSV, DataFrames, Dynare
 using CMAEvolutionStrategy
 
+# Thrown from the CMA-ES objective when the wall-clock self-limit is hit, so the
+# optimiser unwinds and the caller can save the best θ before SLURM SIGKILLs the
+# job. Detected by string match so it survives Task/Composite exception wrapping
+# under multi-threaded evaluation.
+struct SMMTimeout <: Exception end
+Base.showerror(io::IO, ::SMMTimeout) = print(io, "SMMTimeout: wall-clock self-limit reached")
+# Recognise the timeout whether bare or wrapped by the multi-threaded optimiser.
+_is_timeout(err) = occursin("SMMTimeout", sprint(showerror, err))
+_is_timeout(err::SMMTimeout) = true
+_is_timeout(err::CompositeException) = any(_is_timeout, err.exceptions)
+_is_timeout(err::TaskFailedException) = _is_timeout(err.task.exception)
+
 SCRIPT_DIR  = @__DIR__
 REPO_ROOT   = abspath(joinpath(SCRIPT_DIR, "..", ".."))
 DATA_DIR    = joinpath(REPO_ROOT, "Data")
@@ -86,9 +98,21 @@ end
 # directly identifies the export and import elasticities.
 # corr(Y_i,PH_i): negative under TFP shocks, positive under demand shocks — key identifier
 # for supply vs demand decomposition per sector (12 new moments, Option-A).
+# Canonical moment-name vector (58 entries). Defined BEFORE the data_moments
+# guard below, which references it. (The old 46-entry copy in
+# smm_model_moments.jl is now disabled — this is the single source of truth.)
+const MOMENT_NAMES = vcat(
+    ["std(Y_$(i))"  for i in 1:12], ["std(PH_$(i))" for i in 1:12],
+    ["std(L_$(i))"  for i in 1:12],
+    ["std(GDP)", "std(pi)", "corr(GDP,pi)", "std(TB/GDP)",
+     "std(Q)", "autocorr(Q)", "corr(GDP,Q)",
+     "rank corr: output (model vs data)", "rank corr: prices (model vs data)",
+     "rank corr: labor  (model vs data)"],
+    ["corr(Y_$(i),PH_$(i))" for i in 1:12])
+
 data_moments = [y_d; p_d; l_d; d_std_GDP; d_std_pi; d_corr_GDPpi;
                 d_std_TBGDP; d_std_Q; d_autocorr_Q; d_corr_GDPQ; 1.0; 1.0; 1.0; corr_YPH_d]
-@assert length(data_moments) == 58 "Expected 58 data moments, got $(length(data_moments))"
+@assert length(data_moments) == length(MOMENT_NAMES) "data_moments ($(length(data_moments))) ≠ MOMENT_NAMES ($(length(MOMENT_NAMES)))"
 
 # GUARD: NaN anywhere in data_moments poisons the objective for ALL evaluations
 # (best_obj initialises to NaN and is never updated). Catch this immediately.
@@ -104,15 +128,6 @@ let nan_dm = findall(isnan, data_moments)
         """)
     end
 end
-
-const MOMENT_NAMES = vcat(
-    ["std(Y_$(i))"  for i in 1:12], ["std(PH_$(i))" for i in 1:12],
-    ["std(L_$(i))"  for i in 1:12],
-    ["std(GDP)", "std(pi)", "corr(GDP,pi)", "std(TB/GDP)",
-     "std(Q)", "autocorr(Q)", "corr(GDP,Q)",
-     "rank corr: output (model vs data)", "rank corr: prices (model vs data)",
-     "rank corr: labor  (model vs data)"],
-    ["corr(Y_$(i),PH_$(i))" for i in 1:12])
 
 
 # =========================================================================== #
@@ -173,6 +188,97 @@ end
 
 
 # =========================================================================== #
+#  3b. SETUP CONTRACT CHECKS                                                   #
+# =========================================================================== #
+# The dimensions 35 (params) and 58 (moments) are hard-coded in many places
+# (LB/UB, layout comments, Σe indexing, slicing in smm_run, the decomposition
+# printouts). Historically, adding one parameter or moment broke the run deep
+# inside CMA-ES with an opaque BoundsError. This validates every cross-cutting
+# invariant ONCE, up front, and fails with a message that says exactly what to
+# update. Call it at the very top of smm_run.
+
+const N_MOMENTS = 58   # single named constant for the moment-vector length
+
+function validate_smm_setup(data_moments)
+    errs = String[]
+
+    length(LB) == N_THETA ||
+        push!(errs, "length(LB)=$(length(LB)) ≠ N_THETA=$N_THETA")
+    length(UB) == N_THETA ||
+        push!(errs, "length(UB)=$(length(UB)) ≠ N_THETA=$N_THETA")
+    length(PARAM_LABELS) == N_THETA ||
+        push!(errs, "length(PARAM_LABELS)=$(length(PARAM_LABELS)) ≠ N_THETA=$N_THETA")
+    N_THETA >= 35 ||
+        push!(errs, "N_THETA=$N_THETA but the moment fn reads θ[31:35]; need ≥35")
+
+    all(LB .< UB) ||
+        push!(errs, "LB ≥ UB at indices $(findall(LB .>= UB)) " *
+                    "(params: $(PARAM_LABELS[findall(LB .>= UB)]))")
+
+    length(data_moments) == N_MOMENTS ||
+        push!(errs, "length(data_moments)=$(length(data_moments)) ≠ N_MOMENTS=$N_MOMENTS")
+    length(MOMENT_NAMES) == N_MOMENTS ||
+        push!(errs, "length(MOMENT_NAMES)=$(length(MOMENT_NAMES)) ≠ N_MOMENTS=$N_MOMENTS")
+
+    W = build_weighting_matrix(data_moments)
+    size(W) == (N_MOMENTS, N_MOMENTS) ||
+        push!(errs, "build_weighting_matrix returned $(size(W)), expected ($N_MOMENTS,$N_MOMENTS)")
+
+    # Klein structural-param indices must be valid θ positions.
+    bad_klein = filter(i -> i < 1 || i > N_THETA, _KLEIN_STRUCT_IDX)
+    isempty(bad_klein) ||
+        push!(errs, "_KLEIN_STRUCT_IDX has out-of-range entries $bad_klein for N_THETA=$N_THETA")
+
+    if !isempty(errs)
+        error("""
+        SMM setup is inconsistent — fix before estimating:
+
+          - $(join(errs, "\n          - "))
+
+        These dimensions must stay in sync whenever you add a parameter or a
+        moment. The usual edit points are:
+          params  → LB, UB, PARAM_LABELS, N_THETA, the θ[...] slices in
+                    smm_model_moments, default_theta0, _KLEIN_STRUCT_IDX
+          moments → MOMENT_NAMES, N_MOMENTS, build_weighting_matrix, the return
+                    vector of smm_model_moments, the ψ-decomposition printouts
+        """)
+    end
+    @printf "  Setup contract checks passed: %d params, %d moments.\n" N_THETA N_MOMENTS
+    return nothing
+end
+
+
+# Atomic CSV write: write to a temp file in the same directory, then rename.
+# A `mv` is atomic on the same filesystem, so a job killed mid-write never
+# leaves a half-written checkpoint that would poison the next warm start.
+function atomic_write_csv(path::AbstractString, df)
+    tmp = path * ".tmp_$(getpid())_$(Threads.threadid())"
+    CSV.write(tmp, df)
+    mv(tmp, path; force=true)
+    return path
+end
+
+# Persist the current best θ to the checkpoint file (warm-start source). Called
+# live, on every improvement, so a 1–2 day cluster run that dies loses at most
+# the current generation rather than everything since the last manual save.
+function save_checkpoint(θ::AbstractVector, obj::Real)
+    df = DataFrame(
+        param = vcat(["ilabcosts","epsY","epsM","log_kappaV","rho_om","rho_A"],
+                     ["isigma_tfp_$(i)" for i in 1:NSEC],
+                     ["sigma_om_$(i)" for i in 1:NSEC],
+                     ["rho_pvstar","sigma_pvstar","rho_xi","sigma_xi","etastar"]),
+        value = collect(Float64, θ),
+        obj_hat = vcat([Float64(obj)], fill(NaN, length(θ)-1)))
+    try
+        atomic_write_csv(joinpath(DATA_DIR, "smm_checkpoint.csv"), df)
+    catch err
+        @printf "  [warn] checkpoint write failed: %s\n" sprint(showerror, err)
+    end
+    return nothing
+end
+
+
+# =========================================================================== #
 #  4.  BASELINE CALIBRATION STRUCT                                            #
 # =========================================================================== #
 
@@ -209,6 +315,8 @@ function build_baseline(context::Dynare.Context,
         etastar_val=pvec("etastar"), omegaX_val=pvec("omegaX"),
         ystar_ss_val=pvec("ystar_ss"),
         data_std_Y=d_std_Y, data_std_PH=d_std_PH, data_std_L=d_std_L,
+        # Diagonal Σe positions to activate, resolved by shock NAME (fixes C1).
+        active_exo_idx=active_shock_indices(context, nsec),
     )
 end
 
@@ -394,7 +502,8 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
     set_param!(context,"sigma_xi",sigma_xi)
     for i in 1:nsec
         set_param!(context,"isigma_tfp_$(i)",isigma_tfp[i])
-        set_param!(context,"sigma_om_$(i)",sigma_om_vec[i])
+        set_param!(context,"sigma_om_$(i)",sigma_om_vec[i])   # now EXISTS in the model (fixes C2)
+        set_param!(context,"rho_tfp1_$(i)",rho_A)             # model uses sector-specific rho_tfp1_i
     end
 
     epsY_prev    = get_param_val(context,"epsY_1"); epsM_prev = get_param_val(context,"epsM_1")
@@ -415,14 +524,14 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
     n_state = length(sr)
     sc      = _get_scratch!(n_exo, n_state, endo_names)
 
-    # Σe: activate all shocks except epschi (unused labor supply shock)
-    # varexo order (Option-A): 1=eps_i, 2=epschi(off), 3=eps_pvstar,
-    #                           4:15=epsA_1:12, 16=eps_xi, 17:28=eps_om_1:12
+    # Σe: activate shocks by NAME (fixes C1). The diagonal positions were
+    # resolved once in build_baseline from the model's own exogenous ordering
+    # (eps_i, eps_pvstar, eps_xi, epsA_1:12, eps_om_1:12; oil & labour-supply off),
+    # so a change to the .mod shock list can never silently scramble Σe again.
     fill!(sc.Σe, 0.0)
-    sc.Σe[1,1]=1.0; sc.Σe[3,3]=1.0                    # eps_i, eps_pvstar
-    for i in 4:min(15,n_exo); sc.Σe[i,i]=1.0; end     # epsA_1:12
-    n_exo>=16 && (sc.Σe[16,16]=1.0)                   # eps_xi
-    for i in 17:min(28,n_exo); sc.Σe[i,i]=1.0; end    # eps_om_1:12
+    @inbounds for k in baseline.active_exo_idx
+        k <= n_exo && (sc.Σe[k,k] = 1.0)
+    end
 
     Tsr = T[sr,:]; Rsr = R[sr,:]
     RΣ  = Rsr * sc.Σe   # 78×17
@@ -432,7 +541,11 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
     end
 
     dlyap_inplace!(sc.P, Tsr, sc.Q_lyap; tmp1=sc.tmp1, tmp2=sc.tmp2, Ak=sc.Ak)
-    (any(diag(sc.P).<-1e-10) || any(isnan.(sc.P))) && return NAN58, false
+    # Reject: negative variances, NaN, OR non-finite / explosive entries. The
+    # doubling iteration returns a finite-but-huge P when the state transition is
+    # near-unit-root (BK borderline); 1e12 on a normalised state is unphysical.
+    (any(diag(sc.P).<-1e-10) || !all(isfinite, sc.P) ||
+     maximum(abs, diag(sc.P)) > 1e12) && return NAN58, false
 
     # HP-filtered covariance on the ~40 needed variables only (25× faster)
     needed_names = vcat(["Y_$(i)" for i in 1:nsec], ["PH_$(i)" for i in 1:nsec],
@@ -516,7 +629,27 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     end
     @printf "  endo_names: %d variables\n" length(endo_names)
 
+    # Fail loudly NOW if params/moments/bounds are out of sync (see §3b).
+    validate_smm_setup(data_moments)
+
     baseline = build_baseline(context, endo_names, y_d, p_d, l_d, d_TBGDP, d_omG)
+
+    # Verify the name-based shock mapping resolved (fixes C1). Expect 27 active
+    # shocks: eps_i + eps_pvstar + eps_xi + 12 epsA + 12 eps_om. A wrong count
+    # means the loaded context is not the unified model — abort with guidance.
+    let na = length(baseline.active_exo_idx), exo = smm_exo_names(context)
+        @printf "  Active shocks (by name): %d of %d exogenous\n" na length(exo)
+        if na != 3 + 2*NSEC
+            error("""
+            Expected $(3 + 2*NSEC) active shocks (eps_i, eps_pvstar, eps_xi,
+            epsA_1:$(NSEC), eps_om_1:$(NSEC)) but resolved $(na) from the loaded
+            context's exogenous list ($(length(exo)) shocks).
+            The loaded context is almost certainly the OLD model. Rebuild it:
+              julia --project=. main_SOE_gap.jl     # recompiles the unified .mod
+            then re-run the estimation.
+            """)
+        end
+    end
 
     n_threads_active = Threads.nthreads()
     contexts_th = n_threads_active > 1 ?
@@ -547,10 +680,32 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     end
     @printf "  resolve_first_order! OK, g1_1 size=%s\n" string(size(g_test))
 
-    m_test, ok_test = smm_model_moments(θ0, context, baseline, endo_names)
+    # Safe wrapper: a throw in the moment fn becomes (NaNs, false) so pre-flight
+    # reports it cleanly instead of dumping a stack trace.
+    _safe_moments(θv) = try
+        smm_model_moments(θv, context, baseline, endo_names)
+    catch e
+        @printf "  pre-flight eval threw: %s\n" sprint(showerror, e)
+        (fill(NaN, N_MOMENTS), false)
+    end
+
+    m_test, ok_test = _safe_moments(θ0)
+    if (!ok_test || any(isnan, m_test)) && θ_warm !== nothing
+        # The warm-start checkpoint may itself sit on a θ that no longer solves
+        # (e.g. after a mod change). Don't abort — retry from the default θ₀.
+        @printf "  Warm-start θ₀ failed pre-flight; retrying from default θ₀.\n"
+        θ0_def = clamp.(default_theta0(context), LB, UB)
+        for i in 1:12
+            θ0_def[6+i]  = max(θ0_def[6+i],  clamp(y_d[i]*0.4, LB[6+i], UB[6+i]))
+            θ0_def[18+i] = max(θ0_def[18+i], clamp(y_d[i]*0.3, LB[18+i], UB[18+i]))
+        end
+        θ0_def[32] = max(θ0_def[32], 0.05); θ0_def[34] = max(θ0_def[34], 0.02)
+        m_test, ok_test = _safe_moments(θ0_def)
+        ok_test && !any(isnan, m_test) && (θ0 = θ0_def)
+    end
     if !ok_test || any(isnan, m_test)
         @printf "  FAILED: NaN at %s\n" string(findall(isnan, m_test))
-        error("Pre-flight failed. Fix model setup before estimation.")
+        error("Pre-flight failed even from default θ₀. Re-run main_SOE_gap.jl (EXERCISE=0) to rebuild the context, then check the model compiles.")
     end
     obj_test    = dot(data_moments .- m_test, W * (data_moments .- m_test))
     m_test_copy = copy(m_test)   # used as fallback for best_moments below
@@ -569,7 +724,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     # CMA-ES
     max_evals = 300_000
     @printf "--- CMA-ES ---\n"
-    @printf "  %d params | %d moments | max %d evals | %d threads\n" N_THETA 58 max_evals n_threads_active
+    @printf "  %d params | %d moments | max %d evals | %d threads\n" N_THETA N_MOMENTS max_evals n_threads_active
     @printf "  %-6s  %-10s  %-54s  %-7s  %-8s  %-8s\n" "eval" "best_obj" "[Y    PH    L     Agg   Rank  CorrYP]" "fail" "ms/eval" "Klein%"
     @printf "  %s\n" repeat("-",90)
 
@@ -583,15 +738,37 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     last_printed  = Threads.Atomic{Int}(0)   # last eval_count at which we printed
     t_start       = Ref(time())
     t_last_print  = Ref(time())
+    t_last_ckpt   = Ref(time())
     PRINT_EVERY   = 50    # print every N evaluations (any thread can trigger)
+    CKPT_EVERY_S  = 60.0  # throttle live checkpoint writes to ≥ this many seconds
+
+    # Wall-clock self-limit: set SMM_MAX_HOURS a bit under the SLURM --time so the
+    # run stops itself and saves, rather than being SIGKILLed mid-write.
+    max_seconds = let h = tryparse(Float64, get(ENV, "SMM_MAX_HOURS", ""))
+        (h === nothing || h <= 0) ? Inf : h * 3600
+    end
+    max_seconds < Inf && @printf "  Wall-clock self-limit: %.2f h (SMM_MAX_HOURS)\n" (max_seconds/3600)
 
     _tid_cma() = min(Threads.threadid(), length(contexts_th))
 
     obj_fn = θ_sc -> begin
+        # Graceful wall-clock stop — throw so CMA-ES unwinds; caller saves best θ.
+        (max_seconds < Inf && (time() - t_start[]) > max_seconds) && throw(SMMTimeout())
+
         tid   = _tid_cma()
         θ     = LB .+ θ_sc .* span    # unscale [0,1] → original parameter space
-        m, ok = smm_model_moments(θ, contexts_th[tid], baselines_th[tid], endo_names)
-        obj   = (!ok || any(isnan, m)) ? 1e8 : dot(data_moments.-m, W*(data_moments.-m))
+        # A single bad evaluation must NEVER take down a multi-hour run. Any
+        # exception inside the moment computation is converted to the failure
+        # penalty (1e8); only SMMTimeout is allowed to propagate.
+        local m
+        obj = try
+            mm, ok = smm_model_moments(θ, contexts_th[tid], baselines_th[tid], endo_names)
+            m = mm
+            (!ok || any(isnan, mm)) ? 1e8 : dot(data_moments.-mm, W*(data_moments.-mm))
+        catch err
+            err isa SMMTimeout && rethrow(err)
+            1e8
+        end
 
         n = Threads.atomic_add!(eval_count, 1) + 1   # new count (1-based)
         obj >= 1e7 && Threads.atomic_add!(fail_count, 1)
@@ -602,6 +779,13 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
                     best_obj[]      = obj
                     best_θ[]        = copy(θ)   # θ in original parameter space
                     best_moments[]  = copy(m)   # save moments — avoids re-evaluation bug
+                    # Live checkpoint (throttled): a node failure mid-run then
+                    # loses at most the work since the last save, and the next
+                    # run warm-starts from this θ automatically.
+                    if time() - t_last_ckpt[] > CKPT_EVERY_S
+                        save_checkpoint(best_θ[], best_obj[])
+                        t_last_ckpt[] = time()
+                    end
                 end
             end
         end
@@ -655,17 +839,30 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     LB_sc = zeros(N_THETA)
     UB_sc = ones(N_THETA)
 
-    CMAEvolutionStrategy.minimize(
-        obj_fn, θ0_sc, insigma;
-        lower = LB_sc,
-        upper = UB_sc,
-        maxiter = max_evals,
-        ftol  = 1e-10,   # effectively disabled: HP-filtered obj is smooth,
-                          # premature convergence was the main stagnation cause
-        xtol  = 1e-8,    # stop only when parameter changes are genuinely tiny
-        seed  = 42,
-        verbosity = 0,
-        multi_threading = n_threads_active > 1)
+    # The optimiser is wrapped so that a wall-clock timeout OR any unexpected
+    # internal failure does not discard hours of search — best_θ is always the
+    # running best, and is saved below regardless of how minimize() exits.
+    try
+        CMAEvolutionStrategy.minimize(
+            obj_fn, θ0_sc, insigma;
+            lower = LB_sc,
+            upper = UB_sc,
+            maxiter = max_evals,
+            ftol  = 1e-10,   # effectively disabled: HP-filtered obj is smooth,
+                              # premature convergence was the main stagnation cause
+            xtol  = 1e-8,    # stop only when parameter changes are genuinely tiny
+            seed  = 42,
+            verbosity = 0,
+            multi_threading = n_threads_active > 1)
+    catch err
+        if _is_timeout(err)
+            @printf "\n  Wall-clock self-limit reached — stopping CMA-ES; best θ retained.\n"
+        else
+            @printf "\n  [warn] CMA-ES ended early: %s\n  Proceeding with best θ found so far.\n" sprint(showerror, err)
+        end
+    end
+    # Ensure the very latest best is on disk before the results section.
+    save_checkpoint(best_θ[], best_obj[])
 
     θ_hat = clamp.(best_θ[], LB, UB)
     total_t = time() - t_start[]
@@ -700,11 +897,11 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     end
     @printf "\n  Decomp: Y=%.3f PH=%.3f L=%.3f Agg=%.3f Rank=%.3f CorrYP=%.3f\n\n" dot(ψ_hat[1:12],W[1:12,1:12]*ψ_hat[1:12]) dot(ψ_hat[13:24],W[13:24,13:24]*ψ_hat[13:24]) dot(ψ_hat[25:36],W[25:36,25:36]*ψ_hat[25:36]) dot(ψ_hat[37:43],W[37:43,37:43]*ψ_hat[37:43]) dot(ψ_hat[44:46],W[44:46,44:46]*ψ_hat[44:46]) dot(ψ_hat[47:58],W[47:58,47:58]*ψ_hat[47:58])
 
-    # Save
-    df_res = DataFrame(param=vcat(PARAM_LABELS,fill("",58-N_THETA)),
-                        theta=vcat(θ_hat,fill(NaN,58-N_THETA)),
+    # Save (atomic writes — a kill mid-write can't corrupt these files)
+    df_res = DataFrame(param=vcat(PARAM_LABELS,fill("",N_MOMENTS-N_THETA)),
+                        theta=vcat(θ_hat,fill(NaN,N_MOMENTS-N_THETA)),
                         moment=MOMENT_NAMES, data=data_moments, model=m_hat, diff=ψ_hat)
-    CSV.write(joinpath(DATA_DIR,"smm_results.csv"), df_res)
+    atomic_write_csv(joinpath(DATA_DIR,"smm_results.csv"), df_res)
 
     df_est = DataFrame(
         param=vcat(["ilabcosts","epsY","epsM","log_kappaV","rho_om","rho_A"],
@@ -712,10 +909,21 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
                    ["sigma_om_$(i)" for i in 1:NSEC],
                    ["rho_pvstar","sigma_pvstar","rho_xi","sigma_xi","etastar"]),
         value=θ_hat, obj_hat=vcat([obj_hat],fill(NaN,N_THETA-1)))
-    CSV.write(joinpath(DATA_DIR,"smm_estimates.csv"), df_est)
-    CSV.write(joinpath(DATA_DIR,"smm_checkpoint.csv"), df_est)
+    atomic_write_csv(joinpath(DATA_DIR,"smm_estimates.csv"), df_est)
+    atomic_write_csv(joinpath(DATA_DIR,"smm_checkpoint.csv"), df_est)
 
     @printf "  Results: %s\n  Estimates: %s\n\n" joinpath(DATA_DIR,"smm_results.csv") joinpath(DATA_DIR,"smm_estimates.csv")
+
+    # Asymptotic inference: standard errors + overidentification J-test.
+    # Wrapped so a failure here never discards the point estimates above.
+    if isdefined(@__MODULE__, :compute_smm_inference)
+        try
+            compute_smm_inference(θ_hat, m_hat, context, baseline, endo_names)
+        catch err
+            @printf "  [warn] inference step failed: %s\n" sprint(showerror, err)
+        end
+    end
+
     @printf "  Re-run main_SOE_gap.jl (EXERCISE=0) to apply estimates.\n\n"
 
     return θ_hat, obj_hat, m_hat

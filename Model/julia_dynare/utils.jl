@@ -127,11 +127,11 @@ function write_params_mod(mod_dir::String, p::NamedTuple)
         _wp(io, "shock_eps_i",      p.shock_eps_i_val)
         _wp(io, "shock_eps_pvstar", p.shock_eps_pvstar_val)
         _wp(io, "shock_eps_xi",     p.shock_eps_xi_val)
-        # shock_eps_om is the variance of the single scalar eps_om shock (declared in
-        # the .mod shocks block as "var eps_om = shock_eps_om").  The per-sector
-        # shock_eps_om_i values (written below) are used inside model equations.
-        # If any sector's omega shock is active, turn the aggregate shock on too.
-        _wp(io, "shock_eps_om",     maximum(p.shock_eps_om_vec))
+        # NOTE: the aggregate eps_om shock was removed in the unified model; demand
+        # is now sectoral (eps_om_1..nsec). The per-sector activation flags
+        # shock_eps_om_i and std devs sigma_om_i are written below. Do NOT write a
+        # scalar shock_eps_om / sigma_om / rho_om2 — those parameters no longer
+        # exist in NK_SOE_lev_gap2.mod and Dynare would reject them.
         println(io)
 
         # ---- Option-A: 12 sectoral demand shock parameters -------------- #

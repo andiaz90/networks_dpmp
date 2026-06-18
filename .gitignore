@@ -29,3 +29,15 @@ julia_dynare/Manifest.toml
 *.eps
 *.svg
 figures/
+
+# ---- Networks-DPMP: generated Dynare/Julia artifacts (rebuilt by main_SOE_gap.jl) ----
+Model/julia_dynare/mod/NK_SOE_lev_gap2/
+Model/julia_dynare/mod/dynare_*.csv
+Model/julia_dynare/mod/*.jls
+Model/julia_dynare/mod/params_jl.mod
+# build bundles & staging tree (recreated by cluster_lite/prepare_cluster_lite.sh)
+Model/julia_dynare/*.tar.gz
+Model/julia_dynare/*.tar.gz.orig_backup
+Model/julia_dynare/nk_iosoe_cluster/
+# fuse/editor temp leftovers
+**/.fuse_hidden*

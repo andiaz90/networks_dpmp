@@ -504,10 +504,9 @@ if _nz_ghx == 0 || _nz_ghu == 0
     """
 end
 
-# Identify eps_postar column
-# varexo order: eps_om eps_i epschi eps_pvstar eps_postar epsA_1..12 eps_xi
-# => eps_postar should be column 5
-postar_col = 5
+# Identify the eps_postar column BY NAME (robust to .mod shock-order changes;
+# in the unified model eps_postar is column 4, not 5).
+postar_col = exo_col("eps_postar", MOD_DIR)
 @printf "  Oil shock (eps_postar) column: %d\n\n" postar_col
 
 

@@ -37,6 +37,7 @@ import_tests = [
     "using LinearAlgebra, Statistics, Printf, Logging, Serialization, SparseArrays",
     "using CSV, DataFrames, XLSX",
     "using NLsolve",
+    "using Random",
     "using StatsBase",
     "using CMAEvolutionStrategy",
     "using Plots, StatsPlots",

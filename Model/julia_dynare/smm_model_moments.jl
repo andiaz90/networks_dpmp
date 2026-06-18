@@ -23,7 +23,7 @@ JACOBIAN COLUMN LAYOUT (from dynamic.json):
   cols 626:642  → D: ∂f/∂ε_t           (17 exogenous shocks)
 """
 
-using LinearAlgebra, SparseArrays, Statistics, StatsBase, NLsolve
+using LinearAlgebra, SparseArrays, Statistics, StatsBase, NLsolve, Random
 # GenericSchur was used to avoid LAPACK gees callbacks on ARM Mac.
 # Julia's built-in LinearAlgebra.schur uses LAPACK dgges (no select callback)
 # which IS available via Apple Accelerate on ARM. We now use it directly.
@@ -349,6 +349,69 @@ end
 
 
 # =========================================================================== #
+#  EXOGENOUS-SHOCK NAMES (ordered) — for name-based Σe construction            #
+# =========================================================================== #
+# The hardcoded Σe index layout was the root cause of the shock-layout bug
+# (audit finding C1): a 28-shock template applied to whatever model was loaded.
+# We now resolve the active shocks by NAME from the model's own exogenous
+# ordering, so a change in the .mod shock list can never silently scramble Σe.
+
+const _EXO_NAMES = Ref{Vector{String}}(String[])
+
+function smm_exo_names(context)
+    isempty(_EXO_NAMES[]) || return _EXO_NAMES[]
+    names = String[]
+    # Prefer the live context if it exposes exogenous symbols with names.
+    try
+        exo = context.models[1].exogenous
+        names = [String(getfield(e, :name)) for e in exo]
+    catch; names = String[]; end
+    # Fallback: parse the "exogenous" array from modfile.json by bracket matching.
+    if isempty(names) && isfile(_MODFILE_PATH)
+        try
+            raw = read(_MODFILE_PATH, String)
+            key = findfirst("\"exogenous\"", raw)   # exact key; won't match exogenous_deterministic
+            if key !== nothing
+                lb = findnext('[', raw, key[end] + 1)
+                depth = 0; rb = lb
+                for p in lb:lastindex(raw)
+                    c = raw[p]
+                    c == '[' && (depth += 1)
+                    if c == ']'
+                        depth -= 1
+                        depth == 0 && (rb = p; break)
+                    end
+                end
+                chunk = raw[lb:rb]
+                names = [String(m.captures[1]) for m in eachmatch(r"\"name\"\s*:\s*\"([^\"]+)\"", chunk)]
+            end
+        catch; end
+    end
+    _EXO_NAMES[] = names
+    return names
+end
+
+"""
+    active_shock_indices(context, nsec) -> Vector{Int}
+
+Diagonal positions in Σe to switch on during SMM estimation, resolved by name:
+monetary (eps_i), import price (eps_pvstar), aggregate demand (eps_xi), the 12
+sectoral TFP shocks (epsA_i) and the 12 sectoral demand shocks (eps_om_i).
+Deliberately EXCLUDES eps_postar (oil — off during estimation) and epschi
+(labour supply — off). Returns the indices in the model's exogenous order.
+"""
+function active_shock_indices(context, nsec::Int)
+    exo = smm_exo_names(context)
+    active = Set{String}(["eps_i", "eps_pvstar", "eps_xi"])
+    for i in 1:nsec
+        push!(active, "epsA_$(i)")
+        push!(active, "eps_om_$(i)")
+    end
+    return [k for (k, nm) in enumerate(exo) if nm in active]
+end
+
+
+# =========================================================================== #
 #  KLEIN (2000) FIRST-ORDER SOLVER  (pure Julia, no LAPACK gees)             #
 # =========================================================================== #
 
@@ -596,26 +659,48 @@ end
 # =========================================================================== #
 
 function recompute_ss!(context, epsY, epsM, baseline, endo_names; etastar=nothing)
+  # Whole body wrapped so a DomainError / singular-LU / Inf in the nonlinear SS
+  # solve returns `false` (→ caller emits NaN moments → optimiser penalises this
+  # θ) instead of throwing and killing the entire estimation run.
+  try
     nsec = baseline.nsec
     modepsY = fill(epsY, nsec); modepsM = fill(epsM, nsec)
+    # Use the *effective* etastar so the SS solve is consistent with the value
+    # that triggered the recompute (previously baseline.etastar_val was used,
+    # silently ignoring the new etastar — the export block then disagreed with
+    # the write-back below).
+    eta_for_ss = something(etastar, baseline.etastar_val)
     ss_vec = context.results.model_results[1].trends.endogenous_steady_state
     get_ss(nm) = let idx = findfirst(==(nm), endo_names)
                      idx === nothing ? 1.0 : ss_vec[idx] end
 
-    x0 = [[get_ss("PH_$(i)") for i in 1:nsec]; get_ss("w"); get_ss("Q"); get_ss("C")]
-    res = nlsolve(
-        (F, x) -> F .= steady_ntwsoe(x, baseline.PVstar_ss, baseline.epsilon_val,
+    f_outer! = (F, x) -> F .= steady_ntwsoe(x, baseline.PVstar_ss, baseline.epsilon_val,
                                       baseline.modvarrho, baseline.sigmaH_val,
                                       baseline.modgammag, baseline.modgammas,
                                       baseline.ombar_val, 1-baseline.ombar_val,
                                       baseline.modchiX, baseline.omegaX_val,
-                                      baseline.etastar_val, baseline.ystar_ss_val,
+                                      eta_for_ss, baseline.ystar_ss_val,
                                       baseline.modalpha, baseline.modalphaV,
                                       baseline.modbeta, modepsY, modepsM,
                                       baseline.gamma_val, baseline.chi_val,
-                                      baseline.psi_val, ones(nsec), baseline.tb_target),
-        x0; ftol=1e-12, method=:trust_region, show_trace=false)
-    !converged(res) && return false
+                                      baseline.psi_val, ones(nsec), baseline.tb_target)
+
+    x0 = [[get_ss("PH_$(i)") for i in 1:nsec]; get_ss("w"); get_ss("Q"); get_ss("C")]
+    res = nlsolve(f_outer!, x0; ftol=1e-12, method=:trust_region, show_trace=false)
+    if !converged(res)
+        # Multi-start: the trust-region solver is sensitive to the warm guess
+        # when epsY/epsM/etastar move far from the cached point. Retry from a
+        # few deterministically-perturbed guesses before giving up. Seeded RNG
+        # so failures are reproducible across runs.
+        rng = Random.MersenneTwister(hash((epsY, epsM, eta_for_ss)) % UInt32)
+        for k in 1:6
+            x0p = max.(x0 .* (1 .+ 0.10 * k .* (rand(rng, length(x0)) .- 0.5)), 1e-8)
+            res = nlsolve(f_outer!, x0p; ftol=1e-12, method=:trust_region, show_trace=false)
+            converged(res) && break
+        end
+        converged(res) || return false
+    end
+    all(isfinite, res.zero) || return false
 
     pH_ss = res.zero[1:nsec]; w_ss = res.zero[nsec+1]
     Q_ss = res.zero[nsec+2];  C_ss = res.zero[nsec+3]
@@ -642,7 +727,7 @@ function recompute_ss!(context, epsY, epsM, baseline, endo_names; etastar=nothin
         vcat(max.(MCi_ss./PMi_ss,1e-20), max.(MCi_ss./PL_ss,1e-20),
              max.(MCi_ss./PV_ss,1e-20), fill(0.2,nsec));
         ftol=1e-10, method=:trust_region, show_trace=false)
-    !converged(inner) && return false
+    (!converged(inner) || !all(isfinite, inner.zero)) && return false
 
     Yi_ss = inner.zero[3*nsec+1:4*nsec]; M_ss = inner.zero[1:nsec]
     IMP = sum(inner.zero[2*nsec+1:3*nsec]) + sum(CFi)
@@ -661,16 +746,34 @@ function recompute_ss!(context, epsY, epsM, baseline, endo_names; etastar=nothin
     end
     ss_mut = context.results.model_results[1].trends.endogenous_steady_state
     upd(nm,val) = let idx=findfirst(==(nm),endo_names); idx!==nothing&&(ss_mut[idx]=val); end
+    # Reject pathological aggregates before committing them to the context SS.
+    (isfinite(GDP) && GDP > 0 && isfinite(C_ss) && C_ss > 0 &&
+     all(isfinite, pH_ss) && all(>(0), pH_ss) && all(isfinite, Yi_ss)) || return false
     upd("w",w_ss); upd("Q",Q_ss); upd("C",C_ss); upd("GDP",GDP); upd("TB",TB)
     for i in 1:nsec; upd("PH_$(i)",pH_ss[i]); upd("Y_$(i)",Yi_ss[i]); upd("L_$(i)",inner.zero[nsec+i]); end
     return true
+  catch
+    # Any unexpected failure in the SS recompute is treated as a non-convergence
+    # so the optimiser simply penalises this θ rather than aborting the run.
+    return false
+  end
 end
 
 
 # =========================================================================== #
-#  MOMENT NAMES                                                                #
+#  MOMENT NAMES + duplicate moment fn — DISABLED                               #
+#  ------------------------------------------------------------------------   #
+#  The canonical MOMENT_NAMES (58 entries) and the canonical, optimised        #
+#  smm_model_moments(...) live in smm_estimation.jl, which run_smm_estimation  #
+#  includes AFTER this file and therefore silently overrode the two            #
+#  definitions below.  Keeping two divergent copies (this one had only 46      #
+#  MOMENT_NAMES with a stale "mean goods expenditure share" entry, and a       #
+#  slower local_dlyap path) was a constant source of drift.  The block is      #
+#  commented out — NOT deleted — so the history/derivation stays readable.     #
+#  All the infrastructure ABOVE (Klein solver, recompute_ss!, param access,    #
+#  caches) is still live and used by the canonical moment fn.                  #
 # =========================================================================== #
-
+#=
 const MOMENT_NAMES = vcat(
     ["std(Y_$(i))"  for i in 1:12], ["std(PH_$(i))" for i in 1:12], ["std(L_$(i))"  for i in 1:12],
     ["std(GDP)", "std(pi)", "corr(GDP,pi)", "mean goods expenditure share",
@@ -838,3 +941,4 @@ function smm_model_moments(θ, context, baseline, endo_names)
     return [std_Y;std_PH;std_L;pstd("GDP");pstd("pi");xcorr("GDP","pi");
             std_TBGDP;pstd("Q");acQ;xcorr("GDP","Q");rY;rP;rL;corr_YPH], true
 end
+=#

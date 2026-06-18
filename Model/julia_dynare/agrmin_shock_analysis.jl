@@ -515,10 +515,9 @@ if _nz_ghx == 0 || _nz_ghu == 0
     """
 end
 
-# Identify the epsA columns for the shocked sectors.
-# varexo order: eps_om eps_i epschi eps_pvstar eps_postar epsA_1..12 eps_xi
-# => epsA_k sits at column 5 + k.
-shock_cols = [5 + s for s in shock_sectors]
+# Identify the epsA columns for the shocked sectors BY NAME (robust to .mod
+# shock-order changes).
+shock_cols = [exo_col("epsA_$(s)", MOD_DIR) for s in shock_sectors]
 @printf "  TFP shock columns: %s (sectors %s)\n\n" string(shock_cols) string(shock_sectors)
 
 
