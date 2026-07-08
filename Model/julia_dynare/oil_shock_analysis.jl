@@ -204,7 +204,12 @@ gammaind_val = 0.0; ilabcosts_val = 0.1; ombar_val = 0.57
 
 Pistar_ss = 1.00; Rworld_ss = Pistar_ss / beta_val
 kappaV_val = 1e13; epsilonV_val = 1e13; epsilonX_val = 1.0; omegaX_val = 1.0
-chii_b_val = 0.001; etastar_val = 3.5
+# Debt-elastic risk premium: chii_b = 0.001 implies NFA eigenvalue ≈ 0.999
+# (Q half-life ~600 quarters) — IRFs look non-convergent on a 40q window.
+# Override per-run with ENV["CHIIB_OVERRIDE"], e.g. `CHIIB_OVERRIDE=0.01 julia …`.
+# chii_b does NOT affect the steady state (premium term is zero at SS).
+chii_b_val = haskey(ENV, "CHIIB_OVERRIDE") ? parse(Float64, ENV["CHIIB_OVERRIDE"]) : 0.001
+etastar_val = 3.5
 xi_rstar_val = 0.2; ystar_ss_val = 1.0; PVstar_ss = 1.0; sigmaH_val = 0.999
 
 modchiX   = let   # sectoral export shares chi_i^X from Chilean 2021 supply-use table (Data/computed)
@@ -276,7 +281,7 @@ modepsY   = fill(_epsY_set, nsec)
 
 # Use baseline εY from SMM estimates (no εY sensitivity loop)
 epsY_baseline = modepsY[1]
-nT = 40   # IRF horizon
+nT = 80   # IRF horizon (extended from 40 to assess convergence of the slow NFA mode)
 
 @printf "\n%s\n  Baseline εY = %.4f (from SMM estimates)\n%s\n" repeat("─",60) epsY_baseline repeat("─",60)
 
@@ -418,7 +423,7 @@ params_nt = (
     IMP_ss_val=IMP_tot_ss, Ctot_ss_val=sum(gammag_vec .* (p_g_ss ./ P_ss) .* C_g_ss) + sum(gammas_vec .* (p_s_ss ./ P_ss) .* C_s_ss),
     Ctotg_ss_val=sum(gammag_vec .* (p_g_ss ./ P_ss) .* C_g_ss),
     Ctots_ss_val=sum(gammas_vec .* (p_s_ss ./ P_ss) .* C_s_ss),
-    VA_ss_val=sum(Yi_ss .- M_ss), M_tot_ss=sum(M_ss), Y_tot_ss=sum(Yi_ss),
+    VA_ss_val=sum(pH_ss .* Yi_ss .- PMi_ss .* M_ss .- PV_ss .* Vi_ss), M_tot_ss=sum(M_ss), Y_tot_ss=sum(pH_ss .* Yi_ss),
     # Shock flags
     shock_eps_i_val=shock_eps_i_val, shock_eps_pvstar_val=shock_eps_pvstar_val,
     shock_eps_xi_val=shock_eps_xi_val,
@@ -527,7 +532,7 @@ scale_factor = log(1 + shock_pct) / sigma_postar_val   # units of s.d.
 @printf "--- Computing IRFs (10%% oil price shock) ---\n"
 @printf "  Scale factor: %.4f std devs (to get %.0f%% POstar increase)\n\n" scale_factor 100*shock_pct
 
-n_irf = 40   # quarters
+n_irf = 80   # quarters (extended from 40 to assess convergence of the slow NFA mode)
 
 # State-space matrices
 A = ghx[state_rows, :]  # n_states × n_states
@@ -632,7 +637,10 @@ oil_affected = findall((modalphaV .* modalphaOil) .> mean(modalphaV .* modalphaO
 
 # Assemble context and generate the full figure + table set via the shared module
 ctx = (
-    HAS_PLOTS = _HAS_PLOTS[], tag = "oil",
+    # Tag carries the chii_b override so sensitivity runs don't overwrite the
+    # baseline figures/tables (e.g. tag = "oil_chiib0p01").
+    HAS_PLOTS = _HAS_PLOTS[],
+    tag = haskey(ENV, "CHIIB_OVERRIDE") ? "oil_chiib" * replace(ENV["CHIIB_OVERRIDE"], "." => "p") : "oil",
     title_long = "Shock al Precio del Petróleo (+10%)", title_short = "Shock Petróleo",
     nsec = nsec, nT = nT, names_vec = names_vec, goods = goods,
     TB_ss = TB_ss, GDP_ss = GDP_ss,

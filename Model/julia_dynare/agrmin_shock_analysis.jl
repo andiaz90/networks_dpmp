@@ -429,7 +429,7 @@ params_nt = (
     IMP_ss_val=IMP_tot_ss, Ctot_ss_val=sum(gammag_vec .* (p_g_ss ./ P_ss) .* C_g_ss) + sum(gammas_vec .* (p_s_ss ./ P_ss) .* C_s_ss),
     Ctotg_ss_val=sum(gammag_vec .* (p_g_ss ./ P_ss) .* C_g_ss),
     Ctots_ss_val=sum(gammas_vec .* (p_s_ss ./ P_ss) .* C_s_ss),
-    VA_ss_val=sum(Yi_ss .- M_ss), M_tot_ss=sum(M_ss), Y_tot_ss=sum(Yi_ss),
+    VA_ss_val=sum(pH_ss .* Yi_ss .- PMi_ss .* M_ss .- PV_ss .* Vi_ss), M_tot_ss=sum(M_ss), Y_tot_ss=sum(pH_ss .* Yi_ss),
     # Shock flags
     shock_eps_i_val=shock_eps_i_val, shock_eps_pvstar_val=shock_eps_pvstar_val,
     shock_eps_xi_val=shock_eps_xi_val,

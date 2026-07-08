@@ -589,8 +589,8 @@ fdebt_ss      = Q_ss * abs(Bstar_ss) / GDP_ss
 
 # Aggregates for Dynare
 M_tot_ss      = sum(M_ss)
-Y_tot_ss      = sum(Yi_ss)
-VA_ss_val     = sum(Yi_ss .- M_ss)
+Y_tot_ss      = sum(pH_ss .* Yi_ss)   # gross output at constant SS relative prices (matches Y in .mod)
+VA_ss_val     = sum(pH_ss .* Yi_ss .- PMi_ss .* M_ss .- PV_ss .* Vi_ss)   # double-deflated VA at SS prices (matches VA in .mod; PIV_ss_i = PV_ss at SS)
 Ctotg_ss_val  = sum(gammag_vec .* (p_g_ss ./ P_ss) .* C_g_ss)
 Ctots_ss_val  = sum(gammas_vec .* (p_s_ss ./ P_ss) .* C_s_ss)
 Ctot_ss_val   = Ctotg_ss_val + Ctots_ss_val

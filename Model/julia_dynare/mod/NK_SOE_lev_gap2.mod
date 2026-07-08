@@ -324,17 +324,18 @@ C_f^(-gamma)*w_f = chi*N_f^psi;
 pi_g*C_g/C_g(-1) = exp(om_g)/exp(om_g(-1))*pi*C/C(-1);
 
 
-//% Gross Output
+//% Gross Output (real index at constant steady-state relative prices;
+//% unweighted sum is unit-dependent since PH_ss_i != 1)
 Y = (
     @#for i in 1:nsec
-        +Y_@{i}
+        +PH_ss@{i}*Y_@{i}
     @#endfor
     );
 
-//% Gross Output
+//% Gross Output (flex-price, same constant-price weights)
 Y_f = (
     @#for i in 1:nsec
-        +Y_f_@{i}
+        +PH_ss@{i}*Y_f_@{i}
     @#endfor
     );
 
@@ -384,17 +385,19 @@ Ctotg_f = (
 @#endfor
 );
 
-//% Value Added
+//% Value Added (double-deflated at constant SS prices: gross output less
+//% domestic materials and imported inputs; consistent with sectoral_va_irf
+//% in shock_plots_common.jl; at SS PIV_ss_i = PV_ss)
 VA = (
     @#for i in 1:nsec
-        +Y_@{i} - M_@{i}
+        +PH_ss@{i}*Y_@{i} - PMi_ss@{i}*M_@{i} - PIV_ss@{i}*V_@{i}
     @#endfor
 );
 
-//% Value Added
+//% Value Added (flex-price, same constant-price weights)
 VA_f = (
     @#for i in 1:nsec
-        +Y_f_@{i} - M_f_@{i}
+        +PH_ss@{i}*Y_f_@{i} - PMi_ss@{i}*M_f_@{i} - PIV_ss@{i}*V_f_@{i}
     @#endfor
 );
 
@@ -601,9 +604,14 @@ C^(-gamma) = beta*(C(+1)^-gamma)*r_star*pi_e(+1)/pi(+1);
 C_f^(-gamma) = beta*(C_f(+1)^-gamma)*r_star_f*pi_e_f(+1);
 
 
-r_star = Rworld*exp(-chii_b*(bbar-Q*Bstar/GDP));
+//% Debt-elastic premium on the debt STOCK at constant SS prices (Schmitt-Grohé
+//% & Uribe 2003 closure). Using the contemporaneous valuation ratio Q*Bstar/GDP
+//% (XMAS-style) creates a first-order depreciation->premium feedback loop when
+//% bbar is large, so chii_b is no longer innocuous for impact IRFs.
+//% Steady state is unchanged: premium term is zero at SS under both forms.
+r_star = Rworld*exp(-chii_b*(bbar-Q_ss*Bstar/GDP_ss));
 
-r_star_f = Rworld*exp(-chii_b*(bbar-Q_f*Bstar_f/GDP_f));
+r_star_f = Rworld*exp(-chii_b*(bbar-Q_ss*Bstar_f/GDP_ss));
 
 Rworld = Pistar_ss/beta;  // Rworld must satisfy Euler equation in steady state
 
@@ -703,29 +711,29 @@ Ygap    = log(Y)   - log(Y_f);
 Ngap    = log(N)   - log(N_f);
 GDPgap  = log(GDP) - log(GDP_f);
 
-//% Sectoral output aggregates: goods and services (NK)
+//% Sectoral output aggregates: goods and services (NK), constant SS prices
 Y_g = (0
 @#for i in 1:nsec
-    + dummyg_@{i}*Y_@{i}
+    + dummyg_@{i}*PH_ss@{i}*Y_@{i}
 @#endfor
 );
 
 Y_s = (0
 @#for i in 1:nsec
-    + dummys_@{i}*Y_@{i}
+    + dummys_@{i}*PH_ss@{i}*Y_@{i}
 @#endfor
 );
 
-//% Sectoral output aggregates: goods and services (flex-price)
+//% Sectoral output aggregates: goods and services (flex-price), constant SS prices
 Y_g_f = (0
 @#for i in 1:nsec
-    + dummyg_@{i}*Y_f_@{i}
+    + dummyg_@{i}*PH_ss@{i}*Y_f_@{i}
 @#endfor
 );
 
 Y_s_f = (0
 @#for i in 1:nsec
-    + dummys_@{i}*Y_f_@{i}
+    + dummys_@{i}*PH_ss@{i}*Y_f_@{i}
 @#endfor
 );
 
@@ -926,22 +934,22 @@ Cgap_g = 0;
 Cgap_s = 0;
 Y_g = (0
 @#for i in 1:nsec
-    + dummyg_@{i}*Y_ss@{i}
+    + dummyg_@{i}*PH_ss@{i}*Y_ss@{i}
 @#endfor
 );
 Y_s = (0
 @#for i in 1:nsec
-    + dummys_@{i}*Y_ss@{i}
+    + dummys_@{i}*PH_ss@{i}*Y_ss@{i}
 @#endfor
 );
 Y_g_f = (0
 @#for i in 1:nsec
-    + dummyg_@{i}*Y_ss@{i}
+    + dummyg_@{i}*PH_ss@{i}*Y_ss@{i}
 @#endfor
 );
 Y_s_f = (0
 @#for i in 1:nsec
-    + dummys_@{i}*Y_ss@{i}
+    + dummys_@{i}*PH_ss@{i}*Y_ss@{i}
 @#endfor
 );
 @#for i in 1:nsec

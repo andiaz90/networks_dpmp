@@ -736,7 +736,7 @@ function recompute_ss!(context, epsY, epsM, baseline, endo_names; etastar=nothin
     Bstar  = -TB / (Q_ss*(1 - r_star/Pistar))
 
     set_param!(context, "bbar", Q_ss*Bstar/GDP)
-    set_param!(context, "Y_ss", sum(Yi_ss))
+    set_param!(context, "Y_ss", sum(pH_ss .* Yi_ss))  # constant-SS-price gross output (matches Y in .mod)
     set_param!(context, "M_tot_ss", sum(M_ss))
     etastar !== nothing && set_param!(context, "etastar", etastar_eff)
     for i in 1:nsec
