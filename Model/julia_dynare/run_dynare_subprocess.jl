@@ -35,27 +35,51 @@ catch
 end
 using CSV, DataFrames, LinearAlgebra, Statistics
 
+# Quiet by default (2026-07-10): the Dynare solver's stdout and the extraction
+# diagnostics drowned the useful output. Set DYNARE_VERBOSE=1 to see everything.
+DYNARE_VERBOSE = get(ENV, "DYNARE_VERBOSE", "0") in ("1", "true")
+
 # Change to the model directory so @dynare finds .mod and @#include files
 cd(MOD_DIR)
-@info "Running Dynare in $(pwd())"
+DYNARE_VERBOSE && @info "Running Dynare in $(pwd())"
 
 # Clear the Dynare.jl compiled model cache so the updated .mod and
 # params_jl.mod are always picked up fresh (avoids stale-cache bugs).
 cache_dir = joinpath(MOD_DIR, "NK_SOE_lev_gap2")
 if isdir(cache_dir)
-    @info "Clearing Dynare model cache: $cache_dir"
+    DYNARE_VERBOSE && @info "Clearing Dynare model cache: $cache_dir"
     rm(cache_dir, recursive=true)
 end
 
-# @dynare at TOP LEVEL — no function scope, no world-age issues
-context = @dynare "NK_SOE_lev_gap2"
+# @dynare at TOP LEVEL — no function scope, no world-age issues.
+# Its stdout (583-row steady-state table, parser timestamps) is redirected to
+# dynare_run.log unless DYNARE_VERBOSE=1.  try/finally at top level preserves
+# the no-function-scope rule.
+_dynare_log_path = joinpath(MOD_DIR, "dynare_run.log")
+_old_stdout = stdout
+_old_stderr = stderr
+_log_io = DYNARE_VERBOSE ? nothing : open(_dynare_log_path, "w")
+if !DYNARE_VERBOSE
+    redirect_stdout(_log_io)
+    redirect_stderr(_log_io)   # preprocessor + parser timestamps print to stderr
+end
+context = try
+    @dynare "NK_SOE_lev_gap2"
+finally
+    if !DYNARE_VERBOSE
+        redirect_stdout(_old_stdout)
+        redirect_stderr(_old_stderr)
+        close(_log_io)
+    end
+end
+DYNARE_VERBOSE || println("Dynare solver output → $(basename(_dynare_log_path))  (DYNARE_VERBOSE=1 to show inline)")
 
 @info "Dynare solve complete — extracting results"
 
 mr         = context.results.model_results[1]
 endo_names = Dynare.get_endogenous(context.symboltable)
 n_endo     = length(endo_names)
-@info "  $n_endo endogenous variables"
+DYNARE_VERBOSE && @info "  $n_endo endogenous variables"
 
 # ---- Steady state ----
 # In Dynare.jl 0.10.x, the steady state is in mr.trends.endogenous_steady_state
@@ -65,7 +89,7 @@ n_endo     = length(endo_names)
 function get_ss(context, mr, n_endo)
     # Primary: trends field (populated after successful stoch_simul steady state solve)
     if length(mr.trends.endogenous_steady_state) == n_endo
-        @info "SS from mr.trends.endogenous_steady_state"
+        DYNARE_VERBOSE && @info "SS from mr.trends.endogenous_steady_state"
         return Float64.(mr.trends.endogenous_steady_state)
     end
     # Fallback: initval_endogenous — the initval block values set by params_jl.mod.
@@ -80,7 +104,7 @@ function get_ss(context, mr, n_endo)
 end
 
 ss_vec = get_ss(context, mr, n_endo)
-@info "SS length: $(length(ss_vec))  non-zero entries: $(sum(abs.(ss_vec) .> 1e-10))"
+DYNARE_VERBOSE && @info "SS length: $(length(ss_vec))  non-zero entries: $(sum(abs.(ss_vec) .> 1e-10))"
 
 # ---- Decision rule ----
 # In Dynare.jl the LRE object stores three matrices:
@@ -98,18 +122,19 @@ function get_decision_rule(mr, n_endo)
     end
     lre = mr.linearrationalexpectations
     lre_fields = fieldnames(typeof(lre))
-    @info "lre type: $(typeof(lre))"
-    @info "lre fields: $lre_fields"
-
-    # Log every numeric field with its size and nonzero count for diagnostics
-    for fn in lre_fields
-        try
-            v = getfield(lre, fn)
-            if isa(v, AbstractMatrix) && eltype(v) <: Real
-                nz = sum(abs.(Float64.(v)) .> 1e-12)
-                @info "  lre.$fn  size=$(size(v))  nonzero=$nz"
-            end
-        catch; end
+    # Field-by-field diagnostics only when DYNARE_VERBOSE=1 (noise otherwise)
+    if DYNARE_VERBOSE
+        @info "lre type: $(typeof(lre))"
+        @info "lre fields: $lre_fields"
+        for fn in lre_fields
+            try
+                v = getfield(lre, fn)
+                if isa(v, AbstractMatrix) && eltype(v) <: Real
+                    nz = sum(abs.(Float64.(v)) .> 1e-12)
+                    @info "  lre.$fn  size=$(size(v))  nonzero=$nz"
+                end
+            catch; end
+        end
     end
 
     best_ghx = nothing; best_ghu = nothing; best_nz = -1
@@ -134,10 +159,10 @@ function get_decision_rule(mr, n_endo)
                 m1 = Matrix{Float64}(v1)
                 m2 = Matrix{Float64}(v2)
                 nz = sum(abs.(m1) .> 1e-12) + sum(abs.(m2) .> 1e-12)
-                @info "Candidate ($cand1,$cand2): sizes $(size(m1))/$(size(m2))  nonzero=$nz"
+                DYNARE_VERBOSE && @info "Candidate ($cand1,$cand2): sizes $(size(m1))/$(size(m2))  nonzero=$nz"
                 if nz > best_nz
                     best_ghx = m1; best_ghu = m2; best_nz = nz
-                    @info "  → new best: ($cand1,$cand2)"
+                    DYNARE_VERBOSE && @info "  → new best: ($cand1,$cand2)"
                 end
             catch e
                 @warn "Candidate ($cand1,$cand2): conversion failed — $e"
@@ -151,7 +176,7 @@ function get_decision_rule(mr, n_endo)
         return zeros(n_endo, 1), zeros(n_endo, 1)
     end
 
-    @info "Selected decision rule: ghx size=$(size(best_ghx))  ghu size=$(size(best_ghu))  total_nonzero=$best_nz"
+    DYNARE_VERBOSE && @info "Selected decision rule: ghx size=$(size(best_ghx))  ghu size=$(size(best_ghu))  total_nonzero=$best_nz"
     return best_ghx, best_ghu
 end
 
@@ -167,7 +192,7 @@ if _nz_total == 0
     # Do NOT print DYNARE_SUCCESS and do NOT serialize the context: a broken
     # nk_iosoe_context.jls would send the SMM job into a doomed 26-min run
     # that only dies at pre-flight (cf. cluster job 7198, 2026-07-08).
-    @error "Decision rule matrices are ALL ZEROS — LRE solver failed for this parameterization. Aborting (no context saved)."
+    @error "Decision rule matrices are ALL ZEROS — LRE solver failed for this parameterization. Aborting (no context saved). Dynare's internal error (e.g. a MethodError) is in $(basename(_dynare_log_path))."
     println("DYNARE_FAILED")   # sentinel for the parent process
     # Remove any stale context so downstream SMM cannot pick up old results
     _stale = joinpath(MOD_DIR, "nk_iosoe_context.jls")
@@ -192,6 +217,31 @@ state_rows = isdefined(context.models[1], :i_bkwrd_b) ?
 CSV.write(joinpath(MOD_DIR, "dynare_endo_names.csv"),
     DataFrame(variable = endo_names))
 
+# Exogenous (shock) names in declaration order — the columns of ghu / Sigma_e.
+# Used by main_SOE_gap.jl to activate shocks BY NAME when computing model
+# moments (the old hardcoded index map silently broke when the shock list
+# changed; 2026-07-10).
+# Primary: symboltable accessor (same call the IRF section uses — verified to
+# work on Dynare.jl 0.10.4). context.models[1].exogenous does NOT expose
+# names on 0.10.4 and silently yielded an empty file on 2026-07-10, which made
+# main_SOE_gap activate 0 shocks and print an all-zero moment table.
+exo_names_decl = try
+    string.(Dynare.get_exogenous(context.symboltable))
+catch
+    try
+        [String(getfield(e, :name)) for e in context.models[1].exogenous]
+    catch
+        String[]
+    end
+end
+if isempty(exo_names_decl)
+    @warn "Could not extract exogenous names — dynare_exo_names.csv NOT written (main_SOE_gap will fall back to all-shocks-active)"
+    rm(joinpath(MOD_DIR, "dynare_exo_names.csv"); force=true)   # remove stale/empty file
+else
+    CSV.write(joinpath(MOD_DIR, "dynare_exo_names.csv"),
+        DataFrame(shock = exo_names_decl))
+end
+
 CSV.write(joinpath(MOD_DIR, "dynare_ss.csv"),
     DataFrame(variable = endo_names, ss_value = Float64.(ss_vec)))
 
@@ -208,7 +258,7 @@ CSV.write(joinpath(MOD_DIR, "dynare_state_rows.csv"),
     DataFrame(state_row = state_rows))
 
 # Simulated paths (skip — not needed; we compute IRFs analytically below)
-@info "Skipping stochastic simulation (not required for IRF/variance analysis)"
+DYNARE_VERBOSE && @info "Skipping stochastic simulation (not required for IRF/variance analysis)"
 
 # =========================================================================== #
 #  COMPUTE IRFs ANALYTICALLY FROM DECISION RULE (bypasses stoch_simul/gees) #
@@ -227,7 +277,7 @@ CSV.write(joinpath(MOD_DIR, "dynare_state_rows.csv"),
 #  This is exact (not approximate) for first-order perturbation.             #
 # =========================================================================== #
 
-@info "Computing IRFs analytically from decision rule (bypasses gees/ARM issue)"
+DYNARE_VERBOSE && @info "Computing IRFs analytically from decision rule (bypasses gees/ARM issue)"
 
 irf_rows = NamedTuple{(:variable, :shock, :period, :value), Tuple{String,String,Int,Float64}}[]
 
@@ -246,7 +296,7 @@ try
 
     # Exogenous variable names from the model
     exo_names = string.(Dynare.get_exogenous(context.symboltable))
-    @info "  Computing IRFs for $(n_shocks) shock(s): $(join(exo_names, ", "))"
+    DYNARE_VERBOSE && @info "  Computing IRFs for $(n_shocks) shock(s): $(join(exo_names, ", "))"
 
     for k in 1:n_shocks
         shock_name = k <= length(exo_names) ? exo_names[k] : "shock_$k"
@@ -290,13 +340,13 @@ if isdefined(mr.linearrationalexpectations, :endogenous_variance)
     ev = mr.linearrationalexpectations.endogenous_variance
     if !isnothing(ev) && !isempty(ev)
         ev_mat = Matrix{Float64}(ev)
-        @info "endogenous_variance size: $(size(ev_mat)) — saving for rank correlations"
+        DYNARE_VERBOSE && @info "endogenous_variance size: $(size(ev_mat)) — saving for rank correlations"
         CSV.write(joinpath(MOD_DIR, "dynare_endogenous_variance.csv"),
                   DataFrame(ev_mat, [Symbol("c$i") for i in 1:size(ev_mat,2)]))
     end
 end
 
-@info "Results written to $(MOD_DIR)"
+DYNARE_VERBOSE && @info "Results written to $(MOD_DIR)"
 println("DYNARE_SUCCESS")   # sentinel read by parent to confirm success
 
 # ---- Save context for SMM estimation ------------------------------------
@@ -305,7 +355,7 @@ using Serialization
 context_jls = joinpath(MOD_DIR, "nk_iosoe_context.jls")
 try
     serialize(context_jls, context)
-    @info "Context saved for SMM estimation: $context_jls"
+    DYNARE_VERBOSE && @info "Context saved for SMM estimation: $context_jls"
 catch e
     @warn "Could not serialize context: $e"
 end

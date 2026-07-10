@@ -129,20 +129,8 @@ end
 # directly identifies the export and import elasticities.
 # corr(Y_i,PH_i): negative under TFP shocks, positive under demand shocks — key identifier
 # for supply vs demand decomposition per sector (12 new moments, Option-A).
-# Canonical moment-name vector (60 entries). Defined BEFORE the data_moments
-# guard below, which references it. (The old 46-entry copy in
-# smm_model_moments.jl is now disabled — this is the single source of truth.)
-const MOMENT_NAMES = vcat(
-    ["std(Y_$(i))"  for i in 1:12], ["std(PH_$(i))" for i in 1:12],
-    ["std(L_$(i))"  for i in 1:12],
-    ["std(GDP)", "std(pi)", "corr(GDP,pi)", "std(TB/GDP)",
-     "std(Q)", "autocorr(Q)", "corr(GDP,Q)",
-     "rank corr: output (model vs data)", "rank corr: prices (model vs data)",
-     "rank corr: labor  (model vs data)"],
-    ["corr(Y_$(i),PH_$(i))" for i in 1:12],
-    # Employment comovement (positions 59–60, appended so the 1–58 layout
-    # and all hard-coded index comments remain valid):
-    ["corr(N,GDP)", "corr(N,GDP/N)"])
+# MOMENT_NAMES / N_MOMENTS / MOMENT_BLOCKS now live in utils.jl (shared with
+# main_SOE_gap.jl, 2026-07-10) — utils.jl must be included before this file.
 
 data_moments = [y_d; p_d; l_d; d_std_GDP; d_std_pi; d_corr_GDPpi;
                 d_std_TBGDP; d_std_Q; d_autocorr_Q; d_corr_GDPQ; 1.0; 1.0; 1.0; corr_YPH_d;
@@ -169,76 +157,11 @@ end
 #  2.  PARAMETER BOUNDS (tighter, economically motivated)                     #
 # =========================================================================== #
 
-const PARAM_LABELS = vcat(
-    # Option-A layout: 36 parameters total
-    # θ[1]    = ilabcosts      θ[2]    = epsY         θ[3]    = epsM
-    # θ[4]    = log(kappaV)    θ[5]    = rho_om       θ[6]    = rho_A
-    # θ[7:18] = isigma_tfp_1:12
-    # θ[19:30]= sigma_om_1:12  (sectoral demand shock std devs)
-    # θ[31]   = rho_pvstar     θ[32]   = sigma_pvstar
-    # θ[33]   = rho_xi         θ[34]   = sigma_xi     θ[35]   = etastar
-    # θ[36]   = kappaw (Rotemberg wage adj. cost; 0 = flexible wages,
-    #           115 ≈ 4q Calvo duration; identified by std(L_i), labor rank
-    #           corr, corr(N,GDP), corr(N,GDP/N); added 2026-07-08)
-    ["ilabcosts", "epsY", "epsM", "log(kappaV)", "rho_om", "rho_A"],
-    ["isigma_tfp_$(i)" for i in 1:12],
-    ["sigma_om_$(i)" for i in 1:12],
-    ["rho_pvstar", "sigma_pvstar", "rho_xi", "sigma_xi"],
-    ["etastar"],   # export demand elasticity η*; identifies std(TB/GDP)
-    ["kappaw"],    # wage stickiness (level, not log: 0 nests flexible wages)
-)
-const N_THETA = length(PARAM_LABELS)   # 36
-
-# Canonical θ names for CSV output (smm_checkpoint.csv / smm_estimates.csv).
-# Underscore style — main_SOE_gap.jl looks these up BY NAME (est["log_kappaV"],
-# est["kappaw"], ...). Must stay in sync with PARAM_LABELS / the θ layout above.
-const CSV_PARAM_NAMES = vcat(
-    ["ilabcosts","epsY","epsM","log_kappaV","rho_om","rho_A"],
-    ["isigma_tfp_$(i)" for i in 1:12],
-    ["sigma_om_$(i)" for i in 1:12],
-    ["rho_pvstar","sigma_pvstar","rho_xi","sigma_xi","etastar","kappaw"])
-
-const LB = [1e-3; 0.30; 0.05; log(1e3);  -0.95;  0.10;
-            fill(1e-4, 12);
-            fill(1e-5, 12);
-            0.50;  0.005; 0.00; 0.0;  0.50;
-            0.0]      # kappaw ≥ 0 (0 = flexible wages)
-const UB = [50.0; 1.50; 0.50; log(1e8);   0.95;  0.95;
-            fill(0.10, 12);
-            fill(0.20, 12);
-            0.99;  0.20;  0.95; 0.05; 6.00;
-            400.0]    # kappaw ≤ 400 (≈ 7q Calvo duration at epsw = 10)
-
-
-# =========================================================================== #
-#  3.  WEIGHTING MATRIX (proportional + high rank-corr weight)                #
-# =========================================================================== #
-
-function build_weighting_matrix(dm::Vector{<:Real})
-    w = ones(N_MOMENTS)
-    # Moment layout (60 total; 59–60 appended 2026-07-08):
-    #   1:12   = std(Y_i)       13:24  = std(PH_i)     25:36  = std(L_i)
-    #   37     = std(GDP)       38     = std(pi)        39     = corr(GDP,pi)
-    #   40     = std(TB/GDP)    41     = std(Q)         42     = autocorr(Q)
-    #   43     = corr(GDP,Q)    44     = rank Y         45     = rank PH
-    #   46     = rank L         47:58  = corr(Y_i,PH_i)
-    #   59     = corr(N,GDP)    60     = corr(N,GDP/N)
-    for k in vcat(1:36, [37, 38, 40, 41])
-        d = abs(dm[k]); w[k] = d > 1e-4 ? 1.0/d^2 : 1.0/0.01^2
-    end
-    w[39] *= 0.20     # corr(GDP,π): structurally hard for supply-shock model
-    # w[40]: std(TB/GDP) — now gets standard inverse-variance weight (no override)
-    w[42]  = 2.0      # autocorr(Q): identifies rho_pvstar
-    w[44]  = 2.0; w[45] = 2.0; w[46] = 2.0   # rank correlations: moderate
-    # corr(Y_i,PH_i): key identifier for supply vs demand decomposition
-    for k in 47:58
-        d = abs(dm[k]); w[k] = (d > 1e-4 ? 1.0/d^2 : 1.0/0.5^2) * 1.5
-    end
-    # 59 = corr(N,GDP), 60 = corr(N,GDP/N): employment comovement — identifies
-    # the demand vs supply shock mix and kappaw (moderate weight, like ranks)
-    w[59] = 2.0; w[60] = 2.0
-    return Diagonal(w) |> Matrix
-end
+# PARAM_LABELS / N_THETA / CSV_PARAM_NAMES / LB / UB, the weighting matrix
+# (build_weighting_matrix), and the report printers (print_param_table,
+# print_fit_table, MOMENT_BLOCKS) now live in utils.jl — shared with
+# main_SOE_gap.jl so the printed fit is the SAME objective the estimator
+# minimizes (moved 2026-07-10).
 
 
 # =========================================================================== #
@@ -251,8 +174,7 @@ end
 # invariant ONCE, up front, and fails with a message that says exactly what to
 # update. Call it at the very top of smm_run.
 
-const N_MOMENTS = 60   # single named constant for the moment-vector length
-                       # (58 original + corr(N,GDP) + corr(N,GDP/N), 2026-07-08)
+# N_MOMENTS (= 60) is defined in utils.jl.
 
 function validate_smm_setup(data_moments)
     errs = String[]
@@ -309,6 +231,7 @@ end
 # A `mv` is atomic on the same filesystem, so a job killed mid-write never
 # leaves a half-written checkpoint that would poison the next warm start.
 function atomic_write_csv(path::AbstractString, df)
+    mkpath(dirname(path))
     tmp = path * ".tmp_$(getpid())_$(Threads.threadid())"
     CSV.write(tmp, df)
     mv(tmp, path; force=true)
@@ -329,7 +252,20 @@ function save_checkpoint(θ::AbstractVector, obj::Real)
         value = collect(Float64, θ),
         obj_hat = vcat([Float64(obj)], fill(NaN, length(θ)-1)))
     try
-        atomic_write_csv(joinpath(DATA_DIR, "smm_checkpoint.csv"), df)
+        atomic_write_csv(joinpath(ESTIMATION_DIR, "smm_checkpoint.csv"), df)
+        # Plain-text twins (house convention, cf. third-year paper best_sol.txt):
+        # best_sol.txt  — current best θ, one "name  value" line per parameter
+        # min_loss.txt  — loss at the best θ + timestamp
+        _ts = Libc.strftime("%Y-%m-%d %H:%M:%S", time())
+        open(joinpath(ESTIMATION_DIR, "best_sol.txt"), "w") do io
+            @printf(io, "# NK-IOSOE SMM best solution  |  obj = %.8f  |  %s\n", Float64(obj), _ts)
+            for (nm, v) in zip(CSV_PARAM_NAMES, θ)
+                @printf(io, "%-16s  %.10g\n", nm, Float64(v))
+            end
+        end
+        open(joinpath(ESTIMATION_DIR, "min_loss.txt"), "w") do io
+            @printf(io, "%.8f\n# loss at best_sol.txt  |  %s\n", Float64(obj), _ts)
+        end
     catch err
         @printf "  [warn] checkpoint write failed: %s\n" sprint(showerror, err)
     end
@@ -409,7 +345,7 @@ end
 # =========================================================================== #
 
 function load_warm_start(n_theta::Int)
-    ckpt = joinpath(DATA_DIR, "smm_checkpoint.csv")
+    ckpt = joinpath(ESTIMATION_DIR, "smm_checkpoint.csv")
     if isfile(ckpt)
         try
             df = CSV.read(ckpt, DataFrame)
@@ -803,12 +739,17 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     ψ0 = data_moments .- m_test
     @printf "  Decomp: Y=%.3f PH=%.3f L=%.3f Agg=%.3f Rank=%.3f CorrYP=%.3f NLab=%.3f\n" dot(ψ0[1:12],W[1:12,1:12]*ψ0[1:12]) dot(ψ0[13:24],W[13:24,13:24]*ψ0[13:24]) dot(ψ0[25:36],W[25:36,25:36]*ψ0[25:36]) dot(ψ0[37:43],W[37:43,37:43]*ψ0[37:43]) dot(ψ0[44:46],W[44:46,44:46]*ψ0[44:46]) dot(ψ0[47:58],W[47:58,47:58]*ψ0[47:58]) dot(ψ0[59:60],W[59:60,59:60]*ψ0[59:60])
 
-    @printf "\n  %-34s  %9s  %9s\n" "Moment" "Data" "Model"
-    @printf "  %s\n" repeat("-",56)
-    for (i,nm) in enumerate(MOMENT_NAMES)
-        @printf "  %-34s  %9.5f  %9.5f\n" nm data_moments[i] m_test[i]
-    end
+    print_param_table(θ0)
+    print_fit_table(data_moments, m_test, W)
     @printf "=== PRE-FLIGHT PASSED ===\n\n"
+
+    # Report-only mode: print the fit of the current θ (warm start / checkpoint)
+    # and exit without optimizing. Usage: SMM_REPORT_ONLY=1 julia run_smm_estimation.jl
+    if get(ENV, "SMM_REPORT_ONLY", "0") in ("1", "true")
+        @printf "  SMM_REPORT_ONLY set — fit report printed above, skipping CMA-ES.\n"
+        @printf "  (smm_estimates.csv / checkpoint NOT modified.)\n\n"
+        return θ0, obj_test, m_test
+    end
 
     # CMA-ES
     max_evals = 300_000
@@ -827,14 +768,13 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     last_printed  = Threads.Atomic{Int}(0)   # last eval_count at which we printed
     t_start       = Ref(time())
     t_last_print  = Ref(time())
-    t_last_ckpt   = Ref(time())
     PRINT_EVERY   = 50    # print every N evaluations (any thread can trigger)
-    CKPT_EVERY_S  = 60.0  # throttle live checkpoint writes to ≥ this many seconds
 
     # Machine-readable progress log (2026-07-08): one row per PRINT_EVERY block.
     # Plottable objective trajectory + fit decomposition; survives node failure
     # alongside smm_checkpoint.csv. Header written fresh at every run start.
-    progress_log = joinpath(DATA_DIR, "smm_progress_log.csv")
+    mkpath(ESTIMATION_DIR)
+    progress_log = joinpath(ESTIMATION_DIR, "smm_progress_log.csv")
     open(progress_log, "w") do io
         println(io, "timestamp,elapsed_s,evals,best_obj,decomp_Y,decomp_PH,decomp_L,decomp_Agg,decomp_Rank,decomp_CorrYP,decomp_NLab,fails,ms_per_eval,klein_hit_pct")
     end
@@ -876,13 +816,14 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
                     best_obj[]      = obj
                     best_θ[]        = copy(θ)   # θ in original parameter space
                     best_moments[]  = copy(m)   # save moments — avoids re-evaluation bug
-                    # Live checkpoint (throttled): a node failure mid-run then
-                    # loses at most the work since the last save, and the next
-                    # run warm-starts from this θ automatically.
-                    if time() - t_last_ckpt[] > CKPT_EVERY_S
-                        save_checkpoint(best_θ[], best_obj[])
-                        t_last_ckpt[] = time()
-                    end
+                    # Live checkpoint on EVERY improvement (2026-07-10). The old
+                    # 60s throttle lost the final best of an interrupted run:
+                    # an improvement inside the throttle window was never saved
+                    # and Ctrl-C bypasses the end-of-run save (local run 2026-07-09:
+                    # best 9839 lost, checkpoint kept the earlier 13083 θ).
+                    # Improvements are rare and the atomic 1KB write costs <1ms,
+                    # so throttling buys nothing.
+                    save_checkpoint(best_θ[], best_obj[])
                 end
             end
         end
@@ -985,37 +926,35 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     # Results table
     @printf "\n%s\n  SMM RESULTS\n%s\n\n" repeat("=",60) repeat("=",60)
     @printf "  Objective: %.6f\n\n" obj_hat
-    @printf "  %-6s  %-18s  %10s  %10s\n" "Idx" "Parameter" "Initial" "Estimate"
-    @printf "  %s\n" repeat("-",50)
+    @printf "  %-6s  %-18s  %10s  %10s  %s\n" "Idx" "Parameter" "Initial" "Estimate" "Bound?"
+    @printf "  %s\n" repeat("-",60)
     for k in 1:N_THETA
+        span_k = UB[k] - LB[k]
+        flag = θ_hat[k] <= LB[k] + 0.02*span_k ? "<< at LB" :
+               θ_hat[k] >= UB[k] - 0.02*span_k ? ">> at UB" : ""
         if k==4
-            @printf "  %3d  %-18s  %10.4f  %10.4f  [log]\n" k PARAM_LABELS[k] θ0[k] θ_hat[k]
+            @printf "  %3d  %-18s  %10.4f  %10.4f  [log] %s\n" k PARAM_LABELS[k] θ0[k] θ_hat[k] flag
             @printf "  %3s  %-18s  %10.2e  %10.2e  [level]\n" "--" "kappaV" exp(θ0[k]) exp(θ_hat[k])
         else
-            @printf "  %3d  %-18s  %10.4f  %10.4f\n" k PARAM_LABELS[k] θ0[k] θ_hat[k]
+            @printf "  %3d  %-18s  %10.4f  %10.4f  %s\n" k PARAM_LABELS[k] θ0[k] θ_hat[k] flag
         end
     end
-    @printf "\n  %-36s  %9s  %9s  %9s  %6s\n" "Moment" "Data" "Model" "Diff" "Rel%"
-    @printf "  %s\n" repeat("-",75)
-    for (i,nm) in enumerate(MOMENT_NAMES)
-        re = abs(data_moments[i])>1e-6 ? abs(ψ_hat[i])/abs(data_moments[i])*100 : 0.0
-        @printf "  %-36s  %9.5f  %9.5f  %+9.5f  %5.1f%%\n" nm data_moments[i] m_hat[i] ψ_hat[i] re
-    end
-    @printf "\n  Decomp: Y=%.3f PH=%.3f L=%.3f Agg=%.3f Rank=%.3f CorrYP=%.3f NLab=%.3f\n\n" dot(ψ_hat[1:12],W[1:12,1:12]*ψ_hat[1:12]) dot(ψ_hat[13:24],W[13:24,13:24]*ψ_hat[13:24]) dot(ψ_hat[25:36],W[25:36,25:36]*ψ_hat[25:36]) dot(ψ_hat[37:43],W[37:43,37:43]*ψ_hat[37:43]) dot(ψ_hat[44:46],W[44:46,44:46]*ψ_hat[44:46]) dot(ψ_hat[47:58],W[47:58,47:58]*ψ_hat[47:58]) dot(ψ_hat[59:60],W[59:60,59:60]*ψ_hat[59:60])
+    print_fit_table(data_moments, m_hat, W)
 
-    # Save (atomic writes — a kill mid-write can't corrupt these files)
+    # Save (atomic writes — a kill mid-write can't corrupt these files).
+    # All estimation outputs go to ESTIMATION_DIR (julia_dynare/estimation_results).
     df_res = DataFrame(param=vcat(PARAM_LABELS,fill("",N_MOMENTS-N_THETA)),
                         theta=vcat(θ_hat,fill(NaN,N_MOMENTS-N_THETA)),
                         moment=MOMENT_NAMES, data=data_moments, model=m_hat, diff=ψ_hat)
-    atomic_write_csv(joinpath(DATA_DIR,"smm_results.csv"), df_res)
+    atomic_write_csv(joinpath(ESTIMATION_DIR,"smm_results.csv"), df_res)
 
     df_est = DataFrame(
         param=CSV_PARAM_NAMES,
         value=θ_hat, obj_hat=vcat([obj_hat],fill(NaN,N_THETA-1)))
-    atomic_write_csv(joinpath(DATA_DIR,"smm_estimates.csv"), df_est)
-    atomic_write_csv(joinpath(DATA_DIR,"smm_checkpoint.csv"), df_est)
+    atomic_write_csv(joinpath(ESTIMATION_DIR,"smm_estimates.csv"), df_est)
+    save_checkpoint(θ_hat, obj_hat)   # checkpoint CSV + best_sol.txt + min_loss.txt
 
-    @printf "  Results: %s\n  Estimates: %s\n\n" joinpath(DATA_DIR,"smm_results.csv") joinpath(DATA_DIR,"smm_estimates.csv")
+    @printf "  Results: %s\n  Estimates: %s\n\n" joinpath(ESTIMATION_DIR,"smm_results.csv") joinpath(ESTIMATION_DIR,"smm_estimates.csv")
 
     # Asymptotic inference: standard errors + overidentification J-test.
     # Wrapped so a failure here never discards the point estimates above.

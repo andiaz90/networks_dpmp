@@ -205,9 +205,10 @@ if !isempty(path_sec_mom)
     y_d = Float64.(sec_mom.std_Y)
     p_d = Float64.(sec_mom.std_PH)
     l_d = Float64.(sec_mom.std_L)
+    c_d = hasproperty(sec_mom, :corr_YPH) ? Float64.(sec_mom.corr_YPH) : fill(NaN, nsec)
 else
     @printf "  WARNING: sectoral_moments.csv not found — rank correlations will use zeros.\n"
-    y_d = zeros(nsec); p_d = zeros(nsec); l_d = zeros(nsec)
+    y_d = zeros(nsec); p_d = zeros(nsec); l_d = zeros(nsec); c_d = fill(NaN, nsec)
 end
 
 # ---- IO matrix ----
@@ -398,16 +399,28 @@ shock_epsA_val       = ones(nsec)
 #  LOAD SMM ESTIMATES (override defaults when available)                       #
 # =========================================================================== #
 
-# SMM estimates are written as CSV by smm_estimation.jl
-smm_est_file = joinpath(DATA_DIR, "smm_estimates.csv")
+# SMM estimates: smm_estimates.csv is written by a COMPLETED estimation;
+# smm_checkpoint.csv holds the live best of a running/interrupted one.
+# Use whichever is NEWER (2026-07-10) — no more manual cp needed.
+smm_est_file  = joinpath(ESTIMATION_DIR, "smm_estimates.csv")
+smm_ckpt_file = joinpath(ESTIMATION_DIR, "smm_checkpoint.csv")
 
 param_names = ["ilabcosts", "epsY", "epsM", "kappaV", "rho_om1",
                "rho_tfp1", "isigma_tfp(1)", "sigma_om(avg)", "rho_pvstar", "sigma_pvstar"]
 
 smm_param_source = "hard-coded defaults"
 
-if isfile(smm_est_file)
-    est_df = CSV.read(smm_est_file, DataFrame)
+_theta_candidates = [(f, mtime(f)) for f in (smm_est_file, smm_ckpt_file) if isfile(f)]
+sort!(_theta_candidates, by = x -> x[2], rev = true)   # newest first
+_theta_file = isempty(_theta_candidates) ? "" : _theta_candidates[1][1]
+
+if !isempty(_theta_file)
+    est_df = CSV.read(_theta_file, DataFrame)
+    if nrow(est_df) != length(CSV_PARAM_NAMES)
+        @printf "  WARNING: %s has %d params (current layout: %d) — stale estimation layout.\n" basename(_theta_file) nrow(est_df) length(CSV_PARAM_NAMES)
+    end
+    _obj_prev = try Float64(est_df.obj_hat[1]) catch; NaN end
+    @printf "  θ source: %s  (obj=%.4f, written %s)%s\n" basename(_theta_file) _obj_prev Libc.strftime("%Y-%m-%d %H:%M", mtime(_theta_file)) (endswith(_theta_file, "checkpoint.csv") ? "  [live best of an unfinished run]" : "")
     est    = Dict(String(r.param) => Float64(r.value) for r in eachrow(est_df))
 
     ilabcosts_val    = est["ilabcosts"]
@@ -426,14 +439,15 @@ if isfile(smm_est_file)
     haskey(est, "etastar")  && (etastar_val  = est["etastar"])
     haskey(est, "kappaw")   && (kappaw_val   = est["kappaw"])   # θ[36], added 2026-07-08
     shock_eps_om_vec = Float64.(sigma_om_vec .> 0)   # recompute flags from loaded values
-    smm_param_source = "smm_estimates.csv"
+    smm_param_source = basename(_theta_file)
 end
 
 @printf "--- Parameters (%s) ---\n" smm_param_source
 param_vals = [ilabcosts_val, modepsY[1], modepsM[1], kappaV_val,
               rho_om1_val, rho_tfp1_val, isigma_tfp_val[1], mean(sigma_om_vec),
-              rho_pvstar_val, sigma_pvstar_val]
-for (nm, vl) in zip(param_names, param_vals)
+              rho_pvstar_val, sigma_pvstar_val,
+              rho_xi_val, sigma_xi_val, etastar_val, kappaw_val]
+for (nm, vl) in zip(vcat(param_names, ["rho_xi", "sigma_xi", "etastar", "kappaw"]), param_vals)
     @printf "  %-18s %g\n" nm vl
 end
 @printf "\n"
@@ -646,13 +660,17 @@ VAmdl_vec = Yi_ss .- M_ss
 VAnet_tot = sum(VAnet_vec)
 VAmdl_tot = sum(VAmdl_vec)
 
+# Fixed-width sector name: %-Ns pads but does NOT truncate, so long names
+# ("Electricidad gas agua y gestion de desechos") destroyed column alignment.
+_secname(s, w=32) = length(s) <= w ? s : first(s, w - 1) * "…"
+
 @printf "--- Sectoral GDP / value-added shares ---\n"
 @printf "  GDP_ss = %.4f   ΣVA(Y-M-V) = %.4f   ΣVA(Y-M) = %.4f\n\n" GDP_ss VAnet_tot VAmdl_tot
 @printf "%-32s %11s %8s %8s %11s %8s %8s\n" "Sector" "VA(Y-M-V)" "%GDP" "%ΣVA" "VA(Y-M)" "%GDP" "%ΣVA"
 @printf "%s\n" repeat("-", 92)
 for i in 1:nsec
     @printf("%-32s %11.4f %7.2f%% %7.2f%% %11.4f %7.2f%% %7.2f%%\n",
-            names_vec[i],
+            _secname(names_vec[i]),
             VAnet_vec[i], 100*VAnet_vec[i]/GDP_ss, 100*VAnet_vec[i]/VAnet_tot,
             VAmdl_vec[i], 100*VAmdl_vec[i]/GDP_ss, 100*VAmdl_vec[i]/VAmdl_tot)
 end
@@ -749,7 +767,7 @@ VAE_vec_adj = VA_nom .+ VAE_fwd_adj .+ VAE_bwd_adj
 @printf "%s\n" repeat("-", 80)
 for i in 1:nsec
     @printf("%-32s %7.2f%% %7.2f%% %7.2f%% %7.2f%% %8.2fx\n",
-            names_vec[i],
+            _secname(names_vec[i]),
             100*VA_nom[i]/VA_nom_tot,
             100*VAE_fwd[i]/VA_nom_tot,
             100*VAE_bwd[i]/VA_nom_tot,
@@ -769,7 +787,7 @@ end
 @printf "%s\n" repeat("-", 80)
 for i in 1:nsec
     @printf("%-32s %7.2f%% %7.2f%% %7.2f%% %7.2f%% %8.2fx\n",
-            names_vec[i],
+            _secname(names_vec[i]),
             100*VA_nom[i]/VA_nom_tot,
             100*VAE_fwd_adj[i]/VA_nom_tot,
             100*VAE_bwd_adj[i]/VA_nom_tot,
@@ -1039,18 +1057,46 @@ m_omG        = ombar_val   # fixed by calibration
 m_autocorr_Q = NaN
 m_std_TBGDP  = NaN
 rho_y = 0.0; rho_p = 0.0; rho_l = 0.0
+corr_YPH_m   = fill(NaN, nsec)   # corr(Y_i,PH_i): supply vs demand identifier
+m_corr_NGDP  = NaN               # corr(N,GDP)
+m_corr_NAPL  = NaN               # corr(N,GDP/N)
 
 try
     n_exo   = size(ghu_jl, 2)
     n_state = length(state_rows)
 
-    # Shock covariance: activate all shocks = 1.0, matching smm_estimation.jl
+    # Shock covariance: activate BY NAME, matching active_shock_indices() in
+    # smm_model_moments.jl exactly (eps_i, eps_pvstar, eps_xi, epsA_1:12,
+    # eps_om_1:12 — epschi and eps_postar stay off). The previous hardcoded
+    # index map was from the old 18-shock layout: it missed eps_pvstar and all
+    # eps_om_i and wrongly activated epschi/eps_postar (fixed 2026-07-10).
+    # Shock std devs are in-equation parameters, so unit innovation variances
+    # are correct here.
+    exo_names_file = joinpath(MOD_DIR, "dynare_exo_names.csv")
     Σe_smm = zeros(n_exo, n_exo)
-    Σe_smm[1,1] = 1.0                                  # eps_om
-    Σe_smm[2,2] = 1.0                                  # eps_i
-    Σe_smm[4,4] = 1.0                                  # eps_pvstar
-    for i in 5:min(16, n_exo); Σe_smm[i,i] = 1.0; end  # epsA_1:12
-    n_exo >= 17 && (Σe_smm[17,17] = 1.0)               # eps_xi
+    n_active = 0
+    if isfile(exo_names_file)
+        exo_names_jl = String.(CSV.read(exo_names_file, DataFrame).shock)
+        active_set = Set(vcat(["eps_i", "eps_pvstar", "eps_xi"],
+                              ["epsA_$(i)"   for i in 1:nsec],
+                              ["eps_om_$(i)" for i in 1:nsec]))
+        for (k, nm) in enumerate(exo_names_jl)
+            k > n_exo && break
+            if nm in active_set
+                Σe_smm[k,k] = 1.0; n_active += 1
+            end
+        end
+        @printf "  Active shocks (by name): %d of %d exogenous\n" n_active n_exo
+    end
+    # GUARD (2026-07-10): an empty/missing/unmatched name file must NOT
+    # silently produce a zero-shock economy (all model moments = 0, useless
+    # fit table). Fall back to all-shocks-active with a loud warning —
+    # slightly overstates volatility vs the SMM's 27-shock set (adds epschi,
+    # eps_postar) but yields an informative table.
+    if n_active == 0
+        for k in 1:n_exo; Σe_smm[k,k] = 1.0; end
+        @printf "  WARNING: no shocks matched by name (%s) — ALL %d shocks active; rerun the Dynare subprocess for the exact SMM shock set\n" (isfile(exo_names_file) ? "empty/unmatched dynare_exo_names.csv" : "file missing") n_exo
+    end
 
     # State-space matrices
     Tsr = ghx_jl[state_rows, :]   # n_state × n_state
@@ -1067,7 +1113,7 @@ try
         ["Y_$(i)"  for i in 1:nsec],
         ["PH_$(i)" for i in 1:nsec],
         ["L_$(i)"  for i in 1:nsec],
-        ["GDP", "pi", "Q", "TB"]
+        ["GDP", "pi", "Q", "TB", "N"]   # N added for corr(N,GDP), corr(N,GDP/N)
     )
     needed_idx  = [get(endo_idx, nm, 0) for nm in needed_names]
     valid_mask  = needed_idx .> 0
@@ -1112,6 +1158,25 @@ try
         std_Y_m[i]  = _pstd_hp("Y_$(i)")
         std_PH_m[i] = _pstd_hp("PH_$(i)")
         std_L_m[i]  = _pstd_hp("L_$(i)")
+        corr_YPH_m[i] = _xcorr_hp("Y_$(i)", "PH_$(i)")
+    end
+
+    # Employment comovement (same formulas as smm_model_moments.jl):
+    # corr(N,GDP) directly; corr(N, GDP/N) via log-deviation (co)variances
+    # (Γ is in LEVEL deviations → divide by steady states).
+    m_corr_NGDP = _xcorr_hp("N", "GDP")
+    m_corr_NAPL = let iN = get(ei_sub, "N", 0), iG = get(ei_sub, "GDP", 0)
+        if iN == 0 || iG == 0
+            NaN
+        else
+            Nbar = max(abs(ss_vec[needed_idx[iN]]), 1e-12)
+            Gbar = max(abs(ss_vec[needed_idx[iG]]), 1e-12)
+            v_n  = max(Γ_val[iN,iN], 0.0)/Nbar^2
+            v_g  = max(Γ_val[iG,iG], 0.0)/Gbar^2
+            c_ng = Γ_val[iN,iG]/(Nbar*Gbar)
+            den  = sqrt(max(v_n, 0.0)*max(v_g + v_n - 2c_ng, 0.0))
+            den < 1e-15 ? 0.0 : clamp((c_ng - v_n)/den, -1.0, 1.0)
+        end
     end
 
     # Aggregate moments
@@ -1162,6 +1227,7 @@ sec_mom_path = joinpath(DATA_DIR, "sectoral_moments.csv")
 d_std_GDP = NaN; d_std_pi = NaN; d_corr_GDPpi = NaN; d_omG = 0.57
 d_std_Q = NaN; d_autocorr_Q = NaN; d_corr_GDPQ = NaN; d_TBGDP = NaN
 d_std_TBGDP = NaN   # std of HP-filtered TB/GDP — add "std_TBGDP" to aggregate_moments.csv
+d_corr_NGDP = NaN; d_corr_NAPL = NaN
 y_d_tab = y_d; p_d_tab = p_d; l_d_tab = l_d
 
 if isfile(agg_mom_path)
@@ -1176,39 +1242,43 @@ if isfile(agg_mom_path)
     d_corr_GDPQ  = get(agg_d, "corr_GDPQ",  NaN)
     d_TBGDP      = get(agg_d, "TBGDP",      NaN)
     d_std_TBGDP  = get(agg_d, "std_TBGDP",  NaN)
+    d_corr_NGDP  = get(agg_d, "corr_NGDP",  NaN)
+    d_corr_NAPL  = get(agg_d, "corr_NAPL",  NaN)
 end
 
-# Build 46-element data and model vectors
-# Position 40: std(TB/GDP) replaces omG (which was always 0 loss, calibrated externally)
+# Build the FULL 60-element data and model vectors — same layout, same
+# weighting matrix, same printer as the SMM estimator (all shared via
+# utils.jl since 2026-07-10), so the loss printed here IS the SMM objective.
 data_vec = [y_d_tab; p_d_tab; l_d_tab;
             d_std_GDP; d_std_pi; d_corr_GDPpi; d_std_TBGDP;
             d_std_Q; d_autocorr_Q; d_corr_GDPQ;
-            1.0; 1.0; 1.0]   # rank corr targets = 1
+            1.0; 1.0; 1.0;             # rank corr targets = 1
+            c_d;                        # corr(Y_i,PH_i), 12 sectors
+            d_corr_NGDP; d_corr_NAPL]  # labor comovement
 
 model_vec = [std_Y_m; std_PH_m; std_L_m;
              m_std_GDP; m_std_pi; m_corr_GDPpi; m_std_TBGDP;
              m_std_Q; m_autocorr_Q; m_corr_GDPQ;
-             rho_y; rho_p; rho_l]
+             rho_y; rho_p; rho_l;
+             corr_YPH_m;
+             m_corr_NGDP; m_corr_NAPL]
 
-# Weighting matrix (diagonal) — replicates smm_estimation.jl build_weighting_matrix exactly
-W_diag = ones(46)
-for k in vcat(1:36, [37, 38, 40, 41])   # 40 = std(TB/GDP), now gets inverse-variance weight
-    d = abs(data_vec[k]); W_diag[k] = d > 1e-4 ? 1.0/d^2 : 1.0/0.01^2
+@assert length(data_vec)  == N_MOMENTS "data_vec has $(length(data_vec)) ≠ N_MOMENTS=$N_MOMENTS"
+@assert length(model_vec) == N_MOMENTS "model_vec has $(length(model_vec)) ≠ N_MOMENTS=$N_MOMENTS"
+
+# NaN guard: replace NaN entries by 0 with a warning (a NaN data moment means
+# aggregate/sectoral CSVs are stale — rerun compute_data_moments.jl)
+for (v, nm) in ((data_vec, "data"), (model_vec, "model"))
+    bad = findall(isnan, v)
+    if !isempty(bad)
+        @printf "  WARNING: NaN in %s moments at %s — set to 0 for the fit table\n" nm join(MOMENT_NAMES[bad], ", ")
+        v[bad] .= 0.0
+    end
 end
-W_diag[39] *= 0.20     # corr(GDP,π): structurally hard for supply-shock model
-W_diag[42]  = 2.0      # autocorr(Q): identifies rho_pvstar
-W_diag[44]  = 5.0; W_diag[45] = 5.0; W_diag[46] = 5.0   # rank correlations: HIGH
 
-moment_labels = vcat(
-    ["std(Y_$i)"  for i in 1:nsec],
-    ["std(PH_$i)" for i in 1:nsec],
-    ["std(L_$i)"  for i in 1:nsec],
-    ["std(GDP)", "std(pi)", "corr(GDP, pi)", "std(TB/GDP)",
-     "std(Q)", "autocorr(Q)", "corr(GDP, Q)",
-     "rank corr: output (model vs data)",
-     "rank corr: prices (model vs data)",
-     "rank corr: labor  (model vs data)"]
-)
+W_smm  = build_weighting_matrix(data_vec)   # shared with smm_estimation.jl
+W_diag = [W_smm[i,i] for i in 1:N_MOMENTS]
+moment_labels = MOMENT_NAMES
 
 # =========================================================================== #
 #  LOAD SMM-REPORTED MOMENTS (authoritative, from smm_results.csv)            #
@@ -1217,14 +1287,18 @@ moment_labels = vcat(
 #  use the estimation's own moments so the loss matches exactly.              #
 # =========================================================================== #
 
-smm_res_file = joinpath(DATA_DIR, "smm_results.csv")
-smm_model_vec = nothing   # will hold 46-element model moments from estimation
+smm_res_file = joinpath(ESTIMATION_DIR, "smm_results.csv")
+smm_model_vec = nothing   # will hold the 60-element model moments from estimation
 
+# Only valid when θ came from smm_estimates.csv — smm_results.csv holds the
+# moments of THAT completed run. A newer checkpoint θ has different moments.
 if isfile(smm_res_file) && smm_param_source == "smm_estimates.csv"
     smm_res = CSV.read(smm_res_file, DataFrame)
-    if hasproperty(smm_res, :model) && nrow(smm_res) == 46
+    if hasproperty(smm_res, :model) && nrow(smm_res) == N_MOMENTS
         smm_model_vec = Float64.(smm_res.model)
         @printf "\n--- Loaded SMM-reported moments from smm_results.csv ---\n"
+    elseif hasproperty(smm_res, :model)
+        @printf "\n--- smm_results.csv has %d rows ≠ %d — stale layout, ignoring ---\n" nrow(smm_res) N_MOMENTS
     end
 end
 
@@ -1232,44 +1306,36 @@ end
 model_vec_final = something(smm_model_vec, model_vec)
 model_source    = smm_model_vec !== nothing ? "SMM (Klein)" : "Dynare (QZ)"
 
-@printf "\n--- Moment fit (%s) ---\n" model_source
-@printf "%-38s  %9s  %9s  %9s  %11s\n" "Moment" "Data" "Model" "Diff" "W*Diff^2"
-@printf "%s\n" repeat("-", 82)
+# ---- Parameter report (θ actually used in this run, with bounds) ---------- #
+θ_report = [ilabcosts_val; modepsY[1]; modepsM[1]; log(kappaV_val);
+            rho_om1_val; rho_tfp1_val;
+            Float64.(isigma_tfp_val);
+            Float64.(sigma_om_vec);
+            rho_pvstar_val; sigma_pvstar_val; rho_xi_val; sigma_xi_val;
+            etastar_val; kappaw_val]
+@printf "\n--- Parameters in effect (%s) ---\n" smm_param_source
+print_param_table(θ_report)
 
-total_loss = 0.0
-# Also write to tables/moment_fit_<tag>.txt
+# ---- Moment fit (same 60 moments, weights, and layout as the estimator) --- #
+@printf "\n--- Moment fit (%s) ---\n" model_source
+print_fit_table(data_vec, model_vec_final, W_smm)
+
+total_loss = dot(data_vec .- model_vec_final, W_smm*(data_vec .- model_vec_final))
+
+# Persist the same report to tables/moment_fit_<tag>.txt
 mom_table_path = joinpath(TABLES_DIR, "moment_fit_$(tag).txt")
 open(mom_table_path, "w") do f_mom
     write(f_mom, "NK-SOE Chile — Moment fit (Exercise: $(exercise_labels[EXERCISE+1]), source: $model_source)\n")
-    write(f_mom, repeat("=", 82) * "\n")
-    @printf(f_mom, "%-38s  %9s  %9s  %9s  %11s\n", "Moment", "Data", "Model", "Diff", "W*Diff^2")
-    write(f_mom, repeat("-", 82) * "\n")
-    for k in 1:46
-        d = data_vec[k]; m = model_vec_final[k]
-        diff = isfinite(d) && isfinite(m) ? d - m : NaN
-        wdiff2 = isfinite(diff) ? W_diag[k] * diff^2 : NaN
-        isfinite(wdiff2) && (total_loss += wdiff2)
-        line = @sprintf "%-38s  %9.5f  %9.5f  %+9.5f  %11.6f\n" moment_labels[k] d m (isfinite(diff) ? diff : 0.0) (isfinite(wdiff2) ? wdiff2 : 0.0)
-        print(line)
-        write(f_mom, line)
-    end
-    sep = repeat("-", 82) * "\n"
-    tot = @sprintf "%-38s  %9s  %9s  %9s  %11.6f\n" "TOTAL LOSS" "" "" "" total_loss
-    print(sep); print(tot)
-    write(f_mom, sep); write(f_mom, tot)
+    write(f_mom, "Same 60 moments and weighting matrix as the SMM objective.\n")
+    print_param_table(θ_report; io=f_mom)
+    print_fit_table(data_vec, model_vec_final, W_smm; io=f_mom)
 end
 @printf "  → saved to: %s\n" mom_table_path
 
 # If using SMM moments, also show Dynare-based moments for diagnostic comparison
 if smm_model_vec !== nothing
+    dynare_loss = dot(data_vec .- model_vec, W_smm*(data_vec .- model_vec))
     @printf "\n--- Dynare (QZ) diagnostic comparison ---\n"
-    dynare_loss = 0.0
-    for k in 1:46
-        d = data_vec[k]; m = model_vec[k]
-        diff = isfinite(d) && isfinite(m) ? d - m : NaN
-        wdiff2 = isfinite(diff) ? W_diag[k] * diff^2 : NaN
-        isfinite(wdiff2) && (dynare_loss += wdiff2)
-    end
     @printf "  Dynare QZ loss:  %11.6f\n" dynare_loss
     @printf "  SMM Klein loss:  %11.6f\n" total_loss
     @printf "  Difference:      %11.6f  (numerical: Klein vs QZ decomposition)\n" abs(dynare_loss - total_loss)

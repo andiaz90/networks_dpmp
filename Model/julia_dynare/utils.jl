@@ -369,3 +369,142 @@ function hp_filtered_cov_fast(A::AbstractMatrix{Float64},
     Γ1_hp = (Γ1_hp .+ Γ1_hp') ./ 2
     return Γ_hp, Γ1_hp
 end
+
+
+# =========================================================================== #
+#  SHARED SMM DEFINITIONS (moved from smm_estimation.jl, 2026-07-10)          #
+# =========================================================================== #
+# Single source of truth for the θ layout, moment layout, weighting matrix,
+# and the human-readable fit/parameter reports. Included by BOTH
+# run_smm_estimation.jl (via utils.jl) and main_SOE_gap.jl, so the fit table
+# printed after a model solve is the SAME objective the estimator minimizes.
+# Do NOT redefine any of these elsewhere.
+#
+# Include guard: utils.jl is included by several files (run_smm_estimation.jl,
+# smm_model_moments.jl, main_SOE_gap.jl, shock-analysis scripts), so this
+# section can be reached more than once per session — skip const redefinition.
+if !@isdefined(_SMM_SHARED_DEFS_LOADED)
+const _SMM_SHARED_DEFS_LOADED = true
+
+# ---- Estimation output folder (2026-07-10) --------------------------------- #
+# ALL estimation outputs (checkpoint, estimates, results, progress log,
+# best_sol.txt, min_loss.txt, inference) live here — NOT in Data/, which holds
+# inputs only. @__DIR__ = julia_dynare/, so the path is identical locally and
+# inside the cluster bundle; copy this folder back from the cluster and
+# main_SOE_gap.jl picks up the newest θ automatically.
+const ESTIMATION_DIR = joinpath(@__DIR__, "estimation_results")
+
+# ---- θ layout (36 parameters) --------------------------------------------- #
+#   θ[1] ilabcosts  θ[2] epsY  θ[3] epsM  θ[4] log(kappaV)  θ[5] rho_om
+#   θ[6] rho_A      θ[7:18] isigma_tfp_1:12   θ[19:30] sigma_om_1:12
+#   θ[31] rho_pvstar θ[32] sigma_pvstar θ[33] rho_xi θ[34] sigma_xi
+#   θ[35] etastar   θ[36] kappaw (0 = flexible wages; added 2026-07-08)
+const PARAM_LABELS = vcat(
+    ["ilabcosts", "epsY", "epsM", "log(kappaV)", "rho_om", "rho_A"],
+    ["isigma_tfp_$(i)" for i in 1:12],
+    ["sigma_om_$(i)" for i in 1:12],
+    ["rho_pvstar", "sigma_pvstar", "rho_xi", "sigma_xi"],
+    ["etastar"],
+    ["kappaw"],
+)
+const N_THETA = length(PARAM_LABELS)   # 36
+
+# CSV names (underscore style) — smm_checkpoint.csv / smm_estimates.csv are
+# read BY NAME in main_SOE_gap.jl (est["log_kappaV"], est["kappaw"], ...).
+const CSV_PARAM_NAMES = vcat(
+    ["ilabcosts","epsY","epsM","log_kappaV","rho_om","rho_A"],
+    ["isigma_tfp_$(i)" for i in 1:12],
+    ["sigma_om_$(i)" for i in 1:12],
+    ["rho_pvstar","sigma_pvstar","rho_xi","sigma_xi","etastar","kappaw"])
+
+const LB = [1e-3; 0.30; 0.05; log(1e3);  -0.95;  0.10;
+            fill(1e-4, 12);
+            fill(1e-5, 12);
+            0.50;  0.005; 0.00; 0.0;  0.50;
+            0.0]      # kappaw ≥ 0 (0 = flexible wages)
+const UB = [50.0; 1.50; 0.50; log(1e8);   0.95;  0.95;
+            fill(0.10, 12);
+            fill(0.20, 12);
+            0.99;  0.20;  0.95; 0.05; 6.00;
+            400.0]    # kappaw ≤ 400 (≈ 7q Calvo duration at epsw = 10)
+
+# ---- Moment layout (60 moments) ------------------------------------------- #
+const N_MOMENTS = 60
+const MOMENT_NAMES = vcat(
+    ["std(Y_$(i))"  for i in 1:12], ["std(PH_$(i))" for i in 1:12],
+    ["std(L_$(i))"  for i in 1:12],
+    ["std(GDP)", "std(pi)", "corr(GDP,pi)", "std(TB/GDP)",
+     "std(Q)", "autocorr(Q)", "corr(GDP,Q)",
+     "rank corr: output (model vs data)", "rank corr: prices (model vs data)",
+     "rank corr: labor  (model vs data)"],
+    ["corr(Y_$(i),PH_$(i))" for i in 1:12],
+    ["corr(N,GDP)", "corr(N,GDP/N)"])
+
+const MOMENT_BLOCKS = [
+    (1:12,  "std(Y_i) sectoral output vol"),
+    (13:24, "std(PH_i) sectoral price vol"),
+    (25:36, "std(L_i) sectoral labor vol"),
+    (37:43, "aggregates (GDP, pi, TB, Q)"),
+    (44:46, "rank correlations"),
+    (47:58, "corr(Y_i,PH_i) supply/demand mix"),
+    (59:60, "labor comovement corr(N,·)"),
+]
+
+# ---- Weighting matrix ------------------------------------------------------ #
+function build_weighting_matrix(dm::Vector{<:Real})
+    w = ones(N_MOMENTS)
+    # 1:36 sectoral stds + 37,38,40,41 aggregate stds: inverse-squared data
+    # value (percent-error metric, scale-free across moments of different size)
+    for k in vcat(1:36, [37, 38, 40, 41])
+        d = abs(dm[k]); w[k] = d > 1e-4 ? 1.0/d^2 : 1.0/0.01^2
+    end
+    w[39] *= 0.20     # corr(GDP,π): structurally hard for supply-shock model
+    w[42]  = 2.0      # autocorr(Q): identifies rho_pvstar
+    w[44]  = 2.0; w[45] = 2.0; w[46] = 2.0   # rank correlations: moderate
+    # corr(Y_i,PH_i): FIXED weight (2026-07-09). Old proportional 1.5/d²
+    # exploded for near-zero data correlations (sector 10: w≈30,800) and made
+    # this block 99.5% of the objective. Correlations are bounded [-1,1] →
+    # fixed weight, 1.5× the rank weight to keep identification emphasis.
+    for k in 47:58
+        w[k] = 3.0
+    end
+    w[59] = 2.0; w[60] = 2.0   # corr(N,GDP), corr(N,GDP/N)
+    return Diagonal(w) |> Matrix
+end
+
+# ---- Report printers ------------------------------------------------------- #
+function print_param_table(θ::AbstractVector; io=stdout)
+    @printf(io, "\n  %-3s %-16s %12s %10s %10s  %s\n",
+            "#", "Parameter", "Value", "LB", "UB", "Bound?")
+    println(io, "  ", repeat("-", 66))
+    for k in 1:N_THETA
+        span_k = UB[k] - LB[k]
+        flag = θ[k] <= LB[k] + 0.02*span_k ? "<< at LB" :
+               θ[k] >= UB[k] - 0.02*span_k ? ">> at UB" : ""
+        @printf(io, "  %-3d %-16s %12.4f %10.3f %10.3f  %s\n",
+                k, PARAM_LABELS[k], θ[k], LB[k], UB[k], flag)
+    end
+    println(io, "  ", repeat("-", 66))
+    println(io, "  'at LB/UB' = within 2% of a bound: not identified there, or bound binds.")
+end
+
+function print_fit_table(dm::AbstractVector, mm::AbstractVector, W::AbstractMatrix; io=stdout)
+    ψ  = dm .- mm
+    wd = [W[i,i]*ψ[i]^2 for i in 1:N_MOMENTS]
+    tot = sum(wd)
+    @printf(io, "\n  %-34s %9s %9s %9s %10s %6s\n",
+            "Moment", "Data", "Model", "Diff", "W*Diff2", "%obj")
+    println(io, "  ", repeat("-", 84))
+    for (rng, lbl) in MOMENT_BLOCKS
+        bsum = sum(wd[rng])
+        @printf(io, "  -- %-48s block %8.3f  %5.1f%% --\n", lbl, bsum, 100bsum/tot)
+        for i in rng
+            @printf(io, "  %-34s %9.5f %9.5f %+9.5f %10.4f %5.1f%%\n",
+                    MOMENT_NAMES[i], dm[i], mm[i], ψ[i], wd[i], 100wd[i]/tot)
+        end
+    end
+    println(io, "  ", repeat("-", 84))
+    @printf(io, "  %-34s %29s %10.4f %6s\n", "TOTAL OBJECTIVE", "", tot, "100%")
+end
+
+end  # include guard (_SMM_SHARED_DEFS_LOADED)

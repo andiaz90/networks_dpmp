@@ -47,6 +47,14 @@ DATA_FILES=(sector_calibration.csv IO_2021_chile.csv fpa_vector_few_industries_c
 for f in "${DATA_FILES[@]}"; do cp "$DATA/$f" "$STAGE/Data/"; done
 cp "$DATA/computed/export_shares_chile.csv" "$STAGE/Data/computed/"
 
+# Warm start: ship the local best checkpoint (if any) so the cluster run
+# resumes from it. Estimation outputs live in julia_dynare/estimation_results.
+mkdir -p "$STAGE/Model/julia_dynare/estimation_results"
+if [ -f "$JD/estimation_results/smm_checkpoint.csv" ]; then
+    cp "$JD/estimation_results/smm_checkpoint.csv" "$STAGE/Model/julia_dynare/estimation_results/"
+    echo "  smm_checkpoint.csv (warm start) -> estimation_results/"
+fi
+
 # --- runtime/config files (must sit beside this script in cluster/) ---
 cp "$SCRIPT_DIR/Project.toml"          "$STAGE/Project.toml"
 cp "$SCRIPT_DIR/setup_cluster.jl"      "$STAGE/cluster/"

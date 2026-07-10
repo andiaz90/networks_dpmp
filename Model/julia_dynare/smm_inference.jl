@@ -25,7 +25,7 @@ INPUTS
   moment type — INDICATIVE only; reported with a clear warning.
 
 OUTPUT
-  Data/smm_inference.csv  (param, estimate, se, t_stat) and a printed J-test.
+  estimation_results/smm_inference.csv  (param, estimate, se, t_stat) and a printed J-test.
 """
 
 using LinearAlgebra, Printf, CSV, DataFrames
@@ -104,7 +104,7 @@ end
     compute_smm_inference(θ_hat, m_hat, context, baseline, endo_names; T=SAMPLE_T)
 
 Finite-differences the moment Jacobian at θ̂, forms the GMM sandwich covariance,
-and computes SEs and the overidentifying J-test. Saves Data/smm_inference.csv.
+and computes SEs and the overidentifying J-test. Saves estimation_results/smm_inference.csv.
 """
 function compute_smm_inference(θ_hat, m_hat, context, baseline, endo_names; T::Int=SAMPLE_T)
     @printf "\n%s\n  SMM INFERENCE (standard errors + J-test)\n%s\n" repeat("=",60) repeat("=",60)
@@ -157,8 +157,8 @@ function compute_smm_inference(θ_hat, m_hat, context, baseline, endo_names; T::
     df = DataFrame(param=PARAM_LABELS, estimate=collect(Float64, θ_hat),
                    std_err=se, t_stat=tstat)
     try
-        atomic_write_csv(joinpath(DATA_DIR, "smm_inference.csv"), df)
-        @printf "\n  Saved: %s\n\n" joinpath(DATA_DIR, "smm_inference.csv")
+        atomic_write_csv(joinpath(ESTIMATION_DIR, "smm_inference.csv"), df)
+        @printf "\n  Saved: %s\n\n" joinpath(ESTIMATION_DIR, "smm_inference.csv")
     catch err
         @printf "  [warn] could not save smm_inference.csv: %s\n" sprint(showerror, err)
     end

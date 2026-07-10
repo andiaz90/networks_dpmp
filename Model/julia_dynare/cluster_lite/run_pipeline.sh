@@ -9,7 +9,7 @@
 # USAGE:
 #   ./run_pipeline.sh all          # moments -> compile -> estimate -> shocks
 #   ./run_pipeline.sh estimate     # moments -> compile -> estimate
-#   ./run_pipeline.sh shocks       # shocks only (needs Data/smm_estimates.csv)
+#   ./run_pipeline.sh shocks       # shocks only (needs Model/julia_dynare/estimation_results/smm_estimates.csv)
 #   ./run_pipeline.sh moments|compile     # individual stages
 #
 # ENV OVERRIDES:
@@ -20,7 +20,7 @@
 #   1. moments   compute_data_moments.jl   -> Data/{sectoral,aggregate}_moments.csv
 #   2. compile   main_SOE_gap.jl           -> mod/nk_iosoe_context.jls + Jacobians
 #                                             (the heavy artifacts, built HERE not shipped)
-#   3. estimate  run_smm_estimation.jl     -> Data/smm_estimates.csv  (the estimated theta)
+#   3. estimate  run_smm_estimation.jl     -> Model/julia_dynare/estimation_results/  (theta, fit, best_sol.txt)
 #   4. shocks    run_all_shocks.jl         -> figures/tables, AUTO-loading smm_estimates.csv
 #                                             so every IRF uses the ESTIMATED parametrization
 # ==========================================================================
@@ -67,9 +67,9 @@ stage_estimate() {
        "$JD/run_smm_estimation.jl"
 }
 stage_shocks() {
-  # run_all_shocks.jl auto-loads Data/smm_estimates.csv inside each shock script.
-  if [ ! -f "$ROOT/Data/smm_estimates.csv" ]; then
-    echo "WARNING: Data/smm_estimates.csv not found — shocks will fall back to"
+  # run_all_shocks.jl auto-loads Model/julia_dynare/estimation_results/smm_estimates.csv inside each shock script.
+  if [ ! -f "$ROOT/Model/julia_dynare/estimation_results/smm_estimates.csv" ]; then
+    echo "WARNING: Model/julia_dynare/estimation_results/smm_estimates.csv not found — shocks will fall back to"
     echo "         calibrated defaults. Run the 'estimate' stage first for the"
     echo "         estimated parametrization."
   fi
@@ -89,7 +89,7 @@ esac
 echo
 echo "======================================================"
 echo "  Stage '$STAGE' finished OK."
-echo "  Estimated parameters : Data/smm_estimates.csv"
-echo "  Moment fit           : Data/smm_results.csv"
+echo "  Estimated parameters : Model/julia_dynare/estimation_results/smm_estimates.csv"
+echo "  Moment fit           : Model/julia_dynare/estimation_results/smm_results.csv"
 echo "  Shock figures/tables : $OVERLEAF_ROOT  (+ Model/julia_dynare/figures, .../tables)"
 echo "======================================================"

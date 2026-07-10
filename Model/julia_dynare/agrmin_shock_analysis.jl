@@ -244,7 +244,7 @@ shock_eps_postar_val = 0.0   # oil OFF
 shock_epsA_val       = zeros(nsec); shock_epsA_val[shock_sectors] .= 1.0   # << TFP ON (Agriculture + Mining)
 
 # Load SMM estimates if available (override structural params)
-smm_est_file = joinpath(DATA_DIR, "smm_estimates.csv")
+smm_est_file = joinpath(ESTIMATION_DIR, "smm_estimates.csv")   # estimation outputs live in julia_dynare/estimation_results (2026-07-10)
 if isfile(smm_est_file)
     est_df = CSV.read(smm_est_file, DataFrame)
     est    = Dict(String(r.param) => Float64(r.value) for r in eachrow(est_df))

@@ -79,8 +79,10 @@ stdbuf -oL -eL bash "$ROOT/run_pipeline.sh" all
 JULIA_EXIT=$?
 set -e
 
-for f in smm_results smm_estimates smm_checkpoint; do
-  [ -f "$ROOT/Data/${f}.csv" ] && cp "$ROOT/Data/${f}.csv" "$ROOT/Data/${f}_${SLURM_JOB_ID}.csv"
+ESTDIR="$ROOT/Model/julia_dynare/estimation_results"
+for f in smm_results.csv smm_estimates.csv smm_checkpoint.csv best_sol.txt min_loss.txt; do
+  base="${f%.*}"; ext="${f##*.}"
+  [ -f "$ESTDIR/$f" ] && cp "$ESTDIR/$f" "$ESTDIR/${base}_${SLURM_JOB_ID}.${ext}"
 done
 echo ""
 echo "Exit code: $JULIA_EXIT   Finished: $(date)   Elapsed: ${SECONDS}s"

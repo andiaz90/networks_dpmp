@@ -75,7 +75,7 @@ if [ "${1:-}" = "--submit" ]; then
     JOB=$(sbatch --parsable "$ROOT/cluster/run_estimation.sh")
     echo "  Submitted estimation: job $JOB"
     echo "  Monitor:  tail -f nkiosoe_smm_${JOB}.out"
-    echo "            tail -f Data/smm_progress_log.csv"
+    echo "            tail -f Model/julia_dynare/estimation_results/smm_progress_log.csv"
 else
     echo "  Submit with:  sbatch cluster/run_estimation.sh"
     echo "  (or rerun this script with --submit)"

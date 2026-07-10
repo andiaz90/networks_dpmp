@@ -10,8 +10,8 @@
 #SBATCH --error=nkiosoe_shocks_%j.err
 # ==========================================================================
 # Shock plots only. Recompiles the model per shock and AUTO-loads
-# Data/smm_estimates.csv, so every IRF uses the ESTIMATED parametrization.
-# Run AFTER run_estimation.sh (needs Data/smm_estimates.csv).
+# Model/julia_dynare/estimation_results/smm_estimates.csv, so every IRF uses the
+# ESTIMATED parametrization. Run AFTER run_estimation.sh.
 #
 # SUBMIT:  sbatch cluster/run_shocks.sh
 # Subset:  edit the run_pipeline.sh call below, or run on a login node:

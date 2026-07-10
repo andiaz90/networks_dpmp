@@ -10,7 +10,11 @@
 #SBATCH --error=nkiosoe_smm_%j.err
 # ==========================================================================
 # SMM estimation: data moments -> compile model -> CMA-ES estimation.
-# Produces Data/smm_estimates.csv (the estimated theta). Run run_shocks.sh
+# Produces Model/julia_dynare/estimation_results/ (estimates, checkpoint,
+# best_sol.txt, min_loss.txt, progress log). Copy that folder back to your
+# machine (same relative path) and main_SOE_gap.jl uses it automatically:
+#   scp -r <cluster>:.../nk_iosoe_cluster/Model/julia_dynare/estimation_results Model/julia_dynare/
+# Run run_shocks.sh
 # afterwards to generate the IRF plots with these estimates.
 #
 # FIRST TIME ONLY (login node):  julia --project=. cluster/setup_cluster.jl
@@ -21,12 +25,14 @@
 #   tail -f nkiosoe_smm_<jobid>.out        # live: eval count, best obj, fit decomposition
 #                                          #   [Y= PH= L= Agg= Rk= CY= NL=], fail count,
 #                                          #   ms/eval, Klein cache hit rate
-#   tail -f Data/smm_progress_log.csv      # machine-readable trajectory, 1 row / 50 evals
-#   wc -l Data/smm_progress_log.csv        # ≈ evaluations/50 completed so far
+#   tail -f Model/julia_dynare/estimation_results/smm_progress_log.csv   # trajectory, 1 row / 50 evals
+#   cat Model/julia_dynare/estimation_results/min_loss.txt               # current best loss
+#   cat Model/julia_dynare/estimation_results/best_sol.txt               # current best theta
 #   squeue -u $USER ; sacct -j <jobid> --format=JobID,MaxRSS,Elapsed,State
 #
-# The estimation writes Data/smm_checkpoint.csv LIVE (every improvement, ≥60s
-# apart), so a killed job loses almost nothing — resubmit and it warm-starts.
+# The estimation writes Model/julia_dynare/estimation_results/smm_checkpoint.csv (+
+# best_sol.txt/min_loss.txt) LIVE on EVERY improvement, so a killed job loses
+# almost nothing — resubmit and it warm-starts.
 # NOTE 2026-07-08: θ is now 36 params (kappaw added) — an old 35-length
 # checkpoint is auto-rejected and the run cold-starts from default θ₀.
 # ==========================================================================
@@ -116,9 +122,16 @@ JULIA_EXIT=$?
 set -e
 
 # --- post-run: job-stamped copies + accounting ----------------------------- #
-for f in smm_results smm_estimates smm_checkpoint; do
-    [ -f "$ROOT/Data/${f}.csv" ] && cp "$ROOT/Data/${f}.csv" "$ROOT/Data/${f}_${SLURM_JOB_ID}.csv"
+ESTDIR="$ROOT/Model/julia_dynare/estimation_results"
+for f in smm_results.csv smm_estimates.csv smm_checkpoint.csv best_sol.txt min_loss.txt; do
+    base="${f%.*}"; ext="${f##*.}"
+    [ -f "$ESTDIR/$f" ] && cp "$ESTDIR/$f" "$ESTDIR/${base}_${SLURM_JOB_ID}.${ext}"
 done
+if [ -f "$ESTDIR/min_loss.txt" ]; then
+    echo ""
+    echo "  Best loss: $(head -1 "$ESTDIR/min_loss.txt")   (see $ESTDIR/best_sol.txt)"
+    echo "  Copy results back:  scp -r <cluster>:$ESTDIR  Model/julia_dynare/"
+fi
 echo ""
 echo "================================================================"
 echo "  Exit code: $JULIA_EXIT   Finished: $(date)   Elapsed: ${SECONDS}s"

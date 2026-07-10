@@ -6,10 +6,16 @@ Entry point for SMM estimation of the NK-IOSOE Chile model.
 HOW TO RUN:
   julia --threads=auto --project=. run_smm_estimation.jl
 
-OUTPUT:
-  Data/smm_estimates.csv    — estimated θ (auto-loaded by main_SOE_gap.jl)
-  Data/smm_results.csv      — full moment-fit table
-  Data/smm_checkpoint.csv   — warm-start checkpoint for subsequent runs
+OUTPUT (all in Model/julia_dynare/estimation_results/ — identical layout on
+the cluster; copy that folder back to your machine and main_SOE_gap.jl picks
+up the newest θ automatically):
+  smm_estimates.csv    — estimated θ (auto-loaded by main_SOE_gap.jl)
+  smm_results.csv      — full 60-moment fit table
+  smm_checkpoint.csv   — warm-start checkpoint (updated live, every improvement)
+  best_sol.txt         — current best θ, human-readable (name  value)
+  min_loss.txt         — objective at the current best θ
+  smm_progress_log.csv — objective trajectory, one row per 50 evaluations
+  smm_inference.csv    — standard errors (after a completed run)
 """
 
 using CSV, DataFrames, Printf, Serialization, Dynare

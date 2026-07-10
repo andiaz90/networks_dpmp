@@ -38,10 +38,14 @@ function get_irf(df::DataFrame, varname::AbstractString, shock::AbstractString; 
     return out
 end
 
+# Silent on success (a 32-figure loop printed 32 full paths and drowned the
+# output, 2026-07-10); failures still print. _N_FIGS_SAVED lets the caller
+# print one summary line ("32 figures → dir") instead.
+const _N_FIGS_SAVED = Ref(0)
 function _savefig_safe(p, path::String)
     try
         @eval Main savefig($p, $path)
-        @printf "  Saved: %s\n" path
+        _N_FIGS_SAVED[] += 1
     catch e
         @printf "  WARNING: could not save %s — %s\n" path string(e)
     end
@@ -240,7 +244,8 @@ function generate_figures(;
         _savefig_safe(p_gap, joinpath(FIGURES_DIR, "irf_output_gap_$(tag).png"))
     end
 
-    @printf "\n--- Figures complete ---\n"
-    @printf "  PDFs  → %s\n" FIGURES_DIR
-    @printf "  Tables→ %s\n" TABLES_DIR
+    @printf "\n--- Figures complete: %d saved ---\n" _N_FIGS_SAVED[]
+    @printf "  Figures → %s\n" FIGURES_DIR
+    @printf "  Tables  → %s\n" TABLES_DIR
+    _N_FIGS_SAVED[] = 0   # reset for a possible second call in the same session
 end
