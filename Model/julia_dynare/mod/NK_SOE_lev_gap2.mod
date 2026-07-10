@@ -6,7 +6,7 @@
 @#include "definition_block_lab.mod" 
 
 // Define variables
-var chi xi Lab_costs Price_costs w VA C Ctot Ctotg Ctots M C_g C_s p_g p_s N pi pi_g pi_s r om_g om_s vi Y
+var chi xi Lab_costs Price_costs w VA C Ctot Ctotg Ctots M C_g C_s p_g p_s N pi pi_g pi_s pi_w r om_g om_s vi Y
 PV r_star Rworld pi_e Bstar Pipstar Q TB PX X Ystar V PVstar GDP IMP mkupV CFs CFg
 POstar PO VOil VNon
 // Sectoral demand (taste) shocks om_1..om_nsec and basket normalizers norm_g, norm_s.
@@ -117,6 +117,9 @@ parameters gamma psi beta phi epsilon rho rho_om1 rho_tfp1 rho_tfp2 ombar
 rhoi rhoirule ilabcosts sigma_i sigma_L_agg Rworld_ss
 bbar chii_b omegaX epsilonX ystar_ss etastar kappaV epsilonV sigmaH Pistar_ss PVstar_ss
 rho_pvstar sigma_pvstar rho_xi sigma_xi
+// Sticky wages (Rotemberg wage PC): epsw = labor variety elasticity,
+// kappaw = wage adjustment cost (kappaw = 0 nests flexible wages w = MRS)
+epsw kappaw
 // Oil sector parameters
 epsilonV_oil rho_postar sigma_postar POstar_ss shock_eps_postar
 Ctot_ss Ctotg_ss Ctots_ss VA_ss M_tot_ss Y_ss IMP_ss
@@ -313,10 +316,20 @@ Lab_costs_f = (
     @#endfor
     );
     
-//% Labor leisure condition
-C^(-gamma)*w = chi*N^psi;
+//% Sticky wages: Rotemberg wage Phillips curve (EHL-style monopoly unions).
+//% MRS = chi*N^psi/C^(-gamma). An employment subsidy (financed lump-sum)
+//% offsets the steady-state wage markdown, so at SS: w = MRS exactly as in
+//% the flexible-wage model — the steady state is UNCHANGED by kappaw.
+//% kappaw = 0 collapses this equation to w = MRS (flexible wages).
+//% Wage adjustment costs are assumed rebated (FOC friction only; no
+//% resource drain), unlike price adjustment costs which consume output.
+kappaw*(pi_w-1)*pi_w = epsw*(chi*N^psi/(C^(-gamma)*w) - 1)
+    + beta*(C(+1)/C)^(-gamma)*kappaw*(pi_w(+1)-1)*pi_w(+1)*N(+1)/N;
 
-//% Labor leisure condition
+//% Nominal wage inflation (w is the real wage)
+pi_w = pi*w/w(-1);
+
+//% Labor leisure condition (flex-price AND flex-wage economy)
 C_f^(-gamma)*w_f = chi*N_f^psi;
 
 
@@ -897,6 +910,7 @@ TB_f = PX_f*X_f - PV_f*(V_ss+CF_ss);
 
 w  = w_ss;
 w_f  = w_ss;
+pi_w = pi_ss;
 
 GDP = C+TB;
 GDP_f = C_f+TB_f;

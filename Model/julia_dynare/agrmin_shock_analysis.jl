@@ -204,7 +204,7 @@ gammaind_val = 0.0; ilabcosts_val = 0.1; ombar_val = 0.57
 
 Pistar_ss = 1.00; Rworld_ss = Pistar_ss / beta_val
 kappaV_val = 1e13; epsilonV_val = 1e13; epsilonX_val = 1.0; omegaX_val = 1.0
-chii_b_val = 0.001; etastar_val = 3.5
+chii_b_val = 0.0024; etastar_val = 3.5   # chii_b = XMAS posterior (100ψ=0.24, Chile EMBIG); was 0.001
 xi_rstar_val = 0.2; ystar_ss_val = 1.0; PVstar_ss = 1.0; sigmaH_val = 0.999
 
 modchiX   = let   # sectoral export shares chi_i^X from Chilean 2021 supply-use table (Data/computed)

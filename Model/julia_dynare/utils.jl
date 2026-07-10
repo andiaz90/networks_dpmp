@@ -84,6 +84,13 @@ function write_params_mod(mod_dir::String, p::NamedTuple)
         _wp(io, "rho_xi",       p.rho_xi_val)
         _wp(io, "sigma_xi",     p.sigma_xi_val)
         _wp(io, "Rworld_ss",    p.Rworld_ss_val)
+        # Sticky wages (Rotemberg wage PC). Defaults apply unless the driver
+        # passes epsw_val / kappaw_val in the params NamedTuple.
+        # kappaw default 115 ≈ Calvo wage duration of 4 quarters:
+        # slope = (1-θw)(1-βθw)/θw = 0.0868 with θw=0.75, β=0.986 → κw = εw/slope.
+        # kappaw = 0 → flexible wages (nests the pre-2026-07 model exactly).
+        _wp(io, "epsw",   get(p, :epsw_val,   10.0))
+        _wp(io, "kappaw", get(p, :kappaw_val, 115.0))
         # Oil sector scalar parameters
         _wp(io, "epsilonV_oil",    p.epsilonV_oil_val)
         _wp(io, "rho_postar",      p.rho_postar_val)

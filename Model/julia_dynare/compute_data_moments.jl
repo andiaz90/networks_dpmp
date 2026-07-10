@@ -53,12 +53,24 @@ function _main()   # wrapped in function so we can use `return` for early exit
 #  FAST PATH: if CSV outputs already exist, load them and skip all xlsx work  #
 # =========================================================================== #
 if isfile(OUT_SECTORAL) && isfile(OUT_AGGREGATE)
-    @printf "\n%s\n  CSV moment files already exist — loading directly.\n" repeat("=",61)
-    @printf "  (Delete and re-run to recompute from raw Excel/CSV sources.)\n"
-    @printf "%s\n\n" repeat("=",61)
-
     sec = CSV.read(OUT_SECTORAL,  DataFrame)
     agg = CSV.read(OUT_AGGREGATE, DataFrame)
+
+    # STALENESS CHECK (2026-07-08): files written before the corr(N,GDP) /
+    # corr(N,GDP/N) additions also predate the sector-8/10 valid-window fix
+    # (their std_Y was biased −13% by constant backfill). Never load them —
+    # fall through and recompute from the raw sources.
+    _agg_keys = Set(String.(agg.moment))
+    if !("corr_NGDP" in _agg_keys && "corr_NAPL" in _agg_keys)
+        @printf "\n%s\n  Existing CSV moment files are STALE (pre-2026-07-08:\n" repeat("=",61)
+        @printf "  no corr_NGDP/corr_NAPL; sector-8/10 stds biased by backfill).\n"
+        @printf "  Recomputing from raw sources and overwriting...\n%s\n" repeat("=",61)
+        @goto recompute
+    end
+
+    @printf "\n%s\n  CSV moment files already exist (current format) — loading directly.\n" repeat("=",61)
+    @printf "  (Delete and re-run to recompute from raw Excel/CSV sources.)\n"
+    @printf "%s\n\n" repeat("=",61)
 
     # 'name' column may not exist if CSV was written by bootstrap_csv.jl
     _names = hasproperty(sec, :name) ? sec.name :
@@ -78,6 +90,7 @@ if isfile(OUT_SECTORAL) && isfile(OUT_AGGREGATE)
     return   # done — no raw file processing needed
 end
 
+@label recompute
 @printf "\n%s\n  Computing data moments from raw files (Chile)\n%s\n\n" repeat("=",61) repeat("=",61)
 @printf "  (Tip: if pib_sectorial_bc.xlsx fails to load, open it in Excel\n"
 @printf "   and File → Save As → .xlsx to fix XLSX.jl compatibility.)\n\n"
@@ -505,8 +518,17 @@ if !isempty(Y_qrt)
             @printf "  WARNING: sector %d output has too few valid obs (%d), skipping.\n" i sum(.!bad)
             continue
         end
-        x_log = log.(fillmissing_linear(x))
+        # Trim to the sector's valid window before filtering. Sectors 8 (Finance)
+        # and 10 (Business services) only start in 2013Q1; backfilling their
+        # leading NaNs with a constant (old behaviour) shrank their HP std by
+        # ~13% and corrupted the cross-sector volatility ranking used by the
+        # rank-correlation moments. fillmissing_linear now handles interior
+        # gaps only.
+        i1 = findfirst(!, bad); i2 = findlast(!, bad)
+        x_log = log.(fillmissing_linear(x[i1:i2]))
         y_d[i] = std(hp_cycle(x_log, LAMBDA))
+        (i1 > 1 || i2 < length(x)) &&
+            @printf "  NOTE: sector %d output std computed on valid window (obs %d–%d of %d).\n" i i1 i2 length(x)
     end
     @printf "  Output     std devs (%%): %s\n" join([@sprintf("%.3f", v*100) for v in y_d], "  ")
 else
@@ -550,6 +572,29 @@ else
     d_std_GDP    = 0.021
     d_corr_GDPpi = -0.15
     @printf "  std(GDP) / corr: using defaults (no output data).\n"
+end
+
+# --- Employment comovement moments -------------------------------------- #
+# corr(N, GDP): aggregate employment–output comovement (strongly positive in
+# Chilean data, ≈ +0.70). corr(N, GDP/N): employment–labor-productivity
+# correlation (≈ +0.07, the Galí-1999 fact). Together these discipline the
+# demand vs supply shock mix and the wage stickiness kappaw.
+d_corr_NGDP = NaN
+d_corr_NAPL = NaN
+if !isempty(GDP_sample) && size(L_sample, 1) >= 20 && sum(GDP_sample .> 0) >= 20
+    N_series = vec(sum(L_sample, dims=2))
+    nmin_n   = min(length(GDP_sample), length(N_series))   # both end at SAMPLE_END
+    g_log    = log.(fillmissing_linear(GDP_sample[end-nmin_n+1:end]))
+    n_log    = log.(N_series[end-nmin_n+1:end])
+    n_hp     = hp_cycle(n_log, LAMBDA)
+    g_hp     = hp_cycle(g_log, LAMBDA)
+    apl_hp   = hp_cycle(g_log .- n_log, LAMBDA)
+    d_corr_NGDP = complete_cor(n_hp, g_hp)
+    d_corr_NAPL = complete_cor(n_hp, apl_hp)
+    @printf "  corr(N, GDP)   = %.4f  (%d quarters)\n" d_corr_NGDP nmin_n
+    @printf "  corr(N, GDP/N) = %.4f\n" d_corr_NAPL
+else
+    @printf "  corr(N,GDP) / corr(N,GDP/N): insufficient data, set to NaN.\n"
 end
 
 
@@ -771,28 +816,50 @@ d_omG = 0.57   # from BCCh CCNN calibration (ombar_val)
 
 @printf "\n--- 9. Output-weighted cross-sectional moments ---\n"
 
-# Load SS output weights from sector_calibration.csv if available; else equal weights.
-# (params_val.mat was a MATLAB artefact — removed April 2026.)
+# SS sector-size weights, in order of preference (2026-07-08):
+#   1. sector_calibration.csv, column Yi_ss (and PH_ss if present → value weights)
+#   2. mod/params_jl.mod — parse Y_ss<i> and PH_ss<i>; weights = PH_ss·Y_ss
+#      (constant-price VALUE shares, consistent with the model's constant-price
+#      Y/VA aggregates; PH_ss_i ≠ 1, so raw quantities misweight sectors)
+#   3. equal weights (loud warning — averages then NOT citable)
 Y_ss_vec = ones(NSEC)
+_wsrc = "equal (FALLBACK — do not cite the G/S averages)"
 calib_file = joinpath(DATA_DIR, "sector_calibration.csv")
 if isfile(calib_file)
     try
         calib_df = CSV.read(calib_file, DataFrame)
-        if hasproperty(calib_df, :Yi_ss)
-            Y_ss_vec = Float64.(calib_df.Yi_ss)
-            @printf "  Loaded Y_ss weights from sector_calibration.csv\n"
-        elseif hasproperty(calib_df, :yi_ss)
-            Y_ss_vec = Float64.(calib_df.yi_ss)
-            @printf "  Loaded Y_ss weights from sector_calibration.csv (col yi_ss)\n"
-        else
-            @printf "  sector_calibration.csv found but no Yi_ss column — using equal weights.\n"
+        _yi = hasproperty(calib_df, :Yi_ss) ? Float64.(calib_df.Yi_ss) :
+              hasproperty(calib_df, :yi_ss) ? Float64.(calib_df.yi_ss) : nothing
+        if _yi !== nothing
+            _ph = hasproperty(calib_df, :PH_ss) ? Float64.(calib_df.PH_ss) : ones(NSEC)
+            Y_ss_vec = _ph .* _yi
+            _wsrc = "sector_calibration.csv (PH_ss·Yi_ss value shares)"
         end
     catch e
-        @printf "  Could not read sector_calibration.csv (%s) — using equal weights.\n" string(e)
+        @printf "  Could not read sector_calibration.csv (%s).\n" string(e)
     end
-else
-    @printf "  sector_calibration.csv not found; using equal output weights.\n"
 end
+if startswith(_wsrc, "equal")
+    params_mod = joinpath(SCRIPT_DIR, "mod", "params_jl.mod")
+    if isfile(params_mod)
+        _ys  = fill(NaN, NSEC); _phs = fill(NaN, NSEC)
+        for ln in eachline(params_mod)
+            m = match(r"^Y_ss(\d+)\s*=\s*([-0-9.eE+]+)\s*;", ln)
+            m !== nothing && (k = parse(Int, m[1]); k <= NSEC && (_ys[k]  = parse(Float64, m[2])))
+            m = match(r"^PH_ss(\d+)\s*=\s*([-0-9.eE+]+)\s*;", ln)
+            m !== nothing && (k = parse(Int, m[1]); k <= NSEC && (_phs[k] = parse(Float64, m[2])))
+        end
+        if !any(isnan, _ys) && !any(isnan, _phs)
+            Y_ss_vec = _phs .* _ys
+            _wsrc = "params_jl.mod (PH_ss·Y_ss constant-price value shares)"
+        else
+            @printf "  params_jl.mod parsed but Y_ss/PH_ss incomplete (%d/%d, %d/%d).\n" sum(!isnan, _ys) NSEC sum(!isnan, _phs) NSEC
+        end
+    end
+end
+@printf "  Sector weights: %s\n" _wsrc
+startswith(_wsrc, "equal") &&
+    @printf "  WARNING: equal weights in use — regenerate params_jl.mod (run main_SOE_gap.jl)\n           or add Yi_ss/PH_ss columns to sector_calibration.csv.\n"
 
 goods_idx    = GOODS
 services_idx = SERVICES
@@ -832,8 +899,11 @@ if !isempty(Y_qrt) && size(Y_qrt, 1) >= 20 && size(P_sample, 1) >= 20
             @printf "  WARNING: sector %d has too few valid obs for corr(Y,PH).\n" i
             continue
         end
-        y_hp = hp_cycle(fillmissing_linear(log.(xY)), LAMBDA)
-        p_hp = hp_cycle(fillmissing_linear(log.(xP)), LAMBDA)
+        # Trim to the jointly valid window (sectors 8/10 start 2013Q1) so the
+        # HP cycle is not distorted by constant-backfilled leading segments.
+        i1 = findfirst(!, bad); i2 = findlast(!, bad)
+        y_hp = hp_cycle(fillmissing_linear(log.(xY[i1:i2])), LAMBDA)
+        p_hp = hp_cycle(fillmissing_linear(log.(xP[i1:i2])), LAMBDA)
         corr_YPH_d[i] = complete_cor(y_hp, p_hp)
     end
     @printf "  %-4s  %-20s  %10s\n" "Sec" "Name" "corr(Y,PH)"
@@ -870,17 +940,21 @@ end
 @printf "  corr(GDP,Q)   = %.4f\n" d_corr_GDPQ
 @printf "  TB/GDP        = %.4f\n" d_TBGDP
 @printf "  std(TB/GDP)   = %.5f\n" d_std_TBGDP
+@printf "  corr(N,GDP)   = %.4f\n" d_corr_NGDP
+@printf "  corr(N,GDP/N) = %.4f\n" d_corr_NAPL
 
-# Validate: all 45 moments must be non-NaN
+# Validate: all 47 moments must be non-NaN
 d_vec_check = [y_d; p_d; l_d; d_std_GDP; d_std_pi; d_corr_GDPpi;
-               d_omG; d_std_Q; d_TBGDP; d_std_TBGDP; d_autocorr_Q; d_corr_GDPQ]
+               d_omG; d_std_Q; d_TBGDP; d_std_TBGDP; d_autocorr_Q; d_corr_GDPQ;
+               d_corr_NGDP; d_corr_NAPL]
 nan_idx = findall(isnan, d_vec_check)
 if !isempty(nan_idx)
     moment_labels = [["std(Y_$i)" for i in 1:NSEC];
                      ["std(PH_$i)" for i in 1:NSEC];
                      ["std(L_$i)"  for i in 1:NSEC];
                      ["std(GDP)","std(pi)","corr(GDP,pi)","omG",
-                      "std(Q)","TB/GDP","std(TB/GDP)","autocorr(Q)","corr(GDP,Q)"]]
+                      "std(Q)","TB/GDP","std(TB/GDP)","autocorr(Q)","corr(GDP,Q)",
+                      "corr(N,GDP)","corr(N,GDP/N)"]]
 
     # Build a readable list — included directly in the error() so it appears
     # in the exception message even when stdout has scrolled past.
@@ -897,12 +971,12 @@ if !isempty(nan_idx)
     cause_lines = isempty(causes) ? "" : "\n\nLikely causes:\n" * join(causes, "\n")
 
     @printf "\n%s\n" repeat("!", 62)
-    @printf "  NaN MOMENTS (%d of 44):\n" length(nan_idx)
+    @printf "  NaN MOMENTS (%d of 47):\n" length(nan_idx)
     println(nan_lines)
     @printf "%s\n" repeat("!", 62)
 
     error("""
-    $(length(nan_idx)) of 44 moments are NaN.
+    $(length(nan_idx)) of 47 moments are NaN.
 
     NaN moments:
     $(nan_lines)
@@ -912,8 +986,8 @@ if !isempty(nan_idx)
     Files present: $(filter(f -> endswith(f, r"\.xlsx|\.csv"), readdir(DATA_DIR, join=true) .|> basename))
     """)
 end
-@assert length(d_vec_check) == 45 "BUG: expected 45 moments, got $(length(d_vec_check))"
-@printf "\nValidation passed: all 45 aggregate/sectoral moments are non-NaN.\n"
+@assert length(d_vec_check) == 47 "BUG: expected 47 moments, got $(length(d_vec_check))"
+@printf "\nValidation passed: all 47 aggregate/sectoral moments are non-NaN.\n"
 
 # Soft check for corr_YPH_d — NaN is acceptable if Y data is unavailable
 n_nan_corr = sum(isnan.(corr_YPH_d))
@@ -951,11 +1025,13 @@ df_agg = DataFrame(
     moment = ["std_GDP",   "std_pi",    "corr_GDPpi",
               "omG",       "std_Q",     "autocorr_Q",
               "corr_GDPQ", "TBGDP",     "std_TBGDP",
+              "corr_NGDP", "corr_NAPL",
               "sample_start_year", "sample_start_q",
               "sample_end_year",   "sample_end_q"],
     value  = [d_std_GDP,   d_std_pi,    d_corr_GDPpi,
               d_omG,       d_std_Q,     d_autocorr_Q,
               d_corr_GDPQ, d_TBGDP,    d_std_TBGDP,
+              d_corr_NGDP, d_corr_NAPL,
               Float64(SAMPLE_START.year), Float64(SAMPLE_START.q),
               Float64(SAMPLE_END.year),   Float64(SAMPLE_END.q)],
 )

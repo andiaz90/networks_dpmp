@@ -31,7 +31,8 @@ JL_FILES=(compute_data_moments.jl main_SOE_gap.jl run_smm_estimation.jl
   smm_estimation.jl smm_model_moments.jl smm_inference.jl steady_ntwsoe.jl steady_ntwsoe_system.jl
   utils.jl smoke_test.jl figs_SOE_gap.jl plot_scripts.jl run_dynare_subprocess.jl
   run_all_shocks.jl shock_plots_common.jl
-  oil_shock_analysis.jl agr_shock_analysis.jl min_shock_analysis.jl mfg_shock_analysis.jl)
+  oil_shock_analysis.jl agr_shock_analysis.jl agrmin_shock_analysis.jl
+  min_shock_analysis.jl mfg_shock_analysis.jl plot_chiib_comparison.jl)
 for f in "${JL_FILES[@]}"; do cp "$JD/$f" "$STAGE/Model/julia_dynare/"; done
 
 # --- mod/ source only ---
@@ -49,6 +50,7 @@ cp "$DATA/computed/export_shares_chile.csv" "$STAGE/Data/computed/"
 # --- runtime/config files (must sit beside this script in cluster/) ---
 cp "$SCRIPT_DIR/Project.toml"          "$STAGE/Project.toml"
 cp "$SCRIPT_DIR/setup_cluster.jl"      "$STAGE/cluster/"
+cp "$SCRIPT_DIR/setup_cluster.sh"      "$STAGE/cluster/"
 cp "$SCRIPT_DIR/run_full_pipeline.sh"  "$STAGE/cluster/"
 cp "$SCRIPT_DIR/run_estimation.sh"     "$STAGE/cluster/"
 cp "$SCRIPT_DIR/run_shocks.sh"         "$STAGE/cluster/"

@@ -18,6 +18,11 @@ Exits 0 on success, 1 on any failure, so the SLURM script can abort the run:
 
 using Printf
 
+# Smoke mode: lets smm_estimation.jl include with placeholder data moments on a
+# fresh bundle (CSVs are built later in the pipeline). Real estimation runs do
+# NOT set this and hard-error on missing/stale moment files (2026-07-08).
+ENV["SMM_SMOKE"] = "1"
+
 const JD   = @__DIR__
 const REPO = abspath(joinpath(JD, "..", ".."))
 const DATA = joinpath(REPO, "Data")

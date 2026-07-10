@@ -24,7 +24,7 @@ Usage:
   julia --threads=auto --project=. run_smm_estimation.jl
 """
 
-using LinearAlgebra, Statistics, StatsBase, Printf
+using LinearAlgebra, Statistics, StatsBase, Printf, Dates
 using NLsolve, CSV, DataFrames, Dynare
 using CMAEvolutionStrategy
 
@@ -81,16 +81,47 @@ if isfile(sec_mom_file) && isfile(agg_mom_file)
     d_TBGDP      = agg_dict["TBGDP"]
     # std(TB/GDP): HP-filtered std dev of trade-balance-to-GDP ratio.
     # Computed by compute_data_moments.jl (section 7b) and saved to aggregate_moments.csv.
-    # Fallback to 0.025 (≈ Chilean historical estimate) so the optimiser never sees NaN.
-    d_std_TBGDP  = get(agg_dict, "std_TBGDP", 0.025)
+    # NO fallback (2026-07-08): stale csv must be regenerated, not papered over.
+    haskey(agg_dict, "std_TBGDP") || error(
+        "aggregate_moments.csv is STALE: std_TBGDP not found. " *
+        "Regenerate with: julia --project=. compute_data_moments.jl")
+    d_std_TBGDP  = agg_dict["std_TBGDP"]
+    # Employment comovement moments (added 2026-07-08): corr(N,GDP) ≈ +0.70,
+    # corr(N,GDP/N) ≈ +0.07 in Chilean data (HP-1600, 2009Q1–2023Q4). They
+    # discipline the demand/supply shock mix and kappaw. NO fallback: a stale
+    # aggregate_moments.csv (pre-2026-07-08, also missing the sector-8/10
+    # valid-window fix) must not silently produce results.
+    (haskey(agg_dict, "corr_NGDP") && haskey(agg_dict, "corr_NAPL")) || error("""
+        aggregate_moments.csv is STALE: corr_NGDP / corr_NAPL not found.
+        It predates the 2026-07-08 moment additions (and the sector-8/10
+        valid-window fix). Regenerate it before estimating:
+            julia --project=. compute_data_moments.jl
+        """)
+    d_corr_NGDP  = agg_dict["corr_NGDP"]
+    d_corr_NAPL  = agg_dict["corr_NAPL"]
     @printf "  Loaded sectoral_moments.csv + aggregate_moments.csv\n\n"
-else
-    @printf "  CSV not found in %s — using placeholder values.\n\n" DATA_DIR
+elseif get(ENV, "SMM_SMOKE", "0") == "1"
+    # SMOKE-TEST MODE ONLY (set by smoke_test.jl): allow include-time syntax/
+    # contract checks on a fresh bundle where the moment CSVs are built later
+    # in the pipeline. These placeholders can NEVER produce estimation results:
+    # run_smm_estimation.jl does not set SMM_SMOKE, so a real run against
+    # missing/stale CSVs still hard-errors above.
+    @printf "  [SMOKE MODE] moment CSVs absent — placeholder values for syntax check ONLY.\n"
     y_d = fill(0.04, NSEC); p_d = fill(0.02, NSEC); l_d = fill(0.03, NSEC)
     corr_YPH_d = fill(0.0, NSEC)
     d_std_GDP=0.0215; d_std_pi=0.0041; d_corr_GDPpi=-0.15
     d_omG=0.57; d_std_Q=0.0520; d_autocorr_Q=0.75
     d_corr_GDPQ=-0.15; d_TBGDP=-0.02; d_std_TBGDP=0.025
+    d_corr_NGDP=0.698; d_corr_NAPL=0.065
+else
+    # NO placeholder fallback (removed 2026-07-08): estimating against
+    # invented moments silently produces meaningless results.
+    error("""
+        Data moment files not found in $(DATA_DIR):
+            sectoral_moments.csv / aggregate_moments.csv
+        Generate them first:
+            julia --project=. compute_data_moments.jl
+        """)
 end
 
 # omG (goods expenditure share) is pinned by SS calibration → contributes 0 to the
@@ -98,7 +129,7 @@ end
 # directly identifies the export and import elasticities.
 # corr(Y_i,PH_i): negative under TFP shocks, positive under demand shocks — key identifier
 # for supply vs demand decomposition per sector (12 new moments, Option-A).
-# Canonical moment-name vector (58 entries). Defined BEFORE the data_moments
+# Canonical moment-name vector (60 entries). Defined BEFORE the data_moments
 # guard below, which references it. (The old 46-entry copy in
 # smm_model_moments.jl is now disabled — this is the single source of truth.)
 const MOMENT_NAMES = vcat(
@@ -108,10 +139,14 @@ const MOMENT_NAMES = vcat(
      "std(Q)", "autocorr(Q)", "corr(GDP,Q)",
      "rank corr: output (model vs data)", "rank corr: prices (model vs data)",
      "rank corr: labor  (model vs data)"],
-    ["corr(Y_$(i),PH_$(i))" for i in 1:12])
+    ["corr(Y_$(i),PH_$(i))" for i in 1:12],
+    # Employment comovement (positions 59–60, appended so the 1–58 layout
+    # and all hard-coded index comments remain valid):
+    ["corr(N,GDP)", "corr(N,GDP/N)"])
 
 data_moments = [y_d; p_d; l_d; d_std_GDP; d_std_pi; d_corr_GDPpi;
-                d_std_TBGDP; d_std_Q; d_autocorr_Q; d_corr_GDPQ; 1.0; 1.0; 1.0; corr_YPH_d]
+                d_std_TBGDP; d_std_Q; d_autocorr_Q; d_corr_GDPQ; 1.0; 1.0; 1.0; corr_YPH_d;
+                d_corr_NGDP; d_corr_NAPL]
 @assert length(data_moments) == length(MOMENT_NAMES) "data_moments ($(length(data_moments))) ≠ MOMENT_NAMES ($(length(MOMENT_NAMES)))"
 
 # GUARD: NaN anywhere in data_moments poisons the objective for ALL evaluations
@@ -135,29 +170,44 @@ end
 # =========================================================================== #
 
 const PARAM_LABELS = vcat(
-    # Option-A layout: 35 parameters total
+    # Option-A layout: 36 parameters total
     # θ[1]    = ilabcosts      θ[2]    = epsY         θ[3]    = epsM
     # θ[4]    = log(kappaV)    θ[5]    = rho_om       θ[6]    = rho_A
     # θ[7:18] = isigma_tfp_1:12
     # θ[19:30]= sigma_om_1:12  (sectoral demand shock std devs)
     # θ[31]   = rho_pvstar     θ[32]   = sigma_pvstar
     # θ[33]   = rho_xi         θ[34]   = sigma_xi     θ[35]   = etastar
+    # θ[36]   = kappaw (Rotemberg wage adj. cost; 0 = flexible wages,
+    #           115 ≈ 4q Calvo duration; identified by std(L_i), labor rank
+    #           corr, corr(N,GDP), corr(N,GDP/N); added 2026-07-08)
     ["ilabcosts", "epsY", "epsM", "log(kappaV)", "rho_om", "rho_A"],
     ["isigma_tfp_$(i)" for i in 1:12],
     ["sigma_om_$(i)" for i in 1:12],
     ["rho_pvstar", "sigma_pvstar", "rho_xi", "sigma_xi"],
     ["etastar"],   # export demand elasticity η*; identifies std(TB/GDP)
+    ["kappaw"],    # wage stickiness (level, not log: 0 nests flexible wages)
 )
-const N_THETA = length(PARAM_LABELS)   # 35
+const N_THETA = length(PARAM_LABELS)   # 36
+
+# Canonical θ names for CSV output (smm_checkpoint.csv / smm_estimates.csv).
+# Underscore style — main_SOE_gap.jl looks these up BY NAME (est["log_kappaV"],
+# est["kappaw"], ...). Must stay in sync with PARAM_LABELS / the θ layout above.
+const CSV_PARAM_NAMES = vcat(
+    ["ilabcosts","epsY","epsM","log_kappaV","rho_om","rho_A"],
+    ["isigma_tfp_$(i)" for i in 1:12],
+    ["sigma_om_$(i)" for i in 1:12],
+    ["rho_pvstar","sigma_pvstar","rho_xi","sigma_xi","etastar","kappaw"])
 
 const LB = [1e-3; 0.30; 0.05; log(1e3);  -0.95;  0.10;
             fill(1e-4, 12);
             fill(1e-5, 12);
-            0.50;  0.005; 0.00; 0.0;  0.50]
+            0.50;  0.005; 0.00; 0.0;  0.50;
+            0.0]      # kappaw ≥ 0 (0 = flexible wages)
 const UB = [50.0; 1.50; 0.50; log(1e8);   0.95;  0.95;
             fill(0.10, 12);
             fill(0.20, 12);
-            0.99;  0.20;  0.95; 0.05; 6.00]
+            0.99;  0.20;  0.95; 0.05; 6.00;
+            400.0]    # kappaw ≤ 400 (≈ 7q Calvo duration at epsw = 10)
 
 
 # =========================================================================== #
@@ -165,13 +215,14 @@ const UB = [50.0; 1.50; 0.50; log(1e8);   0.95;  0.95;
 # =========================================================================== #
 
 function build_weighting_matrix(dm::Vector{<:Real})
-    w = ones(58)
-    # Moment layout (58 total):
+    w = ones(N_MOMENTS)
+    # Moment layout (60 total; 59–60 appended 2026-07-08):
     #   1:12   = std(Y_i)       13:24  = std(PH_i)     25:36  = std(L_i)
     #   37     = std(GDP)       38     = std(pi)        39     = corr(GDP,pi)
     #   40     = std(TB/GDP)    41     = std(Q)         42     = autocorr(Q)
     #   43     = corr(GDP,Q)    44     = rank Y         45     = rank PH
     #   46     = rank L         47:58  = corr(Y_i,PH_i)
+    #   59     = corr(N,GDP)    60     = corr(N,GDP/N)
     for k in vcat(1:36, [37, 38, 40, 41])
         d = abs(dm[k]); w[k] = d > 1e-4 ? 1.0/d^2 : 1.0/0.01^2
     end
@@ -183,6 +234,9 @@ function build_weighting_matrix(dm::Vector{<:Real})
     for k in 47:58
         d = abs(dm[k]); w[k] = (d > 1e-4 ? 1.0/d^2 : 1.0/0.5^2) * 1.5
     end
+    # 59 = corr(N,GDP), 60 = corr(N,GDP/N): employment comovement — identifies
+    # the demand vs supply shock mix and kappaw (moderate weight, like ranks)
+    w[59] = 2.0; w[60] = 2.0
     return Diagonal(w) |> Matrix
 end
 
@@ -190,14 +244,15 @@ end
 # =========================================================================== #
 #  3b. SETUP CONTRACT CHECKS                                                   #
 # =========================================================================== #
-# The dimensions 35 (params) and 58 (moments) are hard-coded in many places
+# The dimensions 36 (params) and 60 (moments) are hard-coded in many places
 # (LB/UB, layout comments, Σe indexing, slicing in smm_run, the decomposition
 # printouts). Historically, adding one parameter or moment broke the run deep
 # inside CMA-ES with an opaque BoundsError. This validates every cross-cutting
 # invariant ONCE, up front, and fails with a message that says exactly what to
 # update. Call it at the very top of smm_run.
 
-const N_MOMENTS = 58   # single named constant for the moment-vector length
+const N_MOMENTS = 60   # single named constant for the moment-vector length
+                       # (58 original + corr(N,GDP) + corr(N,GDP/N), 2026-07-08)
 
 function validate_smm_setup(data_moments)
     errs = String[]
@@ -208,8 +263,10 @@ function validate_smm_setup(data_moments)
         push!(errs, "length(UB)=$(length(UB)) ≠ N_THETA=$N_THETA")
     length(PARAM_LABELS) == N_THETA ||
         push!(errs, "length(PARAM_LABELS)=$(length(PARAM_LABELS)) ≠ N_THETA=$N_THETA")
-    N_THETA >= 35 ||
-        push!(errs, "N_THETA=$N_THETA but the moment fn reads θ[31:35]; need ≥35")
+    length(CSV_PARAM_NAMES) == N_THETA ||
+        push!(errs, "length(CSV_PARAM_NAMES)=$(length(CSV_PARAM_NAMES)) ≠ N_THETA=$N_THETA — update the CSV name list for the new θ layout")
+    N_THETA >= 36 ||
+        push!(errs, "N_THETA=$N_THETA but the moment fn reads θ[31:36]; need ≥36")
 
     all(LB .< UB) ||
         push!(errs, "LB ≥ UB at indices $(findall(LB .>= UB)) " *
@@ -262,11 +319,13 @@ end
 # live, on every improvement, so a 1–2 day cluster run that dies loses at most
 # the current generation rather than everything since the last manual save.
 function save_checkpoint(θ::AbstractVector, obj::Real)
+    # Use CSV_PARAM_NAMES (single source of truth for CSV output) — a
+    # hardcoded name list here silently went stale when kappaw (θ[36]) was
+    # added on 2026-07-08 and killed the run at the first checkpoint write.
+    length(θ) == length(CSV_PARAM_NAMES) ||
+        error("save_checkpoint: length(θ)=$(length(θ)) ≠ length(CSV_PARAM_NAMES)=$(length(CSV_PARAM_NAMES))")
     df = DataFrame(
-        param = vcat(["ilabcosts","epsY","epsM","log_kappaV","rho_om","rho_A"],
-                     ["isigma_tfp_$(i)" for i in 1:NSEC],
-                     ["sigma_om_$(i)" for i in 1:NSEC],
-                     ["rho_pvstar","sigma_pvstar","rho_xi","sigma_xi","etastar"]),
+        param = CSV_PARAM_NAMES,
         value = collect(Float64, θ),
         obj_hat = vcat([Float64(obj)], fill(NaN, length(θ)-1)))
     try
@@ -334,13 +393,14 @@ function default_theta0(context::Dynare.Context)
             (isempty(p) || idx > length(p)) ? 0.0 : p[idx]
         end
     end
-    # Option-A layout: 35 params
+    # Option-A layout: 36 params (θ[36] = kappaw, added 2026-07-08)
     [pv("ilabcosts"); pv("epsY_1"); pv("epsM_1"); log(pv("kappaV"));
      pv("rho_om1"); pv("rho_tfp1");
      [pv("isigma_tfp_$(i)") for i in 1:12];
      [max(pv("sigma_om_$(i)"), 0.01) for i in 1:12];
      pv("rho_pvstar"); pv("sigma_pvstar"); pv("rho_xi"); pv("sigma_xi");
-     pv("etastar")]
+     pv("etastar");
+     let k = pv("kappaw"); k > 0 ? k : 115.0 end]   # start at calibrated value
 end
 
 
@@ -474,26 +534,32 @@ end
 # =========================================================================== #
 
 function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_names)
-    nsec = baseline.nsec; NAN58 = fill(NaN, 58)
-    # Option-A layout (35 params):
+    nsec = baseline.nsec; NAN58 = fill(NaN, N_MOMENTS)   # name kept; length = N_MOMENTS (60)
+    # Option-A layout (36 params):
     #   θ[1:4]  = ilabcosts, epsY, epsM, log(kappaV)
     #   θ[5]    = rho_om (common persistence for all 12 sectoral demand shocks)
     #   θ[6]    = rho_A
     #   θ[7:18] = isigma_tfp_1:12
     #   θ[19:30]= sigma_om_1:12
     #   θ[31:35]= rho_pvstar, sigma_pvstar, rho_xi, sigma_xi, etastar
+    #   θ[36]   = kappaw (Rotemberg wage stickiness; 0 = flexible)
     ilabcosts=θ[1]; epsY=θ[2]; epsM=θ[3]; kappaV=exp(θ[4])
     rho_om=θ[5]; rho_A=θ[6]
     isigma_tfp  = @view θ[7:18]
     sigma_om_vec= @view θ[19:30]
     rho_pvstar=θ[31]; sigma_pvstar=θ[32]; rho_xi=θ[33]; sigma_xi=θ[34]
     etastar = length(θ) >= 35 ? θ[35] : baseline.etastar_val
+    # kappaw (θ[36], added 2026-07-08): Rotemberg wage stickiness. Fallback to
+    # the params_jl.mod value only for legacy 35-length θ vectors.
+    kappaw = length(θ) >= 36 ? θ[36] :
+             let v = get_param_val(context,"kappaw"); isnan(v) ? 115.0 : v end
 
     (!(0<epsY<5)||!(0<epsM<2)||ilabcosts<=0||kappaV<=0||abs(rho_om)>=1||
      any(<(0),sigma_om_vec)||abs(rho_A)>=1||any(<(0),isigma_tfp)||abs(rho_pvstar)>=1||
      sigma_pvstar<0||abs(rho_xi)>=1||sigma_xi<0||
-     !(0.1<etastar<8.0)) && return NAN58, false
+     !(0.1<etastar<8.0)||kappaw<0||kappaw>1e4) && return NAN58, false
 
+    set_param!(context,"kappaw",kappaw)
     set_param!(context,"ilabcosts",ilabcosts); set_param!(context,"kappaV",kappaV)
     set_param!(context,"rho_om1",rho_om)
     set_param!(context,"etastar",etastar)
@@ -549,7 +615,7 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
 
     # HP-filtered covariance on the ~40 needed variables only (25× faster)
     needed_names = vcat(["Y_$(i)" for i in 1:nsec], ["PH_$(i)" for i in 1:nsec],
-                        ["L_$(i)" for i in 1:nsec], ["GDP","pi","Q","TB"])
+                        ["L_$(i)" for i in 1:nsec], ["GDP","pi","Q","TB","N"])
     ei          = sc.endo_idx
     needed_idx  = [get(ei, nm, 0) for nm in needed_names]
     valid_mask  = needed_idx .> 0
@@ -610,9 +676,32 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
     rP = sum(vp)>=3 ? safe_spearman(std_PH[vp],dPH[vp]) : 0.0
     rL = sum(vl)>=3 ? safe_spearman(std_L[vl],dL[vl]) : 0.0
 
-    # Return 58 moments: 12×std_Y + 12×std_PH + 12×std_L + 10×aggregate + 12×corr(Y_i,PH_i)
+    # Employment comovement moments (59–60).
+    # corr(N,GDP) directly from the level-deviation covariance (scale-free).
+    # corr(N, GDP/N): labor productivity apl = gdp − n in log-deviations. With
+    # Γ_v in LEVEL deviations, convert to log-dev (co)variances by dividing by
+    # steady states:  v_n = Γ_nn/N̄²,  v_g = Γ_gg/Ḡ²,  c_ng = Γ_ng/(N̄Ḡ).
+    # Then corr(n, g−n) = (c_ng − v_n)/√(v_n·(v_g + v_n − 2c_ng)).
+    corr_NGDP_m = xcorr("N","GDP")
+    corr_NAPL_m = let iN=get(ei_sub,"N",0), iG=get(ei_sub,"GDP",0)
+        if iN==0 || iG==0
+            NaN
+        else
+            Nbar = max(abs(ys[needed_idx[iN]]), 1e-12)
+            Gbar = max(abs(ys[needed_idx[iG]]), 1e-12)
+            v_n  = max(Γ_v[iN,iN],0.0)/Nbar^2
+            v_g  = max(Γ_v[iG,iG],0.0)/Gbar^2
+            c_ng = Γ_v[iN,iG]/(Nbar*Gbar)
+            den  = sqrt(max(v_n,0.0)*max(v_g + v_n - 2c_ng, 0.0))
+            den < 1e-15 ? 0.0 : clamp((c_ng - v_n)/den, -1.0, 1.0)
+        end
+    end
+
+    # Return 60 moments: 12×std_Y + 12×std_PH + 12×std_L + 10×aggregate +
+    # 12×corr(Y_i,PH_i) + corr(N,GDP) + corr(N,GDP/N)
     return [std_Y;std_PH;std_L;pstd("GDP");pstd("pi");xcorr("GDP","pi");
-            std_TBGDP;pstd("Q");acQ;xcorr("GDP","Q");rY;rP;rL;corr_YPH], true
+            std_TBGDP;pstd("Q");acQ;xcorr("GDP","Q");rY;rP;rL;corr_YPH;
+            corr_NGDP_m;corr_NAPL_m], true
 end
 
 
@@ -712,7 +801,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     @printf "  obj(θ₀) = %.6f\n" obj_test
 
     ψ0 = data_moments .- m_test
-    @printf "  Decomp: Y=%.3f PH=%.3f L=%.3f Agg=%.3f Rank=%.3f CorrYP=%.3f\n" dot(ψ0[1:12],W[1:12,1:12]*ψ0[1:12]) dot(ψ0[13:24],W[13:24,13:24]*ψ0[13:24]) dot(ψ0[25:36],W[25:36,25:36]*ψ0[25:36]) dot(ψ0[37:43],W[37:43,37:43]*ψ0[37:43]) dot(ψ0[44:46],W[44:46,44:46]*ψ0[44:46]) dot(ψ0[47:58],W[47:58,47:58]*ψ0[47:58])
+    @printf "  Decomp: Y=%.3f PH=%.3f L=%.3f Agg=%.3f Rank=%.3f CorrYP=%.3f NLab=%.3f\n" dot(ψ0[1:12],W[1:12,1:12]*ψ0[1:12]) dot(ψ0[13:24],W[13:24,13:24]*ψ0[13:24]) dot(ψ0[25:36],W[25:36,25:36]*ψ0[25:36]) dot(ψ0[37:43],W[37:43,37:43]*ψ0[37:43]) dot(ψ0[44:46],W[44:46,44:46]*ψ0[44:46]) dot(ψ0[47:58],W[47:58,47:58]*ψ0[47:58]) dot(ψ0[59:60],W[59:60,59:60]*ψ0[59:60])
 
     @printf "\n  %-34s  %9s  %9s\n" "Moment" "Data" "Model"
     @printf "  %s\n" repeat("-",56)
@@ -741,6 +830,14 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     t_last_ckpt   = Ref(time())
     PRINT_EVERY   = 50    # print every N evaluations (any thread can trigger)
     CKPT_EVERY_S  = 60.0  # throttle live checkpoint writes to ≥ this many seconds
+
+    # Machine-readable progress log (2026-07-08): one row per PRINT_EVERY block.
+    # Plottable objective trajectory + fit decomposition; survives node failure
+    # alongside smm_checkpoint.csv. Header written fresh at every run start.
+    progress_log = joinpath(DATA_DIR, "smm_progress_log.csv")
+    open(progress_log, "w") do io
+        println(io, "timestamp,elapsed_s,evals,best_obj,decomp_Y,decomp_PH,decomp_L,decomp_Agg,decomp_Rank,decomp_CorrYP,decomp_NLab,fails,ms_per_eval,klein_hit_pct")
+    end
 
     # Wall-clock self-limit: set SMM_MAX_HOURS a bit under the SLURM --time so the
     # run stops itself and saves, rather than being SIGKILLed mid-write.
@@ -810,8 +907,17 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
                         dL  = dot(ψ_now[25:36], W[25:36,25:36] * ψ_now[25:36])
                         dAg = dot(ψ_now[37:43], W[37:43,37:43] * ψ_now[37:43])
                         dRk = dot(ψ_now[44:46], W[44:46,44:46] * ψ_now[44:46])
-                        @printf "  %-6d  %-10.4f  [Y=%.2f PH=%.2f L=%.2f Agg=%.2f Rk=%.2f]  fail=%-5d  %.1fms  Klein=%d%%\n" n b_obj dY dPH dL dAg dRk fail_count[] ms kpct
+                        dCY = dot(ψ_now[47:58], W[47:58,47:58] * ψ_now[47:58])
+                        dNL = dot(ψ_now[59:60], W[59:60,59:60] * ψ_now[59:60])
+                        @printf "  %-6d  %-10.4f  [Y=%.2f PH=%.2f L=%.2f Agg=%.2f Rk=%.2f CY=%.2f NL=%.2f]  fail=%-5d  %.1fms  Klein=%d%%\n" n b_obj dY dPH dL dAg dRk dCY dNL fail_count[] ms kpct
                         flush(stdout)
+                        # Append to the machine-readable progress log (best effort:
+                        # a full disk or NFS hiccup must never kill the run).
+                        try
+                            open(progress_log, "a") do io
+                                @printf io "%s,%.1f,%d,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%.1f,%d\n" Dates.format(Dates.now(), "yyyy-mm-ddTHH:MM:SS") (t_now - t_start[]) n b_obj dY dPH dL dAg dRk dCY dNL fail_count[] ms kpct
+                            end
+                        catch; end
                         last_printed[] = n
                         t_last_print[] = t_now
                     end
@@ -895,7 +1001,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         re = abs(data_moments[i])>1e-6 ? abs(ψ_hat[i])/abs(data_moments[i])*100 : 0.0
         @printf "  %-36s  %9.5f  %9.5f  %+9.5f  %5.1f%%\n" nm data_moments[i] m_hat[i] ψ_hat[i] re
     end
-    @printf "\n  Decomp: Y=%.3f PH=%.3f L=%.3f Agg=%.3f Rank=%.3f CorrYP=%.3f\n\n" dot(ψ_hat[1:12],W[1:12,1:12]*ψ_hat[1:12]) dot(ψ_hat[13:24],W[13:24,13:24]*ψ_hat[13:24]) dot(ψ_hat[25:36],W[25:36,25:36]*ψ_hat[25:36]) dot(ψ_hat[37:43],W[37:43,37:43]*ψ_hat[37:43]) dot(ψ_hat[44:46],W[44:46,44:46]*ψ_hat[44:46]) dot(ψ_hat[47:58],W[47:58,47:58]*ψ_hat[47:58])
+    @printf "\n  Decomp: Y=%.3f PH=%.3f L=%.3f Agg=%.3f Rank=%.3f CorrYP=%.3f NLab=%.3f\n\n" dot(ψ_hat[1:12],W[1:12,1:12]*ψ_hat[1:12]) dot(ψ_hat[13:24],W[13:24,13:24]*ψ_hat[13:24]) dot(ψ_hat[25:36],W[25:36,25:36]*ψ_hat[25:36]) dot(ψ_hat[37:43],W[37:43,37:43]*ψ_hat[37:43]) dot(ψ_hat[44:46],W[44:46,44:46]*ψ_hat[44:46]) dot(ψ_hat[47:58],W[47:58,47:58]*ψ_hat[47:58]) dot(ψ_hat[59:60],W[59:60,59:60]*ψ_hat[59:60])
 
     # Save (atomic writes — a kill mid-write can't corrupt these files)
     df_res = DataFrame(param=vcat(PARAM_LABELS,fill("",N_MOMENTS-N_THETA)),
@@ -904,10 +1010,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     atomic_write_csv(joinpath(DATA_DIR,"smm_results.csv"), df_res)
 
     df_est = DataFrame(
-        param=vcat(["ilabcosts","epsY","epsM","log_kappaV","rho_om","rho_A"],
-                   ["isigma_tfp_$(i)" for i in 1:NSEC],
-                   ["sigma_om_$(i)" for i in 1:NSEC],
-                   ["rho_pvstar","sigma_pvstar","rho_xi","sigma_xi","etastar"]),
+        param=CSV_PARAM_NAMES,
         value=θ_hat, obj_hat=vcat([obj_hat],fill(NaN,N_THETA-1)))
     atomic_write_csv(joinpath(DATA_DIR,"smm_estimates.csv"), df_est)
     atomic_write_csv(joinpath(DATA_DIR,"smm_checkpoint.csv"), df_est)

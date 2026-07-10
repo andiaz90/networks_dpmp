@@ -208,8 +208,16 @@ kappaV_val = 1e13; epsilonV_val = 1e13; epsilonX_val = 1.0; omegaX_val = 1.0
 # (Q half-life ~600 quarters) — IRFs look non-convergent on a 40q window.
 # Override per-run with ENV["CHIIB_OVERRIDE"], e.g. `CHIIB_OVERRIDE=0.01 julia …`.
 # chii_b does NOT affect the steady state (premium term is zero at SS).
-chii_b_val = haskey(ENV, "CHIIB_OVERRIDE") ? parse(Float64, ENV["CHIIB_OVERRIDE"]) : 0.001
+chii_b_val = haskey(ENV, "CHIIB_OVERRIDE") ? parse(Float64, ENV["CHIIB_OVERRIDE"]) : 0.0024
+# Default = XMAS posterior mean (100ψ = 0.24 [0.18,0.30], Bayesian with Chile
+# EMBIG observable; NFA/quarterly-GDP units — verified same scaling as here).
 etastar_val = 3.5
+# Sticky wages (Rotemberg wage PC): kappaw = 0 → flexible wages (pre-existing
+# model); default 115 ≈ Calvo wage duration of 4 quarters. Override per-run
+# with ENV["KAPPAW_OVERRIDE"], e.g. `KAPPAW_OVERRIDE=0 julia …`.
+# Steady state is unchanged by kappaw (SS wage markdown offset by subsidy).
+epsw_val   = 10.0
+kappaw_val = haskey(ENV, "KAPPAW_OVERRIDE") ? parse(Float64, ENV["KAPPAW_OVERRIDE"]) : 115.0
 xi_rstar_val = 0.2; ystar_ss_val = 1.0; PVstar_ss = 1.0; sigmaH_val = 0.999
 
 modchiX   = let   # sectoral export shares chi_i^X from Chilean 2021 supply-use table (Data/computed)
@@ -403,6 +411,7 @@ params_nt = (
     rho_tfp1_val=rho_tfp1_val, rho_tfp2_val=rho_tfp2_val,
     rhoi_val=rhoi_val, rhoirule_val=rhoirule_val, ombar_val=ombar_val,
     chii_b_val=chii_b_val, bbar_val=bbar_val,
+    epsw_val=epsw_val, kappaw_val=kappaw_val,
     epsilonX_val=epsilonX_val, omegaX_val=omegaX_val,
     ystar_ss_val=ystar_ss_val, etastar_val=etastar_val,
     epsilonV_val=epsilonV_val, kappaV_val=kappaV_val, sigmaH_val=sigmaH_val,
@@ -640,7 +649,9 @@ ctx = (
     # Tag carries the chii_b override so sensitivity runs don't overwrite the
     # baseline figures/tables (e.g. tag = "oil_chiib0p01").
     HAS_PLOTS = _HAS_PLOTS[],
-    tag = haskey(ENV, "CHIIB_OVERRIDE") ? "oil_chiib" * replace(ENV["CHIIB_OVERRIDE"], "." => "p") : "oil",
+    tag = "oil" *
+        (haskey(ENV, "CHIIB_OVERRIDE")  ? "_chiib" * replace(ENV["CHIIB_OVERRIDE"],  "." => "p") : "") *
+        (haskey(ENV, "KAPPAW_OVERRIDE") ? "_kw"    * replace(ENV["KAPPAW_OVERRIDE"], "." => "p") : ""),
     title_long = "Shock al Precio del Petróleo (+10%)", title_short = "Shock Petróleo",
     nsec = nsec, nT = nT, names_vec = names_vec, goods = goods,
     TB_ss = TB_ss, GDP_ss = GDP_ss,

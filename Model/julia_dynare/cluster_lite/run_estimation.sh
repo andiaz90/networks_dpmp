@@ -18,12 +18,17 @@
 # OVERRIDE walltime/cpus:        sbatch --time=12:00:00 --cpus-per-task=16 cluster/run_estimation.sh
 #
 # MONITOR:
-#   tail -f nkiosoe_smm_<jobid>.out
-#   grep -E "best_obj|NEW BEST" nkiosoe_smm_<jobid>.out
+#   tail -f nkiosoe_smm_<jobid>.out        # live: eval count, best obj, fit decomposition
+#                                          #   [Y= PH= L= Agg= Rk= CY= NL=], fail count,
+#                                          #   ms/eval, Klein cache hit rate
+#   tail -f Data/smm_progress_log.csv      # machine-readable trajectory, 1 row / 50 evals
+#   wc -l Data/smm_progress_log.csv        # ≈ evaluations/50 completed so far
 #   squeue -u $USER ; sacct -j <jobid> --format=JobID,MaxRSS,Elapsed,State
 #
-# The estimation writes Data/smm_checkpoint.csv LIVE (every improvement), so a
-# killed job loses almost nothing — just resubmit and it warm-starts from there.
+# The estimation writes Data/smm_checkpoint.csv LIVE (every improvement, ≥60s
+# apart), so a killed job loses almost nothing — resubmit and it warm-starts.
+# NOTE 2026-07-08: θ is now 36 params (kappaw added) — an old 35-length
+# checkpoint is auto-rejected and the run cold-starts from default θ₀.
 # ==========================================================================
 set -euo pipefail
 

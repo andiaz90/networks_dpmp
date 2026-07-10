@@ -127,8 +127,9 @@ end
 #
 # Structural params that DO require Klein re-solve (θ indices, Option-A layout):
 #   1=ilabcosts, 2=epsY, 3=epsM, 4=log(kappaV), 5=rho_om, 6=rho_A,
-#   31=rho_pvstar, 33=rho_xi
-const _KLEIN_STRUCT_IDX = [1, 2, 3, 4, 5, 6, 31, 33]
+#   31=rho_pvstar, 33=rho_xi, 36=kappaw (wage Rotemberg cost enters the wage-PC
+#   Jacobian directly — a stale cache here would silently freeze kappaw)
+const _KLEIN_STRUCT_IDX = [1, 2, 3, 4, 5, 6, 31, 33, 36]
 const _KLEIN_THRESH     = 1e-5   # re-solve if any structural param moves > this
 
 const _KLEIN_CACHE_T    = [Ref{Matrix{Float64}}(zeros(0,0)) for _ in 1:_N_THREADS]
@@ -139,8 +140,11 @@ const _KLEIN_MISSES     = Threads.Atomic{Int}(0)
 
 function _resolve_cached!(context, θ)
     tid = _tid()
-    θ_str = θ[_KLEIN_STRUCT_IDX]
+    # Tolerate legacy θ vectors shorter than the newest struct index (e.g. a
+    # 35-length θ without kappaw): drop out-of-range entries instead of erroring.
+    θ_str = θ[filter(<=(length(θ)), _KLEIN_STRUCT_IDX)]
     cache_valid = !isempty(_KLEIN_CACHE_ΘSTR[tid][]) &&
+                  length(_KLEIN_CACHE_ΘSTR[tid][]) == length(θ_str) &&
                   maximum(abs.(_KLEIN_CACHE_ΘSTR[tid][] .- θ_str)) < _KLEIN_THRESH
 
     if cache_valid

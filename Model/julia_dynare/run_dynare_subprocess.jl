@@ -161,7 +161,18 @@ g1_1, g1_2 = get_decision_rule(mr, n_endo)
 _nz_total = sum(abs.(g1_1) .> 1e-12) + sum(abs.(g1_2) .> 1e-12)
 println("DECISION_RULE_NONZERO=$(_nz_total)")
 if _nz_total == 0
-    @warn "Decision rule matrices are ALL ZEROS — LRE solver likely failed for this parameterization"
+    # FAIL FAST: an all-zero decision rule means the LRE solver failed
+    # (Dynare.jl swallows the error inside parse_statements! and returns a
+    # context anyway — e.g. MethodError(convert, (Float64, nothing))).
+    # Do NOT print DYNARE_SUCCESS and do NOT serialize the context: a broken
+    # nk_iosoe_context.jls would send the SMM job into a doomed 26-min run
+    # that only dies at pre-flight (cf. cluster job 7198, 2026-07-08).
+    @error "Decision rule matrices are ALL ZEROS — LRE solver failed for this parameterization. Aborting (no context saved)."
+    println("DYNARE_FAILED")   # sentinel for the parent process
+    # Remove any stale context so downstream SMM cannot pick up old results
+    _stale = joinpath(MOD_DIR, "nk_iosoe_context.jls")
+    isfile(_stale) && rm(_stale; force=true)
+    exit(1)
 end
 
 # ---- Sigma_e ----

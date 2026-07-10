@@ -285,8 +285,14 @@ epsilonV_val = 1e13      # import demand elasticity (very large)
 epsilonX_val = 1.0       # export demand elasticity
 omegaX_val   = 1.0       # export demand scale
 
-chii_b_val   = 0.001     # debt-risk premium elasticity χ_b
+chii_b_val   = 0.0024    # debt-risk premium elasticity χ_b — XMAS posterior mean
+                         # (García et al., BCCh; 100ψ = 0.24 [0.18, 0.30], Bayesian
+                         # with Chile EMBIG observable; NFA/quarterly-GDP ratio,
+                         # same units as here). Was 0.001 (hand-set) pre-2026-07-08.
 etastar_val  = 3.5       # foreign demand elasticity η*
+kappaw_val   = 115.0     # Rotemberg wage adj. cost (≈4q Calvo at epsw=10);
+                         # overridden by smm_estimates.csv when available;
+                         # 0 = flexible wages (nests pre-2026-07 model)
 
 xi_rstar_val    = 0.2    # world rate shock persistence
 ystar_ss_val    = 1.0    # steady-state foreign output
@@ -418,6 +424,7 @@ if isfile(smm_est_file)
     haskey(est, "rho_xi")   && (rho_xi_val   = est["rho_xi"])
     haskey(est, "sigma_xi") && (sigma_xi_val = est["sigma_xi"])
     haskey(est, "etastar")  && (etastar_val  = est["etastar"])
+    haskey(est, "kappaw")   && (kappaw_val   = est["kappaw"])   # θ[36], added 2026-07-08
     shock_eps_om_vec = Float64.(sigma_om_vec .> 0)   # recompute flags from loaded values
     smm_param_source = "smm_estimates.csv"
 end
@@ -833,6 +840,7 @@ params_nt = (
     sigma_pvstar_val=sigma_pvstar_val,
     rho_xi_val     = rho_xi_val,
     sigma_xi_val   = sigma_xi_val,
+    kappaw_val     = kappaw_val,   # write_params_mod defaults to 115.0 if absent
     # Oil sector
     modalphaOil         = modalphaOil,
     epsilonV_oil_val    = epsilonV_oil_val,
@@ -944,18 +952,30 @@ project_dir = dirname(Base.active_project())
 @printf "  Script : %s\n" dynare_script
 @printf "  Mod dir: %s\n\n" MOD_DIR
 
-# Capture stdout to check for DYNARE_SUCCESS sentinel
+# Capture stdout to check for DYNARE_SUCCESS sentinel.
+# ignorestatus: the subprocess exits 1 on a failed solve (DYNARE_FAILED);
+# we want to report that cleanly instead of a raw ProcessFailedException.
 dynare_out = IOBuffer()
 proc = run(pipeline(
-    `$julia_exe --project=$project_dir $dynare_script $MOD_DIR`,
+    ignorestatus(`$julia_exe --project=$project_dir $dynare_script $MOD_DIR`),
     stdout=dynare_out, stderr=stderr), wait=true)
 
 dynare_stdout = String(take!(dynare_out))
 print(dynare_stdout)   # echo subprocess output
 
-if !occursin("DYNARE_SUCCESS", dynare_stdout)
+if occursin("DYNARE_FAILED", dynare_stdout)
     error("""
-    Dynare subprocess did not complete successfully.
+    Dynare solved the steady state but the FIRST-ORDER (LRE) SOLVE FAILED:
+    decision rule is all zeros (see DECISION_RULE_NONZERO=0 above, and any
+    MethodError printed by Dynare.jl during parse_statements!).
+    No context was saved — the SMM stage will not run.
+    Likely causes: parameterization outside determinacy region, or a
+    Dynare.jl dependency version mismatch (check LinearRationalExpectations /
+    FastLapackInterface / PolynomialMatrixEquations against the working env).
+    """)
+elseif !occursin("DYNARE_SUCCESS", dynare_stdout) || !success(proc)
+    error("""
+    Dynare subprocess did not complete successfully (exit code $(proc.exitcode)).
     Check the output above for errors.
     Common fixes:
       - Open pib_sectorial_bc.xlsx in Excel and File→Save As .xlsx

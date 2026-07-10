@@ -76,7 +76,7 @@ chisq_pvalue(stat::Real, dof::Integer) = _gammq(dof/2, stat/2)
 function _fallback_S(dm::Vector{<:Real})
     K = length(dm); s = ones(K)
     stdpos = vcat(1:36, [37, 38, 40, 41])            # std-dev type moments
-    corrpos = vcat([39, 42, 43], 47:58)              # correlation type moments
+    corrpos = vcat([39, 42, 43], 47:58, [59, 60])    # correlation type moments (59–60 = corr(N,GDP), corr(N,GDP/N))
     rankpos = [44, 45, 46]                           # cross-sectional rank corr
     for k in stdpos;  s[k] = max(dm[k]^2/2, 1e-10);              end
     for k in corrpos; s[k] = max((1 - dm[k]^2)^2, 1e-4);        end
