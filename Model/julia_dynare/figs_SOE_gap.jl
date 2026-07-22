@@ -173,11 +173,32 @@ function generate_figures(;
     periods = 1:n_periods
     tag     = "ex$(EXERCISE)"
 
+    # Human-readable description of each structural shock. Previously the
+    # per-shock aggregate IRF title reused `exercise_label` (e.g. "TFP shock to
+    # Manufacturing") for EVERY shock, which was misleading — each figure is the
+    # model's response to its OWN shock. Map the shock name to a real label.
+    shock_desc(shk) = begin
+        if     shk == "eps_i";       "Monetary policy shock"
+        elseif shk == "epschi";      "Labor-supply shock"
+        elseif shk == "eps_pvstar";  "Import-price shock"
+        elseif shk == "eps_postar";  "Oil-price shock"
+        elseif shk == "eps_xi";      "Aggregate demand (preference) shock"
+        elseif startswith(shk, "epsA_")
+            i = tryparse(Int, replace(shk, "epsA_" => ""))
+            (i !== nothing && 1 <= i <= length(names_vec)) ? "TFP shock: $(names_vec[i])" : "TFP shock ($shk)"
+        elseif startswith(shk, "eps_om_")
+            i = tryparse(Int, replace(shk, "eps_om_" => ""))
+            (i !== nothing && 1 <= i <= length(names_vec)) ? "Demand (taste) shock: $(names_vec[i])" : "Demand shock ($shk)"
+        else
+            shk
+        end
+    end
+
     # 4a. Aggregate IRFs — one PDF per shock with 2×2 layout
     for shock in all_shocks
         irfs = [get_irf(df_irf, vn, shock; n_periods=n_periods) for vn in agg_vars]
         p = Plots.plot(layout=(2,2), size=(900,600), titlefontsize=9,
-                       plot_title="$shock — $exercise_label")
+                       plot_title="$shock — $(shock_desc(shock))")
         for (k, (irf, lbl)) in enumerate(zip(irfs, agg_labels))
             Plots.plot!(p, periods, irf, subplot=k, label="",
                        color=:steelblue, lw=2, title=lbl,

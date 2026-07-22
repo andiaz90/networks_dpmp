@@ -442,6 +442,20 @@ if !isempty(_theta_file)
     smm_param_source = basename(_theta_file)
 end
 
+# Enforce the AR-persistence box [0, 0.99] on the parameters that will drive the
+# simulation, regardless of source. A stored estimate from BEFORE the [0,1)
+# non-negativity floor (e.g. rho_om = -0.82) would otherwise produce oscillatory
+# (period-2, zig-zag) IRFs. Clamp and warn — for a proper fit, re-estimate the
+# SMM under the new bounds rather than relying on this projection.
+for (nm, v) in (("rho_om", rho_om1_val), ("rho_A", rho_tfp1_val),
+                ("rho_pvstar", rho_pvstar_val), ("rho_xi", rho_xi_val))
+    (v < 0 || v >= 1) && @printf "  WARNING: loaded %s = %.4f outside [0,1) — clamped to [0,0.99]; re-estimate for a proper fit\n" nm v
+end
+rho_om1_val    = clamp(rho_om1_val,    0.0, 0.99)
+rho_tfp1_val   = clamp(rho_tfp1_val,   0.0, 0.99)
+rho_pvstar_val = clamp(rho_pvstar_val, 0.0, 0.99)
+rho_xi_val     = clamp(rho_xi_val,     0.0, 0.99)
+
 @printf "--- Parameters (%s) ---\n" smm_param_source
 param_vals = [ilabcosts_val, modepsY[1], modepsM[1], kappaV_val,
               rho_om1_val, rho_tfp1_val, isigma_tfp_val[1], mean(sigma_om_vec),
@@ -521,6 +535,14 @@ pH_ss = ss_result.zero[1:nsec]
 w_ss  = ss_result.zero[nsec+1]
 Q_ss  = ss_result.zero[nsec+2]
 C_ss  = ss_result.zero[nsec+3]
+
+# GHH preferences: disutility scale chi0 = chi_weight * C_ss^gamma. This holds
+# the steady state EXACTLY at the KPR-solved values (the SS labor-supply residual
+# in steady_ntwsoe.jl is left in KPR form N = (C^-gamma w / chi)^(1/psi), so the
+# SS allocation is unchanged; chi0 only enters the DYNAMIC MRS = chi0*chi*N^psi
+# and the composite Zc = C - chi0*chi*N^(1+psi)/(1+psi)). Recomputed from C_ss so
+# it tracks the SS if C_ss moves during estimation.
+chi0_val = chi * C_ss^gamma
 
 
 # =========================================================================== #
@@ -833,6 +855,7 @@ params_nt = (
     sigma_L_agg_val= sigma_L_agg_val,
     ilabcosts_val  = ilabcosts_val,
     gamma_val      = gamma,
+    chi0_val       = chi0_val,   # GHH disutility scale = chi * C_ss^gamma
     beta_val       = beta_val,
     phi_val        = phi_val,
     rho_val        = rho_val,

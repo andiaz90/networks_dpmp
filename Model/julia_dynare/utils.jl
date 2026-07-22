@@ -49,6 +49,9 @@ function write_params_mod(mod_dir::String, p::NamedTuple)
         _wp(io, "ilabcosts",    p.ilabcosts_val)
         _wp(io, "gamma",        p.gamma_val)
         _wp(io, "psi",          1.0)
+        # GHH disutility scale chi0 = chi_weight * C_ss^gamma (holds SS at KPR
+        # values). Falls back to C_ss^gamma (chi_weight = 1) if not supplied.
+        _wp(io, "chi0",         get(p, :chi0_val, p.C_ss^p.gamma_val))
         _wp(io, "beta",         p.beta_val)
         _wp(io, "phi",          p.phi_val)
         _wp(io, "epsilon",      10.0)
@@ -417,15 +420,20 @@ const CSV_PARAM_NAMES = vcat(
     ["sigma_om_$(i)" for i in 1:12],
     ["rho_pvstar","sigma_pvstar","rho_xi","sigma_xi","etastar","kappaw"])
 
-const LB = [1e-3; 0.30; 0.05; log(1e3);  -0.95;  0.10;
+# Shock AR(1) persistences are bounded to [0, 1): non-negative (rules out
+# oscillatory structural shocks) and < 1 for stationarity — the support of the
+# Beta priors used for persistences in estimated (SOE-)DSGE models (Garcia-Cicco,
+# Pancrazi & Uribe 2010 AER; Smets & Wouters 2007; BCCh XMAS). The persistences
+# rho_om, rho_A (theta 5,6) and rho_pvstar, rho_xi (theta 31,33) all carry LB >= 0.
+const LB = [1e-3; 0.30; 0.05; log(1e3);   0.00;  0.10;
             fill(1e-4, 12);
             fill(1e-5, 12);
             0.50;  0.005; 0.00; 0.0;  0.50;
             0.0]      # kappaw ≥ 0 (0 = flexible wages)
-const UB = [50.0; 1.50; 0.50; log(1e8);   0.95;  0.95;
+const UB = [50.0; 1.50; 0.50; log(1e8);   0.99;  0.99;
             fill(0.10, 12);
             fill(0.20, 12);
-            0.99;  0.20;  0.95; 0.05; 6.00;
+            0.99;  0.20;  0.99; 0.05; 6.00;
             400.0]    # kappaw ≤ 400 (≈ 7q Calvo duration at epsw = 10)
 
 # ---- Moment layout (60 moments) ------------------------------------------- #

@@ -6,7 +6,7 @@
 @#include "definition_block_lab.mod" 
 
 // Define variables
-var chi xi Lab_costs Price_costs w VA C Ctot Ctotg Ctots M C_g C_s p_g p_s N pi pi_g pi_s pi_w r om_g om_s vi Y
+var chi xi Zc Lab_costs Price_costs w VA C Ctot Ctotg Ctots M C_g C_s p_g p_s N pi pi_g pi_s pi_w r om_g om_s vi Y
 PV r_star Rworld pi_e Bstar Pipstar Q TB PX X Ystar V PVstar GDP IMP mkupV CFs CFg
 POstar PO VOil VNon
 // Sectoral demand (taste) shocks om_1..om_nsec and basket normalizers norm_g, norm_s.
@@ -59,7 +59,7 @@ om_1 om_2 om_3 om_4 om_5 om_6 om_7 om_8 om_9 om_10 om_11 om_12 norm_g norm_s
     @#endfor
     ;
 
-var C_f C_g_f C_s_f CFs_f CFg_f PV_f p_g_f p_s_f r_f N_f Lab_costs_f
+var C_f Zc_f C_g_f C_s_f CFs_f CFg_f PV_f p_g_f p_s_f r_f N_f Lab_costs_f
 w_f Y_f  Ctot_f Ctots_f Ctotg_f VA_f GDP_f TB_f M_f r_star_f pi_e_f Q_f Bstar_f
 PX_f X_f IMP_f V_f Y_g_f Y_s_f PO_f VOil_f VNon_f
 
@@ -113,7 +113,7 @@ varexo eps_i epschi eps_pvstar eps_postar
 ;
 
 
-parameters gamma psi beta phi epsilon rho rho_om1 rho_tfp1 rho_tfp2 ombar
+parameters gamma psi chi0 beta phi epsilon rho rho_om1 rho_tfp1 rho_tfp2 ombar
 rhoi rhoirule ilabcosts sigma_i sigma_L_agg Rworld_ss
 bbar chii_b omegaX epsilonX ystar_ss etastar kappaV epsilonV sigmaH Pistar_ss PVstar_ss
 rho_pvstar sigma_pvstar rho_xi sigma_xi
@@ -278,12 +278,20 @@ p_s_f = (1
 
 
 
+//% GHH consumption-labor composite (Greenwood-Hercowitz-Huffman 1988).
+//% Marginal utility of consumption is Zc^(-gamma), MRS = chi0*chi*N^psi, so
+//% labor supply depends only on the real wage -> NO wealth effect. The scale
+//% chi0 = chi_weight * C_ss^gamma is set in params_jl.mod to hold the steady
+//% state EXACTLY at its pre-GHH values (recomputed from C_ss at every SS solve).
+Zc   = C   - chi0*chi*N^(1+psi)/(1+psi);
+Zc_f = C_f - chi0*chi*N_f^(1+psi)/(1+psi);
+
 //% Household Euler Equation (with preference/demand shock xi)
 //% xi > 1: more impatient, want to consume now -> demand shock -> positive GDP-pi comovement
-xi*C^(-gamma) = beta*xi(+1)*(C(+1)^-gamma)*r/pi(+1);
+xi*Zc^(-gamma) = beta*xi(+1)*(Zc(+1)^-gamma)*r/pi(+1);
 
 //% Household Euler Equation flex-price (same preference shock applies)
-xi*C_f^(-gamma) = beta*xi(+1)*(C_f(+1)^-gamma)*r_f;
+xi*Zc_f^(-gamma) = beta*xi(+1)*(Zc_f(+1)^-gamma)*r_f;
 
 //% Relative Inflation: Goods vs Services
 pi_g*C_g/C_g(-1)*(exp(om_s)/exp(om_s(-1))) = pi_s*C_s/C_s(-1)*(exp(om_g)/exp(om_g(-1)));
@@ -317,20 +325,22 @@ Lab_costs_f = (
     );
     
 //% Sticky wages: Rotemberg wage Phillips curve (EHL-style monopoly unions).
-//% MRS = chi*N^psi/C^(-gamma). An employment subsidy (financed lump-sum)
+//% MRS = chi0*chi*N^psi (GHH; no wealth effect). An employment subsidy (financed lump-sum)
 //% offsets the steady-state wage markdown, so at SS: w = MRS exactly as in
 //% the flexible-wage model — the steady state is UNCHANGED by kappaw.
 //% kappaw = 0 collapses this equation to w = MRS (flexible wages).
 //% Wage adjustment costs are assumed rebated (FOC friction only; no
 //% resource drain), unlike price adjustment costs which consume output.
-kappaw*(pi_w-1)*pi_w = epsw*(chi*N^psi/(C^(-gamma)*w) - 1)
-    + beta*(C(+1)/C)^(-gamma)*kappaw*(pi_w(+1)-1)*pi_w(+1)*N(+1)/N;
+//% GHH: MRS = chi0*chi*N^psi (independent of C), so MRS/w = chi0*chi*N^psi/w.
+kappaw*(pi_w-1)*pi_w = epsw*(chi0*chi*N^psi/w - 1)
+    + beta*(Zc(+1)/Zc)^(-gamma)*kappaw*(pi_w(+1)-1)*pi_w(+1)*N(+1)/N;
 
 //% Nominal wage inflation (w is the real wage)
 pi_w = pi*w/w(-1);
 
 //% Labor leisure condition (flex-price AND flex-wage economy)
-C_f^(-gamma)*w_f = chi*N_f^psi;
+//% GHH: w = MRS = chi0*chi*N^psi -> labor supply set by the real wage alone.
+w_f = chi0*chi*N_f^psi;
 
 
 //% Relative Inflation: Goods vs Overall
@@ -519,14 +529,14 @@ Price_costs = (
         PL_@{i} = w 
         + (cl_@{i}*w*L_@{i}*(L_@{i}/L_@{i}(-1)-1)/L_@{i}(-1) 
         + cl_@{i}/2*w*(L_@{i}/L_@{i}(-1)-1)^2) 
-        - beta*((C(+1)/C)^-gamma)*cl_@{i}*w(+1)*(L_@{i}(+1)/L_@{i}-1)*L_@{i}(+1)^2/(L_@{i}^2);
+        - beta*((Zc(+1)/Zc)^-gamma)*cl_@{i}*w(+1)*(L_@{i}(+1)/L_@{i}-1)*L_@{i}(+1)^2/(L_@{i}^2);
 
     //% Labor costs FOC  (allows for firing costs)
 
         PL_f_@{i} = w_f 
         + (cl_@{i}*w_f*L_f_@{i}*(L_f_@{i}/L_f_@{i}(-1)-1)/L_f_@{i}(-1) 
         + cl_@{i}/2*w_f*(L_f_@{i}/L_f_@{i}(-1)-1)^2) 
-        - beta*((C_f(+1)/C_f)^-gamma)*cl_@{i}*w_f(+1)*(L_f_@{i}(+1)/L_f_@{i}-1)*L_f_@{i}(+1)^2/(L_f_@{i}^2);
+        - beta*((Zc_f(+1)/Zc_f)^-gamma)*cl_@{i}*w_f(+1)*(L_f_@{i}(+1)/L_f_@{i}-1)*L_f_@{i}(+1)^2/(L_f_@{i}^2);
 
 
 
@@ -536,7 +546,7 @@ Price_costs = (
     //% 1 - eps + eps*MC/PH - kappa*(Pi_H-1)*Pi_H + beta*M_{t+1}*kappa*(Pi_H(+1)-1)*Pi_H(+1)*Y(+1)/Y = 0
     1 - epsilon + epsilon*MC_@{i}/PH_@{i}
     - kappa_@{i}*(pi*PH_@{i}/PH_@{i}(-1)-1)*pi*PH_@{i}/PH_@{i}(-1)
-    + beta*(C(+1)/C)^(-gamma)*kappa_@{i}*(pi(+1)*PH_@{i}(+1)/PH_@{i}-1)
+    + beta*(Zc(+1)/Zc)^(-gamma)*kappa_@{i}*(pi(+1)*PH_@{i}(+1)/PH_@{i}-1)
     *(pi(+1)*PH_@{i}(+1)/PH_@{i})*Y_@{i}(+1)/Y_@{i} =0;
 
     //% Rotemberg Pricing FOC
@@ -610,11 +620,11 @@ xi = (1-rho_xi) + rho_xi*xi(-1) + sigma_xi*eps_xi;
     exp(A_@{i}) = (1+rho_tfp2-rho_tfp1_@{i}) + rho_tfp1_@{i}*exp(A_@{i}(-1)) - rho_tfp2*exp(A_@{i}(-2)) + isigma_tfp_@{i}*epsA_@{i};
 @#endfor
 
-//% Small open economy equations
-C^(-gamma) = beta*(C(+1)^-gamma)*r_star*pi_e(+1)/pi(+1);
+//% Small open economy equations (GHH marginal utility Zc^(-gamma))
+Zc^(-gamma) = beta*(Zc(+1)^-gamma)*r_star*pi_e(+1)/pi(+1);
 
 //% Small open economy equations
-C_f^(-gamma) = beta*(C_f(+1)^-gamma)*r_star_f*pi_e_f(+1);
+Zc_f^(-gamma) = beta*(Zc_f(+1)^-gamma)*r_star_f*pi_e_f(+1);
 
 
 //% Debt-elastic premium on the debt STOCK at constant SS prices (Schmitt-Grohé
@@ -663,7 +673,7 @@ Ystar=ystar_ss;
 // Rotemberg pricing for imports (κ_V adjustment cost)
 1 - epsilonV + epsilonV*Q*PVstar/PV
 - kappaV*(pi*PV/PV(-1)-1)*pi*PV/PV(-1)
-    + beta*(C(+1)/C)^(-gamma)*kappaV*(pi(+1)*PV(+1)/PV-1)
+    + beta*(Zc(+1)/Zc)^(-gamma)*kappaV*(pi(+1)*PV(+1)/PV-1)
     *(pi(+1)*PV(+1)/PV)^2/pi(+1)*V(+1)/V =0;
 
 // Flexible-price counterpart: law of one price
@@ -801,6 +811,9 @@ PVstar=PVstar_ss;
 C = C_ss;
 C_g =C_g_ss;
 C_s =C_s_ss;
+// GHH composite at SS (chi = 1): Zc_ss = C_ss - chi0*N_ss^(1+psi)/(1+psi)
+Zc   = C_ss - chi0*N_ss^(1+psi)/(1+psi);
+Zc_f = C_ss - chi0*N_ss^(1+psi)/(1+psi);
 C_f = C_ss;
 C_g_f = C_g_ss;
 C_s_f = C_s_ss;

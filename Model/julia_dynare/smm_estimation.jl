@@ -490,9 +490,9 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
     kappaw = length(θ) >= 36 ? θ[36] :
              let v = get_param_val(context,"kappaw"); isnan(v) ? 115.0 : v end
 
-    (!(0<epsY<5)||!(0<epsM<2)||ilabcosts<=0||kappaV<=0||abs(rho_om)>=1||
-     any(<(0),sigma_om_vec)||abs(rho_A)>=1||any(<(0),isigma_tfp)||abs(rho_pvstar)>=1||
-     sigma_pvstar<0||abs(rho_xi)>=1||sigma_xi<0||
+    (!(0<epsY<5)||!(0<epsM<2)||ilabcosts<=0||kappaV<=0||rho_om<0||rho_om>=1||
+     any(<(0),sigma_om_vec)||rho_A<0||rho_A>=1||any(<(0),isigma_tfp)||rho_pvstar<0||rho_pvstar>=1||
+     sigma_pvstar<0||rho_xi<0||rho_xi>=1||sigma_xi<0||
      !(0.1<etastar<8.0)||kappaw<0||kappaw>1e4) && return NAN58, false
 
     set_param!(context,"kappaw",kappaw)

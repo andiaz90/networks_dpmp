@@ -755,6 +755,16 @@ function recompute_ss!(context, epsY, epsM, baseline, endo_names; etastar=nothin
      all(isfinite, pH_ss) && all(>(0), pH_ss) && all(isfinite, Yi_ss)) || return false
     upd("w",w_ss); upd("Q",Q_ss); upd("C",C_ss); upd("GDP",GDP); upd("TB",TB)
     for i in 1:nsec; upd("PH_$(i)",pH_ss[i]); upd("Y_$(i)",Yi_ss[i]); upd("L_$(i)",inner.zero[nsec+i]); end
+    # GHH preferences: rescale the disutility so the recomputed SS still satisfies
+    # MRS = chi0*N^psi = w, then refresh the composite Zc = C - chi0*N^(1+psi)/(1+psi)
+    # and aggregate labor N so the linearization point solves the new preference
+    # block exactly (chi = 1 at SS). chi0 tracks C_ss as epsY/epsM/etastar move.
+    N_new    = sum(@view inner.zero[nsec+1:2*nsec])
+    chi0_new = baseline.chi_val * C_ss^baseline.gamma_val
+    Zc_new   = C_ss - chi0_new * N_new^(1 + baseline.psi_val) / (1 + baseline.psi_val)
+    (isfinite(chi0_new) && isfinite(Zc_new) && Zc_new > 0) || return false
+    set_param!(context, "chi0", chi0_new)
+    upd("N", N_new); upd("Zc", Zc_new); upd("Zc_f", Zc_new)
     return true
   catch
     # Any unexpected failure in the SS recompute is treated as a non-convergence
@@ -811,9 +821,9 @@ function smm_model_moments(θ, context, baseline, endo_names)
     rho_pvstar=θ[31]; sigma_pvstar=θ[32]; rho_xi=θ[33]; sigma_xi=θ[34]
     etastar = length(θ) >= 35 ? θ[35] : baseline.etastar_val
 
-    (!(0<epsY<5)||!(0<epsM<2)||ilabcosts<=0||kappaV<=0||abs(rho_om)>=1||
-     any(sigma_om_vec.<0)||abs(rho_A)>=1||any(isigma_tfp.<0)||abs(rho_pvstar)>=1||
-     sigma_pvstar<0||abs(rho_xi)>=1||sigma_xi<0||
+    (!(0<epsY<5)||!(0<epsM<2)||ilabcosts<=0||kappaV<=0||rho_om<0||rho_om>=1||
+     any(sigma_om_vec.<0)||rho_A<0||rho_A>=1||any(isigma_tfp.<0)||rho_pvstar<0||rho_pvstar>=1||
+     sigma_pvstar<0||rho_xi<0||rho_xi>=1||sigma_xi<0||
      !(0.1<etastar<8.0)) && return NAN58, false
 
     set_param!(context,"ilabcosts",ilabcosts); set_param!(context,"kappaV",kappaV)
