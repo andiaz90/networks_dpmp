@@ -48,7 +48,7 @@ function write_params_mod(mod_dir::String, p::NamedTuple)
         _wp(io, "sigma_L_agg",  p.sigma_L_agg_val)
         _wp(io, "ilabcosts",    p.ilabcosts_val)
         _wp(io, "gamma",        p.gamma_val)
-        _wp(io, "psi",          get(p, :psi_val, 1.5))
+        _wp(io, "psi",          get(p, :psi_val, 1.0))
         # GHH disutility scale chi0 = chi_weight * C_ss^gamma (holds SS at KPR
         # values). Falls back to C_ss^gamma (chi_weight = 1) if not supplied.
         _wp(io, "chi0",         get(p, :chi0_val, p.C_ss^p.gamma_val))
@@ -432,7 +432,7 @@ const CSV_PARAM_NAMES = vcat(
 const LB = [1e-3; 0.78; 0.19; log(1e3);   0.00;  0.10;
             fill(1e-4, 12);
             fill(1e-5, 12);
-            0.50;  0.005; 0.50; 0.0;  0.10;   # rho_xi LB 0.00->0.50: demand shock is persistent (beta-prior convention; data autocorr(Q)=0.72)
+            0.50;  0.005; 0.00; 0.0;  0.50;
             0.0]      # kappaw ≥ 0 (0 = flexible wages)
 const UB = [50.0; 0.82; 0.21; log(1e8);   0.99;  0.99;
             fill(0.10, 12);
@@ -463,31 +463,11 @@ const MOMENT_BLOCKS = [
 ]
 
 # ---- Weighting matrix ------------------------------------------------------ #
-# Sectoral value-added shares (Chile), fixed, for ECONOMIC-SIZE moment weighting.
-# From the model steady-state VA decomposition (%ΣVA); swap for official national-
-# accounts sectoral GDP shares if/when preferred. Order = the 12 model sectors.
-const SECTOR_VA_SHARE = let s = [5.07, 12.63, 15.87, 2.90, 3.14, 3.34,
-                                 10.93, 6.71, 2.13, 26.03, 11.08, 0.17]
-    s ./ sum(s)
-end
-
 function build_weighting_matrix(dm::Vector{<:Real})
     w = ones(N_MOMENTS)
-    # Sectoral volatility moments 1:36 = output(1:12), price(13:24), labor(25:36).
-    # Weight each by the sector's VALUE-ADDED SHARE (economic size), NOT 1/d².
-    # WHY: 1/d^2 pathologically over-weighted the SMALLEST-volatility sector —
-    # Public Admin (0.17% of VA, data std 0.011) received weight ~7650, about
-    # 1200x Agriculture, and its std(Y) miss alone was 40% of the objective.
-    # Size-weighting makes the objective track economic relevance; cross-sector
-    # ORDERING stays disciplined by the rank-correlation moments (44-46).
-    # SECT_BLOCK_W = total weight per 12-sector block (tunable).
-    SECT_BLOCK_W = 1000.0
-    for k in 1:36
-        sec = ((k - 1) % 12) + 1
-        w[k] = SECT_BLOCK_W * SECTOR_VA_SHARE[sec]
-    end
-    # Aggregate stds (GDP, pi, TB, Q): keep inverse-squared-data weighting.
-    for k in [37, 38, 40, 41]
+    # 1:36 sectoral stds + 37,38,40,41 aggregate stds: inverse-squared data
+    # value (percent-error metric, scale-free across moments of different size)
+    for k in vcat(1:36, [37, 38, 40, 41])
         d = abs(dm[k]); w[k] = d > 1e-4 ? 1.0/d^2 : 1.0/0.01^2
     end
     w[39] *= 0.20     # corr(GDP,π): structurally hard for supply-shock model

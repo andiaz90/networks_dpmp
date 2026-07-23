@@ -28,11 +28,6 @@ using LinearAlgebra, Statistics, StatsBase, Printf, Dates
 using NLsolve, CSV, DataFrames, Dynare
 using CMAEvolutionStrategy
 
-# θ-REDUCTION: SMM_PIN holds a full 36-vector whose 28 non-transmission entries PIN
-# the objective (elasticities, 24 measured sectoral shock sizes, external rho/sigma).
-# Only the 8 transmission params are searched. This is now the ONLY estimation mode.
-const SMM_PIN = Ref{Union{Nothing,Vector{Float64}}}(nothing)
-
 # Thrown from the CMA-ES objective when the wall-clock self-limit is hit, so the
 # optimiser unwinds and the caller can save the best θ before SLURM SIGKILLs the
 # job. Detected by string match so it survives Task/Composite exception wrapping
@@ -345,6 +340,27 @@ function default_theta0(context::Dynare.Context)
 end
 
 
+# =========================================================================== #
+#  6.  WARM START                                                              #
+# =========================================================================== #
+
+function load_warm_start(n_theta::Int)
+    ckpt = joinpath(ESTIMATION_DIR, "smm_checkpoint.csv")
+    if isfile(ckpt)
+        try
+            df = CSV.read(ckpt, DataFrame)
+            θ_prev = Float64.(df.value)
+            if length(θ_prev) == n_theta
+                θ_clamped = clamp.(θ_prev, LB, UB)
+                obj_prev = try parse(Float64, String(df[1, :obj_hat])) catch; NaN; end
+                @printf "  Warm start: smm_checkpoint.csv (obj=%.6f)\n\n" obj_prev
+                return θ_clamped
+            end
+        catch; end
+    end
+    @printf "  No valid checkpoint — using default θ₀.\n\n"
+    return nothing
+end
 
 
 # =========================================================================== #
@@ -473,15 +489,6 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
     # the params_jl.mod value only for legacy 35-length θ vectors.
     kappaw = length(θ) >= 36 ? θ[36] :
              let v = get_param_val(context,"kappaw"); isnan(v) ? 115.0 : v end
-
-    # θ-REDUCTION: override the 28 pinned params with their measured/fixed values.
-    if SMM_PIN[] !== nothing
-        _p = SMM_PIN[]
-        epsY = _p[2]; epsM = _p[3]
-        isigma_tfp   = @view _p[7:18]
-        sigma_om_vec = @view _p[19:30]
-        rho_pvstar   = _p[31]; sigma_pvstar = _p[32]
-    end
 
     (!(0<epsY<5)||!(0<epsM<2)||ilabcosts<=0||kappaV<=0||rho_om<0||rho_om>=1||
      any(<(0),sigma_om_vec)||rho_A<0||rho_A>=1||any(<(0),isigma_tfp)||rho_pvstar<0||rho_pvstar>=1||
@@ -678,38 +685,17 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     W  = build_weighting_matrix(data_moments)
     @printf "  Weighting: proportional std devs + 5× rank correlations.\n\n"
 
-    # Initial θ — θ-REDUCTION (the only mode): pin 28 params via SMM_PIN (elasticities +
-    # 24 measured sectoral shocks + external rho/sigma); estimate only the 8 transmission
-    # params (θ 1,4,5,6,33,34,35,36), seeded at interior values.
+    # Initial θ: data-informed starting values for shock parameters
+    # Option-A layout: θ[7:18]=isigma_tfp, θ[19:30]=sigma_om, θ[32]=sigma_pvstar, θ[34]=sigma_xi
     θ0 = default_theta0(context)
-    θ0[2] = parse(Float64, get(ENV, "SMM_EPSY", "0.80"))   # epsY (Atalay eps_Q) — pinned
-    θ0[3] = parse(Float64, get(ENV, "SMM_EPSM", "0.20"))   # epsM (Atalay eps_m) — pinned
-    _scf = joinpath(DATA_DIR, "sectoral_shock_calibration.csv")
-    if isfile(_scf)
-        _sc = CSV.read(_scf, DataFrame)
-        θ0[7:18]  = Float64.(_sc.isigma_tfp_init)   # measured (may exceed old bounds — pinned, not searched)
-        θ0[19:30] = Float64.(_sc.sigma_om_init)
+    for i in 1:12
+        θ0[6+i]  = max(θ0[6+i],  clamp(y_d[i]*0.4, LB[6+i], UB[6+i]))  # isigma_tfp_i
+        θ0[18+i] = max(θ0[18+i], clamp(y_d[i]*0.3, LB[18+i], UB[18+i])) # sigma_om_i
     end
-    _ecf = joinpath(DATA_DIR, "external_shock_calibration.csv")
-    if isfile(_ecf)
-        _ec = CSV.read(_ecf, DataFrame); _em = Dict(String.(_ec.param) .=> Float64.(_ec.value))
-        haskey(_em, "rho_pvstar")   && (θ0[31] = _em["rho_pvstar"])
-        haskey(_em, "sigma_pvstar") && (θ0[32] = _em["sigma_pvstar"])
-    end
-    SMM_PIN[] = copy(θ0)                  # objective reads the 28 pinned entries from here
-    # 8 FREE transmission params — interior seeds (never at a bound):
-    θ0[1]  = 1.0        # ilabcosts
-    θ0[4]  = log(1e6)   # log(kappaV)
-    θ0[5]  = 0.5        # rho_om
-    θ0[6]  = 0.5        # rho_A
-    θ0[33] = 0.7        # rho_xi (persistent demand shock; data autocorr(Q)=0.72)
-    θ0[34] = 0.010      # sigma_xi (small: a persistent shock needs less innovation size)
-    θ0[35] = 2.0        # etastar
-    θ0[36] = 100.0      # kappaw
-    θ0 = clamp.(θ0, LB, UB)              # pinned dims clamped so scaled space stays [0,1]; objective overrides exactly
-    @printf "  θ-reduction: 8 transmission params estimated, 28 pinned.\n"
-    @printf "  pins: epsY=%.2f epsM=%.2f | 24 measured sectoral shocks | rho_pvstar=%.3f sigma_pvstar=%.3f\n" SMM_PIN[][2] SMM_PIN[][3] SMM_PIN[][31] SMM_PIN[][32]
-    @printf "  free seeds: sigma_xi=%.3f etastar=%.2f ilabcosts=%.2f kappaw=%.0f\n" θ0[34] θ0[35] θ0[1] θ0[36]
+    θ0[32] = max(θ0[32], 0.05)   # sigma_pvstar
+    θ0[34] = max(θ0[34], 0.02)   # sigma_xi
+    θ_warm = load_warm_start(N_THETA)
+    θ0 = clamp.(something(θ_warm, θ0), LB, UB)
 
     # Pre-flight
     @printf "=== PRE-FLIGHT ===\n"
@@ -729,15 +715,18 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     end
 
     m_test, ok_test = _safe_moments(θ0)
-    if !ok_test || any(isnan, m_test)
-        # Interior free seeds didn't solve — retry at the values main_SOE_gap.jl used
-        # (known to solve), keeping the 28 pins.
-        @printf "  Interior seeds failed pre-flight; retrying free seeds at known-solving values.\n"
-        θ0[1]  = clamp(0.18,       LB[1],  UB[1])    # ilabcosts
-        θ0[4]  = clamp(log(4.6e6), LB[4],  UB[4])    # log(kappaV)
-        θ0[34] = clamp(0.020,      LB[34], UB[34])   # sigma_xi (was 0.049; keep the fallback modest post-discipline)
-        θ0[35] = clamp(6.0,        LB[35], UB[35])   # etastar
-        m_test, ok_test = _safe_moments(θ0)
+    if (!ok_test || any(isnan, m_test)) && θ_warm !== nothing
+        # The warm-start checkpoint may itself sit on a θ that no longer solves
+        # (e.g. after a mod change). Don't abort — retry from the default θ₀.
+        @printf "  Warm-start θ₀ failed pre-flight; retrying from default θ₀.\n"
+        θ0_def = clamp.(default_theta0(context), LB, UB)
+        for i in 1:12
+            θ0_def[6+i]  = max(θ0_def[6+i],  clamp(y_d[i]*0.4, LB[6+i], UB[6+i]))
+            θ0_def[18+i] = max(θ0_def[18+i], clamp(y_d[i]*0.3, LB[18+i], UB[18+i]))
+        end
+        θ0_def[32] = max(θ0_def[32], 0.05); θ0_def[34] = max(θ0_def[34], 0.02)
+        m_test, ok_test = _safe_moments(θ0_def)
+        ok_test && !any(isnan, m_test) && (θ0 = θ0_def)
     end
     if !ok_test || any(isnan, m_test)
         @printf "  FAILED: NaN at %s\n" string(findall(isnan, m_test))
@@ -759,48 +748,13 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     if get(ENV, "SMM_REPORT_ONLY", "0") in ("1", "true")
         @printf "  SMM_REPORT_ONLY set — fit report printed above, skipping CMA-ES.\n"
         @printf "  (smm_estimates.csv / checkpoint NOT modified.)\n\n"
-
-        # ── ENGINE CROSS-CHECK (2026-07) ─────────────────────────────────────
-        # Score the IN-PROCESS moment engine at the CHECKPOINT θ, so its
-        # per-block objective can be compared block-by-block against the
-        # Dynare-subprocess table that main_SOE_gap.jl prints at the SAME θ.
-        # The two solve paths share the .mod and Dynare's perturbation solver but
-        # NOT the steady state: smm_model_moments normalises by the SS that
-        # recompute_ss_cached! produces, whereas main normalises by the Dynare
-        # subprocess SS. If the checkpoint's recorded obj (~95) and main's
-        # recomputed obj (~40) disagree, this localises the gap:
-        #   • all 7 blocks off by a common ratio ⇒ global SS-scale difference;
-        #   • one block exploding ⇒ a specific variable's SS diverges (watch the
-        #     tiny sectors: Public Admin SS(Y)=0.0022 amplifies any SS error).
-        _ckpt = joinpath(ESTIMATION_DIR, "smm_checkpoint.csv")
-        if isfile(_ckpt)
-            _cdf = CSV.read(_ckpt, DataFrame)
-            θ_ck = Float64.(_cdf.value)
-            if length(θ_ck) == N_THETA
-                m_ck, ok_ck = smm_model_moments(θ_ck, context, baseline, endo_names)
-                if ok_ck && !any(isnan, m_ck)
-                    ψc   = data_moments .- m_ck
-                    objc = dot(ψc, W * ψc)
-                    _blk(a,b) = dot(ψc[a:b], W[a:b,a:b] * ψc[a:b])
-                    @printf "\n  ── ENGINE CROSS-CHECK: in-process engine at CHECKPOINT θ ──\n"
-                    @printf "  obj(in-process, checkpoint θ) = %.4f   [checkpoint recorded %.4f]\n" objc _cdf.obj_hat[1]
-                    @printf "  Per-block: Y=%.3f PH=%.3f L=%.3f Agg=%.3f Rank=%.3f CorrYP=%.3f NLab=%.3f\n" _blk(1,12) _blk(13,24) _blk(25,36) _blk(37,43) _blk(44,46) _blk(47,58) _blk(59,60)
-                    @printf "  Compare these 7 blocks to main_SOE_gap.jl's Dynare table (same θ):\n"
-                    @printf "  uniform ratio ⇒ global SS scale; one block exploding ⇒ that variable's SS diverges.\n\n"
-                else
-                    @printf "  [cross-check] in-process eval failed at checkpoint θ (ok=%s, NaN=%s)\n" ok_ck string(any(isnan, m_ck))
-                end
-            end
-        end
         return θ0, obj_test, m_test
     end
 
     # CMA-ES
     max_evals = 300_000
-    _FREE = [1, 4, 5, 6, 33, 34, 35, 36]   # the 8 estimated transmission params
     @printf "--- CMA-ES ---\n"
-    @printf "  %d FREE params (of %d; %d pinned) | %d moments | max %d evals | %d threads\n" length(_FREE) N_THETA (N_THETA-length(_FREE)) N_MOMENTS max_evals n_threads_active
-    @printf "  free: %s\n" join(PARAM_LABELS[_FREE], ", ")
+    @printf "  %d params | %d moments | max %d evals | %d threads\n" N_THETA N_MOMENTS max_evals n_threads_active
     @printf "  %-6s  %-10s  %-54s  %-7s  %-8s  %-8s\n" "eval" "best_obj" "[Y    PH    L     Agg   Rank  CorrYP]" "fail" "ms/eval" "Klein%"
     @printf "  %s\n" repeat("-",90)
 
@@ -839,8 +793,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         (max_seconds < Inf && (time() - t_start[]) > max_seconds) && throw(SMMTimeout())
 
         tid   = _tid_cma()
-        θ = copy(SMM_PIN[])           # 36-vec: 28 pinned entries; 8 free set below
-        θ[_FREE] = LB[_FREE] .+ θ_sc .* span   # unscale the 8 free dims [0,1] → original
+        θ     = LB .+ θ_sc .* span    # unscale [0,1] → original parameter space
         # A single bad evaluation must NEVER take down a multi-hour run. Any
         # exception inside the moment computation is converted to the failure
         # penalty (1e8); only SMMTimeout is allowed to propagate.
@@ -924,15 +877,14 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     # hundreds of evaluations on infeasible or uninformative candidates.
     # CMAEvolutionStrategy.jl takes scalar sigma — pass the mean, but
     # pre-scale the parameter space so all dimensions have unit range.
-    insigma = 0.25   # initial step for the 8-dim reduced search (larger avoids early stall)
+    insigma = 0.08   # 8% of [0,1] after rescaling — tighter start prevents premature step-size collapse
 
     # Rescale θ to [0,1] so CMA-ES works in a unit hypercube.
     # The objective wrapper maps back to the original scale.
-    # TRUE 8-dim search: scale only the 8 free transmission dims to [0,1].
-    span  = UB[_FREE] .- LB[_FREE]
-    θ0_sc = (clamp.(θ0[_FREE], LB[_FREE], UB[_FREE]) .- LB[_FREE]) ./ span
-    LB_sc = zeros(length(_FREE))
-    UB_sc = ones(length(_FREE))
+    span  = UB .- LB
+    θ0_sc = (clamp.(θ0, LB, UB) .- LB) ./ span     # scaled θ₀ ∈ [0,1]
+    LB_sc = zeros(N_THETA)
+    UB_sc = ones(N_THETA)
 
     # The optimiser is wrapped so that a wall-clock timeout OR any unexpected
     # internal failure does not discard hours of search — best_θ is always the

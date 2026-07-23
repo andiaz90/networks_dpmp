@@ -25,3 +25,6 @@ Markdown wrappers for the papers in `Literatura`.
 - [nakamura_steinsson_2008.md](nakamura_steinsson_2008.md) — original: `nakamura_steinsson_2008.pdf`
 - [tnt_mariana.md](tnt_mariana.md) — original: `tnt_mariana.pdf`
 - [xmas.md](xmas.md) — original: `xmas.pdf`
+- [foerster_sarte_watson_2011_jpe.md](foerster_sarte_watson_2011_jpe.md) — Foerster, Sarte & Watson (2011, JPE), sectoral vs aggregate shocks (structural factor analysis). PDF: download.
+- [atalay_2017_aej_macro.md](atalay_2017_aej_macro.md) — Atalay (2017, AEJ:Macro), how important are sectoral shocks / substitution elasticities. PDF: download.
+- [schmitt_grohe_uribe_2018_tot.md](schmitt_grohe_uribe_2018_tot.md) — Schmitt-Grohé & Uribe (2018, IER), how important are terms-of-trade shocks (<10%; ToT disconnect). PDF: download.

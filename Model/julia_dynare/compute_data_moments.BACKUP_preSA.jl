@@ -245,7 +245,7 @@ end
 # Mapping: CSV-alpha position → model sector number
 ALPHA_TO_MODEL = [1, 10, 5, 4, 8, 3, 2, 11, 12, 9, 7, 6]
 
-fname_emp = joinpath(DATA_DIR, "count_workers_by_sector_sa.csv")  # SA (raw: count_workers_by_sector.csv)
+fname_emp = joinpath(DATA_DIR, "count_workers_by_sector.csv")
 emp_df    = CSV.read(fname_emp, DataFrame)
 
 # First column is date (YYYY-MM-DD); columns 2–13 are sector employment
@@ -270,7 +270,7 @@ L_qrt, yr_q_emp, qt_q_emp = monthly_to_quarterly(L_monthly, yr_m_emp, mth_m_emp)
 
 @printf "\n--- 2. Loading price deflators ---\n"
 
-fname_defl = joinpath(DATA_DIR, "deflactor_pib_sa.csv")  # SA (raw: deflactor_pib.csv)
+fname_defl = joinpath(DATA_DIR, "deflactor_pib.csv")
 
 # File has 3 metadata rows (SERIES, DESCRIPCION, UNIDAD), then data rows.
 # We read everything as strings, skip the header rows.
@@ -359,7 +359,7 @@ P_agg = P_raw[:, 28]   # total GDP deflator (column 28)
 #   pib_num 28 = Admón. pública               → sector 12
 #   pib_num 31 = PIB total (col 32)           → GDP
 
-fname_pib_csv = joinpath(DATA_DIR, "pib_sectorial_bc_sa.csv")  # SA (raw: pib_sectorial_bc.csv)
+fname_pib_csv = joinpath(DATA_DIR, "pib_sectorial_bc.csv")
 Y_sec_raw     = Matrix{Float64}(undef, 0, NSEC)
 GDP_data      = Float64[]
 yr_y          = Int[]

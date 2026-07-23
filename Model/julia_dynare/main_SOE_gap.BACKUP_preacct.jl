@@ -649,29 +649,6 @@ L_ss   = inner_sol.zero[nsec+1:2*nsec]
 Vi_ss  = inner_sol.zero[2*nsec+1:3*nsec]
 Yi_ss  = inner_sol.zero[3*nsec+1:4*nsec]
 
-# ── SS ACCOUNTING DIAGNOSTIC (2026-07): locate the GDP=C+TB vs ΣVA gap ──
-# National-accounts identity: with goods markets clearing, C+TB ≡ ΣVA exactly
-# (nominal consumption Σ(pH·CH+PV·CF) = C by the demand functions, and
-# Σ pH·Y = Σ PM·M + Σ pH·CH + PX·X by clearing). Any gap therefore isolates to
-# ONE of: (a) a goods-market-clearing residual (nested SS solver not converged),
-# or (b) a consumption-aggregation inconsistency. This block prints each piece.
-let
-    interm_use = zeros(nsec)
-    for i in 1:nsec, j in 1:nsec
-        interm_use[i] += beta_mat[j,i] * (PMi_ss[j]/pH_ss[i])^epsM_vec[j] * M_ss[j]
-    end
-    gmc_resid = Yi_ss .- CHi_ss .- Xi_ss .- interm_use            # ≈ 0 if markets clear
-    nom_cons  = sum(pH_ss .* CHi_ss) + PV_ss * sum(CFi_ss)        # should equal C_ss
-    VA_chk    = sum(pH_ss .* Yi_ss .- PMi_ss .* M_ss .- PV_ss .* Vi_ss)
-    GDP_chk   = C_ss + (PX_ss*X_ss - PV_ss*(sum(Vi_ss)+sum(CFi_ss)))
-    @printf "  [SS-ACCT] outer residual_norm = %.3e (converged=%s)\n" ss_result.residual_norm string(converged(ss_result))
-    @printf "  [SS-ACCT] max|goods-mkt clearing resid| = %.3e   Σ|resid| = %.3e\n" maximum(abs, gmc_resid) sum(abs, gmc_resid)
-    @printf "  [SS-ACCT] nominal consumption Σ(pH·CH+PV·CF) = %.4f  vs  C_ss = %.4f  (gap %+.4f)\n" nom_cons C_ss (nom_cons - C_ss)
-    @printf "  [SS-ACCT] ΣVA = %.4f  vs  GDP = %.4f  (gap %+.4f)\n" VA_chk GDP_chk (VA_chk - GDP_chk)
-    worst = sortperm(abs.(gmc_resid), rev=true)[1:min(3,nsec)]
-    @printf "  [SS-ACCT] worst-clearing sectors: %s\n" join(["$(w): resid=$(round(gmc_resid[w],digits=4))" for w in worst], "  ")
-end
-
 V_ss          = sum(Vi_ss)
 CF_ss         = sum(CFi_ss)
 mkupV         = 1.0

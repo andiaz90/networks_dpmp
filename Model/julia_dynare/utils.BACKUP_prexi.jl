@@ -432,7 +432,7 @@ const CSV_PARAM_NAMES = vcat(
 const LB = [1e-3; 0.78; 0.19; log(1e3);   0.00;  0.10;
             fill(1e-4, 12);
             fill(1e-5, 12);
-            0.50;  0.005; 0.50; 0.0;  0.10;   # rho_xi LB 0.00->0.50: demand shock is persistent (beta-prior convention; data autocorr(Q)=0.72)
+            0.50;  0.005; 0.00; 0.0;  0.10;
             0.0]      # kappaw ≥ 0 (0 = flexible wages)
 const UB = [50.0; 0.82; 0.21; log(1e8);   0.99;  0.99;
             fill(0.10, 12);

@@ -237,20 +237,13 @@ modalphaV = alpha_V
 beta_val = 0.986        # quarterly discount factor (~5.7% annual discount rate)
 epsilon  = 10.0         # variety elasticity (Ferrante et al. 2023)
 gamma    = 2.0          # risk aversion / inverse IES
-psi      = parse(Float64, get(ENV, "SMM_PSI", "1.5"))  # inverse Frisch (XMAS posterior ≈1.5, García et al. WP833); env SMM_PSI
+psi      = parse(Float64, get(ENV, "SMM_PSI", "1.0"))  # inverse Frisch; env-tunable (default 1.0)
 chi      = 1.0          # labor disutility weight
 
 # Rotemberg adjustment costs (κ_i = θ(ε-1) / [(1-θ)(1-θβ)])
 # theta_vec is the FREQUENCY of price adjustment (fraction of firms that reset each
 # quarter). Calvo stickiness = probability of NOT adjusting = 1 - theta_vec.
-# theta_vec = MONTHLY frequency of price adjustment. Chilean vector built by
-# Data/build_fpa_vector_chile.py: Pastén et al. (2020) US PPI monthly freqs
-# rescaled US→Chile, anchored to Albagli et al. (2026) regular-PPI manufacturing
-# frequency (0.252). The model is QUARTERLY, so time-aggregate to a quarterly
-# frequency before the Calvo→Rotemberg map: θ_q = 1 - (1-θ_m)^3 (constant hazard).
-# Default ON; set SMM_FPA_QUARTERLY=0 to restore the legacy (monthly-as-quarterly).
-theta_q  = get(ENV, "SMM_FPA_QUARTERLY", "1") == "1" ? (1 .- (1 .- theta_vec).^3) : theta_vec
-stick    = 1 .- theta_q
+stick    = 1 .- theta_vec
 modkappa = stick .* (epsilon - 1) ./ ((1 .- stick) .* (1 .- stick .* beta_val))
 
 # Goods vs. services classification
@@ -262,7 +255,7 @@ modgammag = spend_good ./ sum(spend_good)  # within-goods sector shares γ^g_i
 modgammas = spend_serv ./ sum(spend_serv)  # within-services sector shares γ^s_i
 
 # Labor adjustment cost (set to zero in baseline — controlled by ilabcosts_val below)
-modcl    = fill(parse(Float64, get(ENV, "SMM_CL", "0.0")), nsec)  # sectoral labor reallocation cost (env SMM_CL; 0 = free reallocation, the current baseline)
+modcl    = zeros(nsec)
 modclneg = zeros(nsec)
 modcm    = zeros(nsec)
 
@@ -561,8 +554,8 @@ ss_result = nlsolve(
         gamma, chi, psi, A_vec, tb_target
     ),
     x_guess;
-    ftol = 1e-10,
-    show_trace = get(ENV, "SS_TRACE", "0") == "1",   # 1000-iter trace off by default (SS_TRACE=1 to debug)
+    ftol = 1e-14,
+    show_trace = !smm_called,
     method = :trust_region,
 )
 
@@ -648,29 +641,6 @@ M_ss   = inner_sol.zero[1:nsec]
 L_ss   = inner_sol.zero[nsec+1:2*nsec]
 Vi_ss  = inner_sol.zero[2*nsec+1:3*nsec]
 Yi_ss  = inner_sol.zero[3*nsec+1:4*nsec]
-
-# ── SS ACCOUNTING DIAGNOSTIC (2026-07): locate the GDP=C+TB vs ΣVA gap ──
-# National-accounts identity: with goods markets clearing, C+TB ≡ ΣVA exactly
-# (nominal consumption Σ(pH·CH+PV·CF) = C by the demand functions, and
-# Σ pH·Y = Σ PM·M + Σ pH·CH + PX·X by clearing). Any gap therefore isolates to
-# ONE of: (a) a goods-market-clearing residual (nested SS solver not converged),
-# or (b) a consumption-aggregation inconsistency. This block prints each piece.
-let
-    interm_use = zeros(nsec)
-    for i in 1:nsec, j in 1:nsec
-        interm_use[i] += beta_mat[j,i] * (PMi_ss[j]/pH_ss[i])^epsM_vec[j] * M_ss[j]
-    end
-    gmc_resid = Yi_ss .- CHi_ss .- Xi_ss .- interm_use            # ≈ 0 if markets clear
-    nom_cons  = sum(pH_ss .* CHi_ss) + PV_ss * sum(CFi_ss)        # should equal C_ss
-    VA_chk    = sum(pH_ss .* Yi_ss .- PMi_ss .* M_ss .- PV_ss .* Vi_ss)
-    GDP_chk   = C_ss + (PX_ss*X_ss - PV_ss*(sum(Vi_ss)+sum(CFi_ss)))
-    @printf "  [SS-ACCT] outer residual_norm = %.3e (converged=%s)\n" ss_result.residual_norm string(converged(ss_result))
-    @printf "  [SS-ACCT] max|goods-mkt clearing resid| = %.3e   Σ|resid| = %.3e\n" maximum(abs, gmc_resid) sum(abs, gmc_resid)
-    @printf "  [SS-ACCT] nominal consumption Σ(pH·CH+PV·CF) = %.4f  vs  C_ss = %.4f  (gap %+.4f)\n" nom_cons C_ss (nom_cons - C_ss)
-    @printf "  [SS-ACCT] ΣVA = %.4f  vs  GDP = %.4f  (gap %+.4f)\n" VA_chk GDP_chk (VA_chk - GDP_chk)
-    worst = sortperm(abs.(gmc_resid), rev=true)[1:min(3,nsec)]
-    @printf "  [SS-ACCT] worst-clearing sectors: %s\n" join(["$(w): resid=$(round(gmc_resid[w],digits=4))" for w in worst], "  ")
-end
 
 V_ss          = sum(Vi_ss)
 CF_ss         = sum(CFi_ss)
