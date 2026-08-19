@@ -1,10 +1,10 @@
 param,estimate,std_err,t_stat
-ilabcosts,4.706140313804723,0.0,Inf
+ilabcosts,1.0,0.0,Inf
 epsY,0.8,0.0,Inf
 epsM,0.2,0.0,Inf
-log(kappaV),10.967754144931346,0.0,Inf
-rho_om,0.01089460307538742,0.0,Inf
-rho_A,0.40434094375826934,0.0,Inf
+log(kappaV),13.815510557964274,0.0,Inf
+rho_om,0.5,0.0,Inf
+rho_A,0.5,0.0,Inf
 isigma_tfp_1,0.02139239044725735,0.0,Inf
 isigma_tfp_2,0.02961954770300888,0.0,Inf
 isigma_tfp_3,0.01788121138834289,0.0,Inf
@@ -31,7 +31,7 @@ sigma_om_11,0.018516031263662337,0.0,Inf
 sigma_om_12,0.005306529280360671,0.0,Inf
 rho_pvstar,0.6950002620072055,0.0,Inf
 sigma_pvstar,0.05440363817808442,0.0,Inf
-rho_xi,0.8280425498718608,0.0,Inf
-sigma_xi,0.038217841386526695,0.0,Inf
-etastar,4.533339773141773,0.0,Inf
-kappaw,48.887682621808835,0.0,Inf
+rho_xi,0.7,0.0,Inf
+sigma_xi,0.01,0.0,Inf
+etastar,1.0,0.0,Inf
+kappaw,100.0,0.0,Inf

@@ -139,7 +139,12 @@ function find_file(candidates, fnames...)
 end
 
 path_cal     = find_file(DATA_CANDIDATES, "sector_calibration.csv")
-path_io      = find_file(DATA_CANDIDATES, "IO_2021_chile.csv")
+# Prefer the DOMESTIC intermediate matrix (2026-08-19) — see the note in
+# main_SOE_gap.jl. The total matrix books imported inputs to domestic
+# suppliers (Utilities<-Mining 0.314 vs 0.013), which distorts exactly the
+# oil / mining / agro exercises these scripts run.
+path_io_dom  = find_file(DATA_CANDIDATES, "IO_2021_chile_domestic.csv")
+path_io      = isempty(path_io_dom) ? find_file(DATA_CANDIDATES, "IO_2021_chile.csv") : path_io_dom
 path_fpa     = find_file(DATA_CANDIDATES, "fpa_vector_few_industries_chile.csv")
 path_sec_mom = find_file(DATA_CANDIDATES, "sectoral_moments.csv")
 

@@ -70,7 +70,7 @@ function _main()
 # <<<  CHANGE THIS to select exercise  >>>
 # 0 = Baseline (all shocks)          1 = Preference shock only
 # 2 = Manufacturing TFP shock only   3 = Monetary policy shock only
-EXERCISE = 2
+EXERCISE = 0
 
 exercise_labels = [
     "Baseline (all shocks)",
@@ -146,7 +146,18 @@ end
 # Run bootstrap_csv.jl once if sector_calibration.csv or sectoral_moments.csv
 # are missing (they are generated from the MATLAB-produced .mat files).
 path_cal     = find_file(DATA_CANDIDATES, "sector_calibration.csv")
-path_io      = find_file(DATA_CANDIDATES, "IO_2021_chile.csv")
+# Prefer the DOMESTIC intermediate matrix (2026-08-19). M_i is the domestic
+# materials bundle — imported inputs are the separate V_i bundle at price PV —
+# so Gamma must be the domestic input composition. IO_2021_chile.csv is the
+# TOTAL matrix (its column sums equal Cuadro 23 'Consumo intermedio'), which
+# books imported inputs to domestic suppliers: Utilities<-Mining reads 0.314
+# under the total matrix but 0.013 under the domestic one, because Chile
+# imports the fuel it burns. Relative Frobenius gap between the two Gammas is
+# 0.397. Written by Data/build_sector_calibration.py; falls back to the total
+# matrix with a warning if absent.
+path_io_dom  = find_file(DATA_CANDIDATES, "IO_2021_chile_domestic.csv")
+path_io      = isempty(path_io_dom) ? find_file(DATA_CANDIDATES, "IO_2021_chile.csv") : path_io_dom
+io_is_domestic = !isempty(path_io_dom)
 path_fpa     = find_file(DATA_CANDIDATES, "fpa_vector_few_industries_chile.csv")
 path_sec_mom = find_file(DATA_CANDIDATES, "sectoral_moments.csv")
 path_agg_mom = find_file(DATA_CANDIDATES, "aggregate_moments.csv")
@@ -154,7 +165,7 @@ path_agg_mom = find_file(DATA_CANDIDATES, "aggregate_moments.csv")
 @printf "  Data root : %s\n" DATA_DIR
 for (p, label) in [
     (path_cal,     "sector_calibration.csv"),
-    (path_io,      "IO_2021_chile.csv"),
+    (path_io,      io_is_domestic ? "IO matrix (DOMESTIC)" : "IO matrix (TOTAL — see note)"),
     (path_fpa,     "fpa_vector CSV"),
     (path_sec_mom, "sectoral_moments.csv"),
     (path_agg_mom, "aggregate_moments.csv"),
@@ -165,7 +176,12 @@ println()
 
 missing_files = String[]
 isempty(path_cal)     && push!(missing_files, "sector_calibration.csv")
-isempty(path_io)      && push!(missing_files, "IO_2021_chile.csv")
+isempty(path_io)      && push!(missing_files, "IO_2021_chile_domestic.csv / IO_2021_chile.csv")
+if !io_is_domestic && !isempty(path_io)
+    @printf "  WARNING: using the TOTAL IO matrix — imported inputs are booked to\n"
+    @printf "           domestic suppliers. Run Data/build_sector_calibration.py to\n"
+    @printf "           generate IO_2021_chile_domestic.csv.\n"
+end
 isempty(path_fpa)     && push!(missing_files, "fpa_vector_few_industries_chile.csv")
 
 if !isempty(missing_files)
@@ -297,7 +313,7 @@ chii_b_val   = 0.0024    # debt-risk premium elasticity χ_b — XMAS posterior 
                          # (García et al., BCCh; 100ψ = 0.24 [0.18, 0.30], Bayesian
                          # with Chile EMBIG observable; NFA/quarterly-GDP ratio,
                          # same units as here). Was 0.001 (hand-set) pre-2026-07-08.
-etastar_val  = 3.5       # foreign demand elasticity η*
+etastar_val  = 1.0       # foreign demand elasticity η* — CALIBRATED (paper Table 3; overridden by SMM_ETASTAR below)
 kappaw_val   = 115.0     # Rotemberg wage adj. cost (≈4q Calvo at epsw=10);
                          # overridden by smm_estimates.csv when available;
                          # 0 = flexible wages (nests pre-2026-07 model)
@@ -348,6 +364,9 @@ epsilonV_oil_val  = 0.5           # CES elasticity between oil and non-oil impor
 rho_postar_val    = 0.9           # AR(1) persistence of world oil price
 sigma_postar_val  = 0.02          # std dev of oil price innovation
 POstar_ss_val     = 1.0           # SS world oil price (normalized, same as PVstar_ss)
+# Copper sector: world copper price process (measured from the copper price series; pinned)
+rho_pc_val        = parse(Float64, get(ENV, "SMM_RHO_PC", "0.90"))     # AR(1) persistence of world copper price
+sigma_pc_val      = parse(Float64, get(ENV, "SMM_SIGMA_PC", "0.075"))  # copper-price innovation std (calibrate to std(PH_2)=0.167)
 
 # Preference (xi) shock
 rho_xi_val   = 0.80
@@ -399,6 +418,7 @@ shock_eps_i_val      = Float64(sigma_i_val  > 0)
 shock_eps_pvstar_val = Float64(EXERCISE == 0 && sigma_pvstar_val > 0)
 shock_eps_xi_val     = Float64(EXERCISE == 0 && sigma_xi_val > 0)
 shock_eps_postar_val = Float64(EXERCISE == 0 && sigma_postar_val > 0 && any(modalphaOil .> 0))
+shock_eps_pc_val = Float64(EXERCISE == 0 && sigma_pc_val > 0)   # copper price shock active in baseline
 shock_epsA_val       = ones(nsec)
 
 
@@ -417,8 +437,20 @@ param_names = ["ilabcosts", "epsY", "epsM", "kappaV", "rho_om1",
 
 smm_param_source = "hard-coded defaults"
 
+# Set by the provenance guard below. `false` means any objective stored
+# alongside θ was computed on a different model / moment set and must not be
+# reported next to this run's fit table.
+theta_obj_comparable = false
+_obj_changed = String["(no θ file loaded)"]
+
 _theta_candidates = [(f, mtime(f)) for f in (smm_est_file, smm_ckpt_file) if isfile(f)]
-sort!(_theta_candidates, by = x -> x[2], rev = true)   # newest first
+# Newest first; on a tie prefer smm_estimates.csv (2026-08-19). smm_run writes
+# estimates and THEN calls save_checkpoint, so a completed run leaves both files
+# with the same timestamp. The default sort is unstable, so which one won was a
+# coin flip — and only the estimates branch pairs with smm_results.csv, i.e.
+# only that branch enables the Klein-vs-QZ diagnostic comparison at the end of
+# this script. Deterministic tie-break keeps that check reachable.
+sort!(_theta_candidates, by = x -> (x[2], endswith(x[1], "smm_estimates.csv")), rev = true)
 _theta_file = isempty(_theta_candidates) ? "" : _theta_candidates[1][1]
 
 if !isempty(_theta_file)
@@ -427,7 +459,25 @@ if !isempty(_theta_file)
         @printf "  WARNING: %s has %d params (current layout: %d) — stale estimation layout.\n" basename(_theta_file) nrow(est_df) length(CSV_PARAM_NAMES)
     end
     _obj_prev = try Float64(est_df.obj_hat[1]) catch; NaN end
-    @printf "  θ source: %s  (obj=%.4f, written %s)%s\n" basename(_theta_file) _obj_prev Libc.strftime("%Y-%m-%d %H:%M", mtime(_theta_file)) (endswith(_theta_file, "checkpoint.csv") ? "  [live best of an unfinished run]" : "")
+
+    # ---- Provenance guard (2026-08-19) ----------------------------------- #
+    # A stored obj_hat is only comparable to the fit table printed at the end
+    # of this script if the model, the moment definitions, the weights and the
+    # data moments are all unchanged since θ was written. See the OBJECTIVE
+    # PROVENANCE block in utils.jl for the incident this prevents.
+    _obj_deps = objective_dep_files(SCRIPT_DIR, MOD_DIR, DATA_DIR)
+    theta_obj_comparable, _obj_changed =
+        check_objective_provenance(ESTIMATION_DIR, _obj_deps, mtime(_theta_file))
+
+    @printf "  θ source: %s  (written %s)%s\n" basename(_theta_file) Libc.strftime("%Y-%m-%d %H:%M", mtime(_theta_file)) (endswith(_theta_file, "checkpoint.csv") ? "  [live best of an unfinished run]" : "")
+    if theta_obj_comparable
+        @printf "  stored obj = %.4f  — comparable: objective definition unchanged since θ was written\n" _obj_prev
+    else
+        @printf "  stored obj = %.4f  ** NOT COMPARABLE to the fit table below **\n" _obj_prev
+        @printf "    changed since θ was written: %s\n" join(_obj_changed, ", ")
+        @printf "    θ is still usable as a parameter vector; its objective is not.\n"
+        @printf "    Re-run the estimator to get an objective on the current model.\n"
+    end
     est    = Dict(String(r.param) => Float64(r.value) for r in eachrow(est_df))
 
     ilabcosts_val    = est["ilabcosts"]
@@ -443,7 +493,8 @@ if !isempty(_theta_file)
     sigma_pvstar_val = est["sigma_pvstar"]
     haskey(est, "rho_xi")   && (rho_xi_val   = est["rho_xi"])
     haskey(est, "sigma_xi") && (sigma_xi_val = est["sigma_xi"])
-    haskey(est, "etastar")  && (etastar_val  = est["etastar"])
+    # etastar (η*) is now CALIBRATED, not estimated — ignore any stale checkpoint value
+    # and set it from SMM_ETASTAR (default 1.0; paper Table 3). See smm_estimation.jl.
     haskey(est, "kappaw")   && (kappaw_val   = est["kappaw"])   # θ[36], added 2026-07-08
     shock_eps_om_vec = Float64.(sigma_om_vec .> 0)   # recompute flags from loaded values
     smm_param_source = basename(_theta_file)
@@ -528,6 +579,7 @@ om_g       = ombar_val
 om_s       = 1 - ombar_val
 chiX_vec   = modchiX
 omegaX     = omegaX_val
+etastar_val = parse(Float64, get(ENV, "SMM_ETASTAR", "1.0"))  # η* CALIBRATED (paper Table 3=1; Feenstra ~1-1.5)
 etastar    = etastar_val
 Ystar      = ystar_ss_val
 alpha_vec  = modalpha
@@ -551,6 +603,23 @@ tb_target = let
         end
     end
     _tb
+end
+
+# ── OPTIONAL SGU-style closure (Schmitt-Grohé & Uribe 2003) ──────────────────
+# By default the SS targets the MEASURED trade balance (tb_target from data) and
+# the net foreign position falls out as Bstar = -TB/(Q(1/β-1)). Setting
+# SMM_BBAR_TARGET (net foreign debt as a fraction of ANNUAL GDP) instead targets
+# the STOCK directly and backs out the implied flow via the SS identity
+#   TB/GDP = 4 · bbar_annual · (1/β − 1)     [factor 4: annual→quarterly GDP]
+# This is the standard SOE calibration (target the observed NIIP; Chile ≈ -0.20),
+# and it lets us hold the debt level fixed for cleaner IRFs (the debt-elastic
+# premium's feedback scales with the SS position). OFF unless the env var is set.
+let _bb = get(ENV, "SMM_BBAR_TARGET", "")
+    if _bb != ""
+        bbar_annual = parse(Float64, _bb)
+        global tb_target = 4 * bbar_annual * (1/beta_val - 1)
+        @printf "  [SGU closure] target foreign debt = %.0f%% of ANNUAL GDP  ->  TB/GDP = %.4f\n" 100*bbar_annual tb_target
+    end
 end
 
 ss_result = nlsolve(
@@ -687,15 +756,32 @@ tbgdp         = TB_ss / GDP_ss
 Bstar_ss      = -TB_ss / (Q_ss * (1 - r_star_ss / Pistar_ss))
 bbar_val      = Q_ss * Bstar_ss / GDP_ss
 
-ygdp_target   = 2.0
-fdebt_target  = 0.70
-ygdp_ss       = Y_ss / GDP_ss
+# Gross output / value added, Chilean IO 2021 (Cuadro 23): 214098+197813 over
+# 214098 = 1.924. Was a round "IMF target 2.0" placeholder; replaced with the
+# number from the same table the calibration is built on (2026-08-19). This
+# check only became meaningful once alpha switched to the gross-output base —
+# under the old cost base the model ratio was 3.29 and could never match.
+ygdp_target   = 1.924
+fdebt_target  = 0.70    # Chile GROSS external debt ≈ 70% of ANNUAL GDP (net IIP ≈ -20%); compare to the ANNUALISED model ratio below
+ygdp_ss       = sum(pH_ss .* Yi_ss) / GDP_ss   # NOMINAL gross output / GDP (was physical Y_ss/GDP — unit mismatch inflated the ratio)
 fdebt_ss      = Q_ss * abs(Bstar_ss) / GDP_ss
 
 # Aggregates for Dynare
 M_tot_ss      = sum(M_ss)
 Y_tot_ss      = sum(pH_ss .* Yi_ss)   # gross output at constant SS relative prices (matches Y in .mod)
 VA_ss_val     = sum(pH_ss .* Yi_ss .- PMi_ss .* M_ss .- PV_ss .* Vi_ss)   # double-deflated VA at SS prices (matches VA in .mod; PIV_ss_i = PV_ss at SS)
+# Copper SS normalization: Pcstar_ss = PH_mining_ss / Q_ss so PH_2 = Q*Pcstar holds at SS with the
+# standard markup SS price (mining looks like a normal sector at SS; only the DYNAMIC pricing differs)
+Pcstar_ss_val = pH_ss[2] / Q_ss
+# Choice-3 mining anchor: output exogenous at Yi_ss[2]; copper export = SS bundle export Xi_ss[2]
+# (residual export coincides with the bundle export at the SS -> SS-neutral)
+Y2_ss_val   = Yi_ss[2]
+X_cu_ss_val = Xi_ss[2]
+# Copper foreign-ownership: share phi_cu of the copper rent WINDFALL (deviation from SS) leaks abroad.
+# SS rent = (PH_2 - MC_2)*Y_2 at SS = markup profit; repatriation is zero at SS (SS-neutral).
+phi_cu_val   = parse(Float64, get(ENV, "SMM_PHI_CU", "0.0"))   # ownership leakage OFF by default; volume GDP handles std(GDP)
+Pi_cu_ss_val = (pH_ss[2] - MCi_ss[2]) * Yi_ss[2]
+PH2_ss_val   = pH_ss[2]   # SS mining price, for the volume-GDP terms-of-trade strip
 Ctotg_ss_val  = sum(gammag_vec .* (p_g_ss ./ P_ss) .* C_g_ss)
 Ctots_ss_val  = sum(gammas_vec .* (p_s_ss ./ P_ss) .* C_s_ss)
 Ctot_ss_val   = Ctotg_ss_val + Ctots_ss_val
@@ -729,7 +815,7 @@ sigma_psi_val = 0.001
 @printf "  TB/GDP target: %.4f  |  world rate (ann.): %.2f%%\n" tb_target 400*(Rworld_ss-1)
 @printf "  Bstar=%.4f  Q*Bstar=%.4f  Q*Bstar/GDP=%.3f (%.1f%%)\n" Bstar_ss (Q_ss*Bstar_ss) (Q_ss*Bstar_ss/GDP_ss) (100*Q_ss*Bstar_ss/GDP_ss)
 @printf "  Gross output/GDP : %.3f  (IMF target: %.1f)%s\n" ygdp_ss ygdp_target (ternary_str(abs(ygdp_ss-ygdp_target)>0.20, "  << off target", ""))
-@printf "  Foreign debt/GDP : %.3f  (IMF target: %.2f)%s\n\n" fdebt_ss fdebt_target (ternary_str(abs(fdebt_ss-fdebt_target)>0.10, "  << off target", ""))
+@printf "  Foreign debt/GDP : %.3f (quarterly-GDP) = %.3f (annual-GDP)  (Chile gross ext. debt≈0.70, net IIP≈-0.20)%s\n\n" fdebt_ss (fdebt_ss/4) (ternary_str(abs(fdebt_ss/4-fdebt_target)>0.15, "  << check", ""))
 
 
 # =========================================================================== #
@@ -739,8 +825,11 @@ sigma_psi_val = 0.001
 #  %GDP shares normalize by GDP_ss = C_ss + TB_ss (expenditure side).         #
 # =========================================================================== #
 
-VAnet_vec = Yi_ss .- M_ss .- Vi_ss
-VAmdl_vec = Yi_ss .- M_ss
+# Price-weighted value added (fixed 2026-07: the old Yi-M-Vi was PHYSICAL —
+# dimensionally inconsistent and gave a spurious ΣVA≠GDP). VA_net now equals
+# GDP by the national-accounts identity (verified by [SS-ACCT] above).
+VAnet_vec = pH_ss .* Yi_ss .- PMi_ss .* M_ss .- PV_ss .* Vi_ss   # net of domestic mats AND imported inputs = true VA
+VAmdl_vec = pH_ss .* Yi_ss .- PMi_ss .* M_ss                     # net of domestic materials only (imports counted in VA)
 VAnet_tot = sum(VAnet_vec)
 VAmdl_tot = sum(VAmdl_vec)
 
@@ -804,11 +893,18 @@ CSV.write(joinpath(TABLES_DIR, "gdp_va_shares_$(tag).csv"), df_va_shares)
 #    ΔVAᵇ_j(S) = [Z[S,j]/pY_j]      · VA_j                                     #
 #  Expanded: VAE_S = VA_S + Σ_{j≠S} ΔVAᶠ_j(S) + Σ_{j≠S} ΔVAᵇ_j(S)             #
 #                                                                             #
-#  NOTE / open issue (flag for Agustín): in this model ALL bilateral inter-   #
-#  mediate flows are domestic (modbeta is the domestic IO matrix); imported   #
-#  inputs Vi are an aggregate composite, not a bilateral flow. Hence the      #
-#  national/total ratios Xᴺ/Xᵀ in eqs (5)-(6) collapse to 1, so model VAE is  #
-#  an upper bound vs the data version that discounts imported-input content.  #
+#  NOTE: in this model ALL bilateral intermediate flows are domestic;         #
+#  imported inputs Vi are an aggregate composite, not a bilateral flow. Hence #
+#  the national/total ratios Xᴺ/Xᵀ in eqs (5)-(6) collapse to 1, so model VAE #
+#  is an upper bound vs the data version that discounts imported-input        #
+#  content.                                                                   #
+#                                                                             #
+#  RESOLVED 2026-08-19: modbeta really IS the domestic matrix now. Until then #
+#  it was built from IO_2021_chile.csv, whose column sums equal Cuadro 23     #
+#  TOTAL intermediate consumption — so the claim in this comment was false    #
+#  and imported inputs were being booked to domestic suppliers. It now loads  #
+#  IO_2021_chile_domestic.csv (BCCh MIP 2021 sheet 1, activity × activity,    #
+#  domestic at basic prices).                                                 #
 # =========================================================================== #
 
 pY_ss_nom   = pH_ss .* Yi_ss                       # nominal gross output (TVT_j)
@@ -952,6 +1048,15 @@ params_nt = (
     sigma_postar_val    = sigma_postar_val,
     POstar_ss_val       = POstar_ss_val,
     shock_eps_postar_val = shock_eps_postar_val,
+    rho_pc_val          = rho_pc_val,
+    sigma_pc_val        = sigma_pc_val,
+    Pcstar_ss_val       = Pcstar_ss_val,
+    shock_eps_pc_val    = shock_eps_pc_val,
+    Y2_ss_val           = Y2_ss_val,
+    X_cu_ss_val         = X_cu_ss_val,
+    phi_cu_val          = phi_cu_val,
+    Pi_cu_ss_val        = Pi_cu_ss_val,
+    PH2_ss_val          = PH2_ss_val,
     PIV_ss_vec          = PIV_ss_vec,
     # Steady state scalars
     w_ss           = w_ss,
@@ -1163,7 +1268,7 @@ try
     n_active = 0
     if isfile(exo_names_file)
         exo_names_jl = String.(CSV.read(exo_names_file, DataFrame).shock)
-        active_set = Set(vcat(["eps_i", "eps_pvstar", "eps_xi"],
+        active_set = Set(vcat(["eps_i", "eps_pvstar", "eps_xi", "eps_pc"],
                               ["epsA_$(i)"   for i in 1:nsec],
                               ["eps_om_$(i)" for i in 1:nsec]))
         for (k, nm) in enumerate(exo_names_jl)
@@ -1199,7 +1304,7 @@ try
         ["Y_$(i)"  for i in 1:nsec],
         ["PH_$(i)" for i in 1:nsec],
         ["L_$(i)"  for i in 1:nsec],
-        ["GDP", "pi", "Q", "TB", "N"]   # N added for corr(N,GDP), corr(N,GDP/N)
+        ["GDP", "GDP_vol", "pi", "Q", "TB", "N"]   # GDP_vol = volume GDP for the aggregate moments
     )
     needed_idx  = [get(endo_idx, nm, 0) for nm in needed_names]
     valid_mask  = needed_idx .> 0
@@ -1250,8 +1355,8 @@ try
     # Employment comovement (same formulas as smm_model_moments.jl):
     # corr(N,GDP) directly; corr(N, GDP/N) via log-deviation (co)variances
     # (Γ is in LEVEL deviations → divide by steady states).
-    m_corr_NGDP = _xcorr_hp("N", "GDP")
-    m_corr_NAPL = let iN = get(ei_sub, "N", 0), iG = get(ei_sub, "GDP", 0)
+    m_corr_NGDP = _xcorr_hp("N", "GDP_vol")
+    m_corr_NAPL = let iN = get(ei_sub, "N", 0), iG = get(ei_sub, "GDP_vol", 0)
         if iN == 0 || iG == 0
             NaN
         else
@@ -1266,11 +1371,11 @@ try
     end
 
     # Aggregate moments
-    m_std_GDP    = _pstd_hp("GDP")
+    m_std_GDP    = _pstd_hp("GDP_vol")
     m_std_pi     = _pstd_hp("pi")
     m_std_Q      = _pstd_hp("Q")
-    m_corr_GDPpi = _xcorr_hp("GDP", "pi")
-    m_corr_GDPQ  = _xcorr_hp("GDP", "Q")
+    m_corr_GDPpi = _xcorr_hp("GDP_vol", "pi")
+    m_corr_GDPQ  = _xcorr_hp("GDP_vol", "Q")
 
     # std(TB/GDP): normalize by steady-state GDP (TB is a level variable)
     i_TB_sub = get(ei_sub, "TB", 0)
@@ -1378,13 +1483,24 @@ smm_model_vec = nothing   # will hold the 60-element model moments from estimati
 
 # Only valid when θ came from smm_estimates.csv — smm_results.csv holds the
 # moments of THAT completed run. A newer checkpoint θ has different moments.
+#
+# AND only valid when the objective definition itself is unchanged
+# (theta_obj_comparable, 2026-08-19). The row-count check below guards the
+# moment LAYOUT but not the model: on 2026-07-24 smm_results.csv had a correct
+# 60 rows while the .mod had since gained eps_pc and GDP_vol, so those moments
+# would have been reported as this run's fit while describing a different
+# economy. Row count is necessary, not sufficient.
 if isfile(smm_res_file) && smm_param_source == "smm_estimates.csv"
-    smm_res = CSV.read(smm_res_file, DataFrame)
-    if hasproperty(smm_res, :model) && nrow(smm_res) == N_MOMENTS
-        smm_model_vec = Float64.(smm_res.model)
-        @printf "\n--- Loaded SMM-reported moments from smm_results.csv ---\n"
-    elseif hasproperty(smm_res, :model)
-        @printf "\n--- smm_results.csv has %d rows ≠ %d — stale layout, ignoring ---\n" nrow(smm_res) N_MOMENTS
+    if !theta_obj_comparable
+        @printf "\n--- smm_results.csv ignored: computed on a different model (%s) ---\n" join(_obj_changed, ", ")
+    else
+        smm_res = CSV.read(smm_res_file, DataFrame)
+        if hasproperty(smm_res, :model) && nrow(smm_res) == N_MOMENTS
+            smm_model_vec = Float64.(smm_res.model)
+            @printf "\n--- Loaded SMM-reported moments from smm_results.csv ---\n"
+        elseif hasproperty(smm_res, :model)
+            @printf "\n--- smm_results.csv has %d rows ≠ %d — stale layout, ignoring ---\n" nrow(smm_res) N_MOMENTS
+        end
     end
 end
 

@@ -371,7 +371,12 @@ function print_steady_state_table(ss_results, sec_results, names_vec,
         nm = string(names_vec[i])[1:min(28, length(string(names_vec[i])))]
         @printf "  %-6d  %-30s  %8.4f  %7.1f%%  %8.4f  %8.4f\n" i nm r.Yi_ss 100*r.Yi_ss/max(Y_tot,1e-10) r.L_ss r.pH_ss
     end
-    @printf "\n  Gross output Y = %.4f   GDP = %.4f   Y/GDP = %.2f\n\n" Y_tot GDP Y_tot/max(GDP,1e-10)
+    # Report the NOMINAL ratio (2026-08-19). Y_tot is a sum of physical
+    # quantities, so Y_tot/GDP is not comparable to the national accounts
+    # (Chile 2021: 1.924) and disagreed with the steady-state accounting block
+    # in the same run — 2.227 here vs 1.830 there. Both are now nominal.
+    Y_tot_nom = sum(Float64.(sec_results.pH_ss) .* Yi_ss)
+    @printf "\n  Gross output (nominal) = %.4f   GDP = %.4f   Y/GDP = %.2f   [physical ΣY = %.4f]\n\n" Y_tot_nom GDP Y_tot_nom/max(GDP,1e-10) Y_tot
 
     # ---- Save CSV -------------------------------------------------------
     df_ss_table = DataFrame(

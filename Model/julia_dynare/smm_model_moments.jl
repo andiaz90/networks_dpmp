@@ -399,14 +399,15 @@ end
     active_shock_indices(context, nsec) -> Vector{Int}
 
 Diagonal positions in Σe to switch on during SMM estimation, resolved by name:
-monetary (eps_i), import price (eps_pvstar), aggregate demand (eps_xi), the 12
+monetary (eps_i), import price (eps_pvstar), aggregate demand (eps_xi), world copper
+price (eps_pc), the 12
 sectoral TFP shocks (epsA_i) and the 12 sectoral demand shocks (eps_om_i).
 Deliberately EXCLUDES eps_postar (oil — off during estimation) and epschi
 (labour supply — off). Returns the indices in the model's exogenous order.
 """
 function active_shock_indices(context, nsec::Int)
     exo = smm_exo_names(context)
-    active = Set{String}(["eps_i", "eps_pvstar", "eps_xi"])
+    active = Set{String}(["eps_i", "eps_pvstar", "eps_xi", "eps_pc"])   # eps_pc = world copper price
     for i in 1:nsec
         push!(active, "epsA_$(i)")
         push!(active, "eps_om_$(i)")

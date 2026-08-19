@@ -7,8 +7,8 @@
 
 // Define variables
 var chi xi Zc Lab_costs Price_costs w VA C Ctot Ctotg Ctots M C_g C_s p_g p_s N pi pi_g pi_s pi_w r om_g om_s vi Y
-PV r_star Rworld pi_e Bstar Pipstar Q TB PX X Ystar V PVstar GDP IMP mkupV CFs CFg
-POstar PO VOil VNon
+PV r_star Rworld pi_e Bstar Pipstar Q TB PX X Ystar V PVstar GDP IMP mkupV CFs CFg X_cu GDP_vol
+POstar PO VOil VNon Pcstar
 // Sectoral demand (taste) shocks om_1..om_nsec and basket normalizers norm_g, norm_s.
 // At steady state om_i = 0 and norm_g = norm_s = 1, so the SS is unchanged.
 om_1 om_2 om_3 om_4 om_5 om_6 om_7 om_8 om_9 om_10 om_11 om_12 norm_g norm_s
@@ -60,8 +60,8 @@ om_1 om_2 om_3 om_4 om_5 om_6 om_7 om_8 om_9 om_10 om_11 om_12 norm_g norm_s
     ;
 
 var C_f Zc_f C_g_f C_s_f CFs_f CFg_f PV_f p_g_f p_s_f r_f N_f Lab_costs_f
-w_f Y_f  Ctot_f Ctots_f Ctotg_f VA_f GDP_f TB_f M_f r_star_f pi_e_f Q_f Bstar_f
-PX_f X_f IMP_f V_f Y_g_f Y_s_f PO_f VOil_f VNon_f
+w_f Y_f  Ctot_f Ctots_f Ctotg_f VA_f GDP_f TB_f M_f r_star_f pi_e_f Q_f Bstar_f GDP_vol_f
+PX_f X_f IMP_f V_f Y_g_f Y_s_f PO_f VOil_f VNon_f X_cu_f
 
 @#for j in 1:nsec
     P_f_@{j}
@@ -102,7 +102,7 @@ var Ygap Ngap GDPgap
 // Canonical order (used to map Sigma_e by NAME in the SMM code):
 //   1=eps_i 2=epschi 3=eps_pvstar 4=eps_postar 5..16=epsA_1..12
 //   17=eps_xi 18..29=eps_om_1..12
-varexo eps_i epschi eps_pvstar eps_postar
+varexo eps_i epschi eps_pvstar eps_postar eps_pc
     @#for i in 1:nsec
         epsA_@{i}
     @#endfor
@@ -122,6 +122,8 @@ rho_pvstar sigma_pvstar rho_xi sigma_xi
 epsw kappaw
 // Oil sector parameters
 epsilonV_oil rho_postar sigma_postar POstar_ss shock_eps_postar
+// Copper sector parameters (world price process)
+rho_pc sigma_pc Pcstar_ss shock_eps_pc Y2_ss X_cu_ss phi_cu Pi_cu_ss PH2_ss
 Ctot_ss Ctotg_ss Ctots_ss VA_ss M_tot_ss Y_ss IMP_ss
 // Shock activation parameters (set by params_jl.mod; 0=off, 1=on)
 shock_eps_i shock_eps_pvstar shock_eps_xi
@@ -427,6 +429,10 @@ VA_f = (
 
 GDP = C + TB;
 GDP_f = C_f + TB_f;
+//% Volume (real) GDP: strips the copper terms-of-trade revaluation, matching the data's
+//% chained-volume GDP rather than a terms-of-trade-inclusive income measure.
+GDP_vol = GDP - (PH_2 - PH2_ss)*X_cu;
+GDP_vol_f = GDP_f - (PH_f_2 - PH2_ss)*X_cu_f;
 
 
 //% Total Intermediate Use
@@ -451,7 +457,9 @@ M_f = (
 //% Total Price Adjustment Costs
 Price_costs = (
 @#for i in 1:nsec
+    @#if i != 2
         + (kappa_@{i}/2)*(pi*PH_@{i}/PH_@{i}(-1)-1)^2*Y_@{i}
+    @#endif
 @#endfor
 );
 
@@ -512,17 +520,37 @@ Price_costs = (
 
 
     //% Market Clearing in Each Sector
+@#if i == 2
+        //% Mining (copper): output is exogenous (own supply/TFP shock A_2), capacity-bound.
+        Y_@{i} = Y2_ss*exp(A_@{i});
+        //% Copper exports = production minus domestic use (residual), sold at world price PH_2=Q*Pcstar.
+        X_cu = Y_@{i} - CHs_@{i} - CHg_@{i}
+        @#for j in 1:nsec
+            - beta_@{j}_@{i}*(PM_@{j}/PH_@{i})^epsM_@{j}*M_@{j}
+        @#endfor
+        ;
+@#else
         Y_@{i} = CHs_@{i} + CHg_@{i} + chiX_@{i}*X*PX/PH_@{i}
         @#for j in 1:nsec
             + beta_@{j}_@{i}*(PM_@{j}/PH_@{i})^epsM_@{j}*M_@{j}
         @#endfor
         ;
+@#endif
     //% Market Clearing in Each Sector
+@#if i == 2
+        Y_f_@{i} = Y2_ss*exp(A_@{i});
+        X_cu_f = Y_f_@{i} - CHs_f_@{i} - CHg_f_@{i}
+        @#for j in 1:nsec
+            - beta_@{j}_@{i}*(PM_f_@{j}/PH_f_@{i})^epsM_@{j}*M_f_@{j}
+        @#endfor
+        ;
+@#else
         Y_f_@{i} = CHs_f_@{i} + CHg_f_@{i} + chiX_@{i}*X_f*PX_f/PH_f_@{i}
         @#for j in 1:nsec
             + beta_@{j}_@{i}*(PM_f_@{j}/PH_f_@{i})^epsM_@{j}*M_f_@{j}
         @#endfor
         ;
+@#endif
 
 
     //% Labor costs FOC  (allows for firing costs)
@@ -544,6 +572,13 @@ Price_costs = (
     //% Derivation: adjustment cost (kappa/2)*(Pi_H - 1)^2 * Y, where Pi_H = pi*PH/PH(-1)
     //% FOC with respect to PH_@{i} yields the standard Rotemberg NKPC:
     //% 1 - eps + eps*MC/PH - kappa*(Pi_H-1)*Pi_H + beta*M_{t+1}*kappa*(Pi_H(+1)-1)*Pi_H(+1)*Y(+1)/Y = 0
+@#if i == 2
+    //% Copper: domestic price = real exchange rate x world copper price (law of one price).
+    //% Replaces the sectoral NKPC. Mining keeps its CES production and input demands, so it
+    //% stays in the network on the INPUT side and earns a resource rent (PH-MC)*Y in dynamics.
+    PH_@{i} = Q*Pcstar;
+    PH_f_@{i} = Q_f*Pcstar;
+@#else
     1 - epsilon + epsilon*MC_@{i}/PH_@{i}
     - kappa_@{i}*(pi*PH_@{i}/PH_@{i}(-1)-1)*pi*PH_@{i}/PH_@{i}(-1)
     + beta*(Zc(+1)/Zc)^(-gamma)*kappa_@{i}*(pi(+1)*PH_@{i}(+1)/PH_@{i}-1)
@@ -551,6 +586,7 @@ Price_costs = (
 
     //% Rotemberg Pricing FOC
     1 - epsilon + epsilon*MC_f_@{i}/PH_f_@{i}=0; 
+@#endif
 
 
 
@@ -662,8 +698,8 @@ PX_f=(1
 
 //% Trade balance: exports minus oil imports (at PO) and non-oil imports (at PV)
 //% Consumer imports (CFs, CFg) priced at PV (non-oil)
-TB = PX*X - PO*VOil - PV*(VNon+CFs+CFg);
-TB_f = PX_f*X_f - PO_f*VOil_f - PV_f*(VNon_f+CFs_f+CFg_f);
+TB = PX*X - chiX_2*X*PX + PH_2*X_cu - phi_cu*((PH_2-MC_2)*Y_2 - Pi_cu_ss) - PO*VOil - PV*(VNon+CFs+CFg);
+TB_f = PX_f*X_f - chiX_2*X_f*PX_f + PH_f_2*X_cu_f - phi_cu*((PH_f_2-MC_f_2)*Y_f_2 - Pi_cu_ss) - PO_f*VOil_f - PV_f*(VNon_f+CFs_f+CFg_f);
 
 X = omegaX*(PX/Q)^(-etastar)*Ystar;
 X_f = omegaX*(PX_f/Q_f)^(-etastar)*Ystar;
@@ -728,6 +764,9 @@ log(PVstar/PVstar_ss) = rho_pvstar*log(PVstar(-1)/PVstar_ss) + sigma_pvstar*eps_
 PO = Q*POstar;
 PO_f = Q_f*POstar;
 log(POstar/POstar_ss) = rho_postar*log(POstar(-1)/POstar_ss) + sigma_postar*eps_postar;
+
+//% Copper price process (world copper price; passes to mining price via PH_mining = Q*Pcstar)
+log(Pcstar/Pcstar_ss) = rho_pc*log(Pcstar(-1)/Pcstar_ss) + sigma_pc*eps_pc;
 
 //% Output and Employment Gaps (log-deviations from flex-price equilibrium)
 Ygap    = log(Y)   - log(Y_f);
@@ -895,6 +934,9 @@ PV = Q*PVstar*mkupV;
 PV_f = Q_f*PVstar*mkupV;
 
 POstar = POstar_ss;
+Pcstar = Pcstar_ss;
+X_cu = X_cu_ss;
+X_cu_f = X_cu_ss;
 PO = Q_ss*POstar_ss;
 PO_f = Q_ss*POstar_ss;
 
@@ -927,6 +969,8 @@ pi_w = pi_ss;
 
 GDP = C+TB;
 GDP_f = C_f+TB_f;
+GDP_vol = C+TB;
+GDP_vol_f = C_f+TB_f;
 
 Lab_costs_f = 0;
 
@@ -996,6 +1040,7 @@ var eps_i=shock_eps_i;
 var epschi=0.0;
 var eps_pvstar=shock_eps_pvstar;
 var eps_postar=shock_eps_postar;
+var eps_pc=shock_eps_pc;
 var eps_xi=shock_eps_xi;
 @#for z in 1:nsec
    var epsA_@{z}=shock_epsA_@{z};

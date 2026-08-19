@@ -100,6 +100,15 @@ function write_params_mod(mod_dir::String, p::NamedTuple)
         _wp(io, "sigma_postar",    p.sigma_postar_val)
         _wp(io, "POstar_ss",       p.POstar_ss_val)
         _wp(io, "shock_eps_postar",p.shock_eps_postar_val)
+        _wp(io, "rho_pc",         p.rho_pc_val)
+        _wp(io, "sigma_pc",       p.sigma_pc_val)
+        _wp(io, "Pcstar_ss",      p.Pcstar_ss_val)
+        _wp(io, "shock_eps_pc",   p.shock_eps_pc_val)
+        _wp(io, "Y2_ss",          p.Y2_ss_val)
+        _wp(io, "X_cu_ss",        p.X_cu_ss_val)
+        _wp(io, "phi_cu",         p.phi_cu_val)
+        _wp(io, "Pi_cu_ss",       p.Pi_cu_ss_val)
+        _wp(io, "PH2_ss",         p.PH2_ss_val)
         println(io)
 
         # ---- Steady-state scalars ---------------------------------------- #
@@ -463,11 +472,30 @@ const MOMENT_BLOCKS = [
 ]
 
 # ---- Weighting matrix ------------------------------------------------------ #
-# Sectoral value-added shares (Chile), fixed, for ECONOMIC-SIZE moment weighting.
-# From the model steady-state VA decomposition (%ΣVA); swap for official national-
-# accounts sectoral GDP shares if/when preferred. Order = the 12 model sectors.
-const SECTOR_VA_SHARE = let s = [5.07, 12.63, 15.87, 2.90, 3.14, 3.34,
-                                 10.93, 6.71, 2.13, 26.03, 11.08, 0.17]
+# Sectoral value-added shares, % of total VA. Fixed, for ECONOMIC-SIZE moment
+# weighting. Order = the 12 model sectors.
+#
+# SOURCE (2026-08-19): Chilean IO tables 2021, Data/2021_Cuadros_12x12.xlsx,
+# Cuadro 23 "Valor agregado" — the same table the calibration is built from.
+#
+# WAS: [5.07, 12.63, 15.87, 2.90, 3.14, 3.34, 10.93, 6.71, 2.13, 26.03, 11.08,
+# 0.17] — hardcoded from an OLD MODEL RUN, not from data, and that run used the
+# pre-2026-08-19 cost-base alpha convention, so it was stale twice over. It
+# systematically downweighted exactly the sectors the model fits worst:
+#
+#   sector                  old      data     ratio
+#   Administracion publica  0.17%    5.08%    x29.9
+#   Serv. inmobiliarios     2.13%    8.55%    x4.0
+#   Comercio                3.34%   12.66%    x3.8
+#   Construccion            3.14%    6.45%    x2.1
+#   Serv. empresariales    26.03%    9.75%    x0.37
+#
+# Effect on the criterion is small (total objective 15.09 -> 15.13 at the July
+# theta) because the sectoral blocks are only ~21% of it — but it changes WHICH
+# sectors the optimiser chases, and a model-derived weight matrix is not
+# defensible in a replication package.
+const SECTOR_VA_SHARE = let s = [3.92, 15.78, 9.54, 2.79, 6.45, 12.66,
+                                 8.31,  3.91, 8.55, 9.75, 13.27, 5.08]
     s ./ sum(s)
 end
 
@@ -476,8 +504,11 @@ function build_weighting_matrix(dm::Vector{<:Real})
     # Sectoral volatility moments 1:36 = output(1:12), price(13:24), labor(25:36).
     # Weight each by the sector's VALUE-ADDED SHARE (economic size), NOT 1/d².
     # WHY: 1/d^2 pathologically over-weighted the SMALLEST-volatility sector —
-    # Public Admin (0.17% of VA, data std 0.011) received weight ~7650, about
-    # 1200x Agriculture, and its std(Y) miss alone was 40% of the objective.
+    # Public Admin (data std 0.011) received weight ~7650, about 1200x
+    # Agriculture, and its std(Y) miss alone was 40% of the objective.
+    # (The original note here justified this with "0.17% of VA", which was the
+    # MODEL's public-admin share under the old calibration, not the data's —
+    # Cuadro 23 puts it at 5.08%. The 1/d^2 argument stands on its own.)
     # Size-weighting makes the objective track economic relevance; cross-sector
     # ORDERING stays disciplined by the rank-correlation moments (44-46).
     # SECT_BLOCK_W = total weight per 12-sector block (tunable).
@@ -537,6 +568,124 @@ function print_fit_table(dm::AbstractVector, mm::AbstractVector, W::AbstractMatr
     end
     println(io, "  ", repeat("-", 84))
     @printf(io, "  %-34s %29s %10.4f %6s\n", "TOTAL OBJECTIVE", "", tot, "100%")
+end
+
+# =========================================================================== #
+#  OBJECTIVE PROVENANCE  (added 2026-08-19)                                   #
+# =========================================================================== #
+# WHY. The checkpoint written 2026-07-24 10:21 carries obj = 21.4718.
+# Re-evaluating the SAME θ on 2026-08-19 gives 15.0909, with every block of the
+# decomposition moved (Rank 8.639→4.777, PH 4.180→1.742, Agg 1.313→0.837).
+# That is NOT the estimator disagreeing with main_SOE_gap.jl. Between 10:21 and
+# 13:40 that same day the model changed underneath the checkpoint:
+#
+#   10:48  NK_SOE_lev_gap2.mod  + eps_pc   (world copper price — a 28th ACTIVE
+#                                           shock the 10:21 run never had)
+#   11:16  NK_SOE_lev_gap2.mod  + choice3
+#   13:23  NK_SOE_lev_gap2.mod  + ownership
+#   13:40  NK_SOE_lev_gap2.mod  + GDP_vol  (volume GDP — redefines std(GDP),
+#                                           corr(GDP,pi), corr(GDP,Q),
+#                                           corr(N,GDP), corr(N,GDP/N))
+#
+# The stored objective was simply computed on a model that no longer exists.
+# A stored objective is comparable to a fresh one only when EVERY file that
+# defines the objective is byte-identical. Stamp it on write, verify it on read.
+#
+# Deliberately dependency-free (no SHA / no new `using`): the stamp is
+# "basename:bytes:mtime" per file. Byte count catches ordinary edits; mtime
+# catches same-size edits.
+
+const OBJ_PROVENANCE_FILE = "objective_provenance.txt"
+
+"""
+    objective_dep_files(script_dir, mod_dir, data_dir) -> Vector{String}
+
+Every file whose contents change the VALUE of the SMM objective: the model, the
+moment/weight definitions, the two solver front-ends, and the data moments.
+Missing files are dropped silently so this works on a partial checkout.
+"""
+function objective_dep_files(script_dir::AbstractString,
+                             mod_dir::AbstractString,
+                             data_dir::AbstractString)
+    return filter(isfile, [
+        # model + moment/weight definitions + steady state
+        joinpath(mod_dir,    "NK_SOE_lev_gap2.mod"),
+        joinpath(script_dir, "utils.jl"),
+        joinpath(script_dir, "smm_estimation.jl"),
+        joinpath(script_dir, "smm_model_moments.jl"),
+        joinpath(script_dir, "steady_ntwsoe_system.jl"),
+        joinpath(script_dir, "steady_ntwsoe.jl"),
+        # data moments (the LHS of the objective)
+        joinpath(data_dir,   "sectoral_moments.csv"),
+        joinpath(data_dir,   "aggregate_moments.csv"),
+        # calibration inputs — these move the steady state, hence every model
+        # moment. sector_calibration.csv in particular: its alpha/alpha_V
+        # convention changed on 2026-08-19 (cost base -> gross output, to match
+        # Ferrante, Graves & Iacoviello 2023), which shifts the whole SS.
+        joinpath(data_dir,   "sector_calibration.csv"),
+        joinpath(data_dir,   "IO_2021_chile_domestic.csv"),
+        joinpath(data_dir,   "IO_2021_chile.csv"),
+        joinpath(data_dir,   "fpa_vector_few_industries_chile.csv"),
+        joinpath(data_dir,   "sectoral_shock_calibration.csv"),
+        joinpath(data_dir,   "external_shock_calibration.csv"),
+    ])
+end
+
+"""
+    objective_fingerprint(files) -> String
+
+One `basename:bytes:mtime` line per file, newline separated.
+"""
+objective_fingerprint(files::AbstractVector{<:AbstractString}) =
+    join([@sprintf("%s:%d:%.0f", basename(f), filesize(f), mtime(f)) for f in files], "\n")
+
+"""
+    write_objective_provenance(dir, files)
+
+Record the current fingerprint next to the estimation output. Call this from
+`save_checkpoint` so every stored objective carries the model it was computed on.
+"""
+function write_objective_provenance(dir::AbstractString,
+                                    files::AbstractVector{<:AbstractString})
+    open(joinpath(dir, OBJ_PROVENANCE_FILE), "w") do io
+        println(io, "# Fingerprint of every file that defines the SMM objective.")
+        println(io, "# A stored obj_hat is comparable to a fresh evaluation ONLY if")
+        println(io, "# this block still matches. See utils.jl OBJECTIVE PROVENANCE.")
+        println(io, "# written ", Libc.strftime("%Y-%m-%d %H:%M:%S", time()))
+        println(io, objective_fingerprint(files))
+    end
+    return nothing
+end
+
+"""
+    check_objective_provenance(dir, files, θ_mtime) -> (comparable::Bool, changed::Vector{String})
+
+`comparable == false` means a stored objective from `dir` must NOT be compared
+against, or reported alongside, a freshly computed one. `changed` names the
+offending files.
+
+Falls back to an mtime comparison when no provenance file is present (every
+checkpoint written before 2026-08-19). The fallback is conservative: it flags
+anything modified after the θ file, which is the correct default.
+"""
+function check_objective_provenance(dir::AbstractString,
+                                    files::AbstractVector{<:AbstractString},
+                                    θ_mtime::Real)
+    prov = joinpath(dir, OBJ_PROVENANCE_FILE)
+    if isfile(prov)
+        stored = [l for l in split(read(prov, String), '\n')
+                  if !isempty(l) && !startswith(l, "#")]
+        stored_d = Dict(String(first(split(l, ':'))) => String(l) for l in stored)
+        changed = String[]
+        for l in split(objective_fingerprint(files), '\n')
+            nm = String(first(split(l, ':')))
+            get(stored_d, nm, "") == String(l) || push!(changed, nm)
+        end
+        return isempty(changed), changed
+    end
+    # No stamp: fall back to mtime. 1 s slack absorbs timestamp granularity.
+    newer = [basename(f) for f in files if mtime(f) > θ_mtime + 1.0]
+    return isempty(newer), newer
 end
 
 end  # include guard (_SMM_SHARED_DEFS_LOADED)

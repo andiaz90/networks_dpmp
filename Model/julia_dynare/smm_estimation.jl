@@ -30,7 +30,7 @@ using CMAEvolutionStrategy
 
 # θ-REDUCTION: SMM_PIN holds a full 36-vector whose 28 non-transmission entries PIN
 # the objective (elasticities, 24 measured sectoral shock sizes, external rho/sigma).
-# Only the 8 transmission params are searched. This is now the ONLY estimation mode.
+# Only the 7 transmission params are searched. This is now the ONLY estimation mode.
 const SMM_PIN = Ref{Union{Nothing,Vector{Float64}}}(nothing)
 
 # Thrown from the CMA-ES objective when the wall-clock self-limit is hit, so the
@@ -271,6 +271,11 @@ function save_checkpoint(θ::AbstractVector, obj::Real)
         open(joinpath(ESTIMATION_DIR, "min_loss.txt"), "w") do io
             @printf(io, "%.8f\n# loss at best_sol.txt  |  %s\n", Float64(obj), _ts)
         end
+        # Stamp the objective definition this obj was computed under, so a
+        # later main_SOE_gap.jl run can tell whether the stored number is still
+        # comparable (2026-08-19; see OBJECTIVE PROVENANCE in utils.jl).
+        write_objective_provenance(ESTIMATION_DIR,
+            objective_dep_files(SCRIPT_DIR, joinpath(SCRIPT_DIR, "mod"), DATA_DIR))
     catch err
         @printf "  [warn] checkpoint write failed: %s\n" sprint(showerror, err)
     end
@@ -544,7 +549,7 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
 
     # HP-filtered covariance on the ~40 needed variables only (25× faster)
     needed_names = vcat(["Y_$(i)" for i in 1:nsec], ["PH_$(i)" for i in 1:nsec],
-                        ["L_$(i)" for i in 1:nsec], ["GDP","pi","Q","TB","N"])
+                        ["L_$(i)" for i in 1:nsec], ["GDP","GDP_vol","pi","Q","TB","N"])
     ei          = sc.endo_idx
     needed_idx  = [get(ei, nm, 0) for nm in needed_names]
     valid_mask  = needed_idx .> 0
@@ -611,8 +616,8 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
     # Γ_v in LEVEL deviations, convert to log-dev (co)variances by dividing by
     # steady states:  v_n = Γ_nn/N̄²,  v_g = Γ_gg/Ḡ²,  c_ng = Γ_ng/(N̄Ḡ).
     # Then corr(n, g−n) = (c_ng − v_n)/√(v_n·(v_g + v_n − 2c_ng)).
-    corr_NGDP_m = xcorr("N","GDP")
-    corr_NAPL_m = let iN=get(ei_sub,"N",0), iG=get(ei_sub,"GDP",0)
+    corr_NGDP_m = xcorr("N","GDP_vol")
+    corr_NAPL_m = let iN=get(ei_sub,"N",0), iG=get(ei_sub,"GDP_vol",0)
         if iN==0 || iG==0
             NaN
         else
@@ -628,8 +633,8 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
 
     # Return 60 moments: 12×std_Y + 12×std_PH + 12×std_L + 10×aggregate +
     # 12×corr(Y_i,PH_i) + corr(N,GDP) + corr(N,GDP/N)
-    return [std_Y;std_PH;std_L;pstd("GDP");pstd("pi");xcorr("GDP","pi");
-            std_TBGDP;pstd("Q");acQ;xcorr("GDP","Q");rY;rP;rL;corr_YPH;
+    return [std_Y;std_PH;std_L;pstd("GDP_vol");pstd("pi");xcorr("GDP_vol","pi");
+            std_TBGDP;pstd("Q");acQ;xcorr("GDP_vol","Q");rY;rP;rL;corr_YPH;
             corr_NGDP_m;corr_NAPL_m], true
 end
 
@@ -652,14 +657,14 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
 
     baseline = build_baseline(context, endo_names, y_d, p_d, l_d, d_TBGDP, d_omG)
 
-    # Verify the name-based shock mapping resolved (fixes C1). Expect 27 active
-    # shocks: eps_i + eps_pvstar + eps_xi + 12 epsA + 12 eps_om. A wrong count
+    # Verify the name-based shock mapping resolved (fixes C1). Expect 28 active
+    # shocks: eps_i + eps_pvstar + eps_xi + eps_pc + 12 epsA + 12 eps_om. A wrong count
     # means the loaded context is not the unified model — abort with guidance.
     let na = length(baseline.active_exo_idx), exo = smm_exo_names(context)
         @printf "  Active shocks (by name): %d of %d exogenous\n" na length(exo)
-        if na != 3 + 2*NSEC
+        if na != 4 + 2*NSEC
             error("""
-            Expected $(3 + 2*NSEC) active shocks (eps_i, eps_pvstar, eps_xi,
+            Expected $(4 + 2*NSEC) active shocks (eps_i, eps_pvstar, eps_xi, eps_pc,
             epsA_1:$(NSEC), eps_om_1:$(NSEC)) but resolved $(na) from the loaded
             context's exogenous list ($(length(exo)) shocks).
             The loaded context is almost certainly the OLD model. Rebuild it:
@@ -679,7 +684,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     @printf "  Weighting: proportional std devs + 5× rank correlations.\n\n"
 
     # Initial θ — θ-REDUCTION (the only mode): pin 28 params via SMM_PIN (elasticities +
-    # 24 measured sectoral shocks + external rho/sigma); estimate only the 8 transmission
+    # 24 measured sectoral shocks + external rho/sigma + etastar); estimate only the 7 transmission
     # params (θ 1,4,5,6,33,34,35,36), seeded at interior values.
     θ0 = default_theta0(context)
     θ0[2] = parse(Float64, get(ENV, "SMM_EPSY", "0.80"))   # epsY (Atalay eps_Q) — pinned
@@ -696,7 +701,8 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         haskey(_em, "rho_pvstar")   && (θ0[31] = _em["rho_pvstar"])
         haskey(_em, "sigma_pvstar") && (θ0[32] = _em["sigma_pvstar"])
     end
-    SMM_PIN[] = copy(θ0)                  # objective reads the 28 pinned entries from here
+    θ0[35] = parse(Float64, get(ENV, "SMM_ETASTAR", "1.0"))  # η* export elasticity — now PINNED (paper Table 3 = 1; Feenstra ~1-1.5), was estimated & drifted to ~4.5
+    SMM_PIN[] = copy(θ0)                  # objective reads the pinned entries from here (now 29 pins incl. etastar)
     # 8 FREE transmission params — interior seeds (never at a bound):
     θ0[1]  = 1.0        # ilabcosts
     θ0[4]  = log(1e6)   # log(kappaV)
@@ -704,12 +710,12 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     θ0[6]  = 0.5        # rho_A
     θ0[33] = 0.7        # rho_xi (persistent demand shock; data autocorr(Q)=0.72)
     θ0[34] = 0.010      # sigma_xi (small: a persistent shock needs less innovation size)
-    θ0[35] = 2.0        # etastar
+    # θ0[35] (etastar) pinned above — not seeded here
     θ0[36] = 100.0      # kappaw
     θ0 = clamp.(θ0, LB, UB)              # pinned dims clamped so scaled space stays [0,1]; objective overrides exactly
-    @printf "  θ-reduction: 8 transmission params estimated, 28 pinned.\n"
+    @printf "  θ-reduction: 7 transmission params estimated, 29 pinned (etastar calibrated to 1).\n"
     @printf "  pins: epsY=%.2f epsM=%.2f | 24 measured sectoral shocks | rho_pvstar=%.3f sigma_pvstar=%.3f\n" SMM_PIN[][2] SMM_PIN[][3] SMM_PIN[][31] SMM_PIN[][32]
-    @printf "  free seeds: sigma_xi=%.3f etastar=%.2f ilabcosts=%.2f kappaw=%.0f\n" θ0[34] θ0[35] θ0[1] θ0[36]
+    @printf "  free seeds: sigma_xi=%.3f ilabcosts=%.2f kappaw=%.0f | pinned etastar=%.2f\n" θ0[34] θ0[1] θ0[36] θ0[35]
 
     # Pre-flight
     @printf "=== PRE-FLIGHT ===\n"
@@ -736,7 +742,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         θ0[1]  = clamp(0.18,       LB[1],  UB[1])    # ilabcosts
         θ0[4]  = clamp(log(4.6e6), LB[4],  UB[4])    # log(kappaV)
         θ0[34] = clamp(0.020,      LB[34], UB[34])   # sigma_xi (was 0.049; keep the fallback modest post-discipline)
-        θ0[35] = clamp(6.0,        LB[35], UB[35])   # etastar
+        # θ0[35] (etastar) stays at its pinned value (1.0) — no longer a free seed
         m_test, ok_test = _safe_moments(θ0)
     end
     if !ok_test || any(isnan, m_test)
@@ -797,7 +803,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
 
     # CMA-ES
     max_evals = 300_000
-    _FREE = [1, 4, 5, 6, 33, 34, 35, 36]   # the 8 estimated transmission params
+    _FREE = [1, 4, 5, 6, 33, 34, 36]   # the 7 estimated transmission params (etastar/θ35 now pinned)
     @printf "--- CMA-ES ---\n"
     @printf "  %d FREE params (of %d; %d pinned) | %d moments | max %d evals | %d threads\n" length(_FREE) N_THETA (N_THETA-length(_FREE)) N_MOMENTS max_evals n_threads_active
     @printf "  free: %s\n" join(PARAM_LABELS[_FREE], ", ")
@@ -839,8 +845,8 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         (max_seconds < Inf && (time() - t_start[]) > max_seconds) && throw(SMMTimeout())
 
         tid   = _tid_cma()
-        θ = copy(SMM_PIN[])           # 36-vec: 28 pinned entries; 8 free set below
-        θ[_FREE] = LB[_FREE] .+ θ_sc .* span   # unscale the 8 free dims [0,1] → original
+        θ = copy(SMM_PIN[])           # 36-vec: 29 pinned entries; 7 free set below
+        θ[_FREE] = LB[_FREE] .+ θ_sc .* span   # unscale the 7 free dims [0,1] → original
         # A single bad evaluation must NEVER take down a multi-hour run. Any
         # exception inside the moment computation is converted to the failure
         # penalty (1e8); only SMMTimeout is allowed to propagate.
@@ -924,11 +930,11 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     # hundreds of evaluations on infeasible or uninformative candidates.
     # CMAEvolutionStrategy.jl takes scalar sigma — pass the mean, but
     # pre-scale the parameter space so all dimensions have unit range.
-    insigma = 0.25   # initial step for the 8-dim reduced search (larger avoids early stall)
+    insigma = 0.25   # initial step for the 7-dim reduced search (larger avoids early stall)
 
     # Rescale θ to [0,1] so CMA-ES works in a unit hypercube.
     # The objective wrapper maps back to the original scale.
-    # TRUE 8-dim search: scale only the 8 free transmission dims to [0,1].
+    # TRUE 7-dim search: scale only the 7 free transmission dims to [0,1].
     span  = UB[_FREE] .- LB[_FREE]
     θ0_sc = (clamp.(θ0[_FREE], LB[_FREE], UB[_FREE]) .- LB[_FREE]) ./ span
     LB_sc = zeros(length(_FREE))

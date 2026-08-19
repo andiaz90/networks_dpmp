@@ -148,7 +148,13 @@ function generate_figures(;
         ("Real exchange rate (Q)",  ss_results.Q_ss),
         ("Consumption (C)",         ss_results.C_ss),
         ("Labor (N)",               ss_results.N_ss),
-        ("Gross output/GDP",        sum(sec_results.Yi_ss) / max(ss_results.GDP_ss, 1e-10)),
+        # NOMINAL, i.e. Σ pH_i·Y_i / GDP (2026-08-19). This printed the physical
+        # sum Σ Y_i / GDP, so the same run reported two different gross-output
+        # ratios — 1.830 in the steady-state accounting block against 2.227
+        # here. Only the nominal one is comparable to the national accounts
+        # (Chile 2021: 1.924). Matches ygdp_ss in main_SOE_gap.jl:766.
+        ("Gross output/GDP",        sum(sec_results.pH_ss .* sec_results.Yi_ss) /
+                                    max(ss_results.GDP_ss, 1e-10)),
         ("Foreign debt/GDP",        ss_results.Q_ss * abs(ss_results.Bstar_ss) / max(ss_results.GDP_ss, 1e-10)),
     ]
     for (lbl, val) in ss_rows
