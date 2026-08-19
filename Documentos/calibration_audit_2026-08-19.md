@@ -581,7 +581,87 @@ unfixable by estimation.
 
 ---
 
-## Suggested order of work
+## Roadmap after the 2026-08-19 session
+
+Objective composition at the last full run (C: cl=19.1, reallocation shock on,
+purchaser-price consumption weights — superseded by the basic-price rebuild):
+
+| block | value | % |
+|---|---:|---:|
+| corr(Y_i,PH_i) | 5.434 | **36.4** |
+| rank correlations | 4.138 | **27.7** |
+| std(PH_i) | 1.475 | 9.9 |
+| labour comovement | 1.276 | 8.6 |
+| std(Y_i) | 1.167 | 7.8 |
+| aggregates | 0.850 | 5.7 |
+| std(L_i) | 0.569 | 3.8 |
+| goods expenditure share | 0.008 | 0.1 |
+
+Single largest terms: `corr(Y₁₁,PH₁₁)` 22.4%, `rank corr labour` 14.7%,
+`corr(Y₈,PH₈)` 8.8%, `rank corr output` 6.7%, `rank corr prices` 6.3%,
+`corr(N,GDP)` 6.0%, `std(Y₅)` construction 5.5%.
+
+**0. Re-run and re-baseline.** Everything below is conditioned on a composition
+that may have shifted: today changed the α convention, the IO matrix, the
+consumption weights, ombar, cl (was inert), added a shock and added a moment.
+
+**1. Re-estimate — nothing has ever been estimated on this model.** All seven
+free parameters still sit at their CMA-ES starting values (A1); the July run
+managed 100 evaluations in 20 seconds. `cl` was inert until today, so it has
+never been searched at all. This is mechanical and almost certainly the largest
+single reduction available. Two prerequisites: decide `cl` first (it is not
+interior-identified — the objective was still falling at 40 against a bound of
+50, so a free search returns the bound), and fix the Jacobian so the run
+produces standard errors (A3 — every one is currently 0.0).
+
+**2. Sectoral variance decomposition.** The aggregate one (N, GDP) was decisive:
+it showed `epsA_11` is 26% of employment variance and 3.7% of GDP, and `epsA_2`
+the mirror image. The same calculation per sector would say *which shock* drives
+`corr(Y₁₁,PH₁₁)` — 22% of the objective and currently undiagnosed. Cheap:
+the state-space matrices are already on disk.
+
+**3. `isigma_tfp_11 = 0.0737`.** The largest measured sectoral shock, in the
+sector with the *lowest* data employment volatility (0.0197). Data say personal
+services has volatile output and stable employment; the model cannot do both, so
+a shock sized off output volatility blows up employment (model 0.095 vs 0.020).
+Implicated in the labour rank correlation and `corr(N,GDP)` — together ~21% of
+the objective. Check `compute_sectoral_shocks.jl` for sector 11.
+
+**4. Investment.** Construction has *no final demand*: no household consumption
+(its output is investment) and no investment in the model. VA 0.84% vs 6.45% in
+data, gross output share 0.9% vs 7.8%, `VAE/VA` = 8.5x (a visible outlier), and
+`std(Y₅)` = 0.168 vs 0.055 under the reallocation shock — 5.5% of the objective
+from one sector the model structurally cannot represent. Also fixes C/GDP =
+97.7% against 62% in data. Major `.mod` work.
+
+**5. Government consumption.** Public administration 0.29% vs 5.08%. G is ~15%
+of Chilean GDP and entirely absent. Cheaper than investment.
+
+**6. Fixed factor for capital/resource rents.** Mining is 21.5% of model
+employment against 1.6% of Chilean headcount, because the FGI convention books
+copper rent (58% of mining gross output) as labour income. Also restores
+labour/VA to 0.416 from 1.0. More a credibility and validation fix than an
+objective reduction, but mining is 15.8% of value added and the number is
+indefensible in a seminar. See B1.
+
+**7. The weighting matrix is deciding what "fit" means.** 64% of the objective
+sits in two cross-sectional pattern-matching blocks (`corr(Y_i,PH_i)` 36% + rank
+correlations 28%), and the rank targets are 1.0 — unreachable by construction.
+That is what pushes `cl` to its bound and what made flexible wages fit better
+than the Chilean literature's sticky ones. Before optimising harder against this
+criterion, it is worth asking whether it scores the right thing. FGI's precedent
+is to target the model-data correlation of the cross-section with an identity
+weight matrix, which is the same idea but a different relative weight.
+
+**8. Smaller items.** Drop or re-specify the 12 `om_i` taste shifters (0.5% of N
+variance, 0.1% of GDP, two exactly zero by construction). `autocorr(Q)` 0.18 vs
+0.72 is 3.8% and unfixable by estimation while ρ_pvstar is pinned. Delete the
+dead `kappa` column from `sector_calibration.csv` before it misleads someone —
+it nearly misled me.
+
+---
+
+## Original order of work (superseded by the roadmap above)
 
 1. ~~**A2** — close the 21.47 / 15.09 gap.~~ **Done.** Diagnosed as staleness, not
    a code-path bug; provenance guard added. Verification run still pending.

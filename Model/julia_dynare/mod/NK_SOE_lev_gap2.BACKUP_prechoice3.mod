@@ -7,13 +7,11 @@
 
 // Define variables
 var chi xi Zc Lab_costs Price_costs w VA C Ctot Ctotg Ctots M C_g C_s p_g p_s N pi pi_g pi_s pi_w r om_g om_s vi Y
-PV r_star Rworld pi_e Bstar Pipstar Q TB PX X Ystar V PVstar GDP IMP mkupV CFs CFg X_cu GDP_vol
+PV r_star Rworld pi_e Bstar Pipstar Q TB PX X Ystar V PVstar GDP IMP mkupV CFs CFg
 POstar PO VOil VNon Pcstar
 // Sectoral demand (taste) shocks om_1..om_nsec and basket normalizers norm_g, norm_s.
 // At steady state om_i = 0 and norm_g = norm_s = 1, so the SS is unchanged.
 om_1 om_2 om_3 om_4 om_5 om_6 om_7 om_8 om_9 om_10 om_11 om_12 norm_g norm_s
-// omg_hat: goods/services demand-reallocation shock (FGI 2023 omega_t), 2026-08-19
-omg_hat
 
     @#for i in 1:nsec
         PH_@{i}
@@ -62,8 +60,8 @@ omg_hat
     ;
 
 var C_f Zc_f C_g_f C_s_f CFs_f CFg_f PV_f p_g_f p_s_f r_f N_f Lab_costs_f
-w_f Y_f  Ctot_f Ctots_f Ctotg_f VA_f GDP_f TB_f M_f r_star_f pi_e_f Q_f Bstar_f GDP_vol_f
-PX_f X_f IMP_f V_f Y_g_f Y_s_f PO_f VOil_f VNon_f X_cu_f
+w_f Y_f  Ctot_f Ctots_f Ctotg_f VA_f GDP_f TB_f M_f r_star_f pi_e_f Q_f Bstar_f
+PX_f X_f IMP_f V_f Y_g_f Y_s_f PO_f VOil_f VNon_f
 
 @#for j in 1:nsec
     P_f_@{j}
@@ -112,11 +110,6 @@ varexo eps_i epschi eps_pvstar eps_postar eps_pc
     @#for i in 1:nsec
         eps_om_@{i}
     @#endfor
-    // Goods/services demand-reallocation shock (FGI 2023 omega_t), 2026-08-19.
-    // Appended LAST so every existing exogenous index is unchanged; the shock
-    // set is selected by NAME in smm_model_moments.jl / main_SOE_gap.jl, so
-    // position is not load-bearing.
-    eps_omg
 ;
 
 
@@ -130,7 +123,7 @@ epsw kappaw
 // Oil sector parameters
 epsilonV_oil rho_postar sigma_postar POstar_ss shock_eps_postar
 // Copper sector parameters (world price process)
-rho_pc sigma_pc Pcstar_ss shock_eps_pc Y2_ss X_cu_ss phi_cu Pi_cu_ss PH2_ss
+rho_pc sigma_pc Pcstar_ss shock_eps_pc
 Ctot_ss Ctotg_ss Ctots_ss VA_ss M_tot_ss Y_ss IMP_ss
 // Shock activation parameters (set by params_jl.mod; 0=off, 1=on)
 shock_eps_i shock_eps_pvstar shock_eps_xi
@@ -139,8 +132,6 @@ sigma_om_1 sigma_om_2 sigma_om_3 sigma_om_4 sigma_om_5 sigma_om_6
 sigma_om_7 sigma_om_8 sigma_om_9 sigma_om_10 sigma_om_11 sigma_om_12
 shock_eps_om_1 shock_eps_om_2 shock_eps_om_3 shock_eps_om_4 shock_eps_om_5 shock_eps_om_6
 shock_eps_om_7 shock_eps_om_8 shock_eps_om_9 shock_eps_om_10 shock_eps_om_11 shock_eps_om_12
-// Goods/services demand-reallocation shock (FGI 2023 omega_t), 2026-08-19
-rho_omg sigma_omg shock_eps_omg
 // Scalar SS values used in initval block (set by params_jl.mod)
 pi_ss r_ss w_ss N_ss GDP_ss C_ss C_g_ss C_s_ss p_g_ss p_s_ss
 Bstar_ss Q_ss TB_ss PX_ss V_ss CF_ss CFg_total_ss CFs_total_ss
@@ -438,10 +429,6 @@ VA_f = (
 
 GDP = C + TB;
 GDP_f = C_f + TB_f;
-//% Volume (real) GDP: strips the copper terms-of-trade revaluation, matching the data's
-//% chained-volume GDP rather than a terms-of-trade-inclusive income measure.
-GDP_vol = GDP - (PH_2 - PH2_ss)*X_cu;
-GDP_vol_f = GDP_f - (PH_f_2 - PH2_ss)*X_cu_f;
 
 
 //% Total Intermediate Use
@@ -529,37 +516,17 @@ Price_costs = (
 
 
     //% Market Clearing in Each Sector
-@#if i == 2
-        //% Mining (copper): output is exogenous (own supply/TFP shock A_2), capacity-bound.
-        Y_@{i} = Y2_ss*exp(A_@{i});
-        //% Copper exports = production minus domestic use (residual), sold at world price PH_2=Q*Pcstar.
-        X_cu = Y_@{i} - CHs_@{i} - CHg_@{i}
-        @#for j in 1:nsec
-            - beta_@{j}_@{i}*(PM_@{j}/PH_@{i})^epsM_@{j}*M_@{j}
-        @#endfor
-        ;
-@#else
         Y_@{i} = CHs_@{i} + CHg_@{i} + chiX_@{i}*X*PX/PH_@{i}
         @#for j in 1:nsec
             + beta_@{j}_@{i}*(PM_@{j}/PH_@{i})^epsM_@{j}*M_@{j}
         @#endfor
         ;
-@#endif
     //% Market Clearing in Each Sector
-@#if i == 2
-        Y_f_@{i} = Y2_ss*exp(A_@{i});
-        X_cu_f = Y_f_@{i} - CHs_f_@{i} - CHg_f_@{i}
-        @#for j in 1:nsec
-            - beta_@{j}_@{i}*(PM_f_@{j}/PH_f_@{i})^epsM_@{j}*M_f_@{j}
-        @#endfor
-        ;
-@#else
         Y_f_@{i} = CHs_f_@{i} + CHg_f_@{i} + chiX_@{i}*X_f*PX_f/PH_f_@{i}
         @#for j in 1:nsec
             + beta_@{j}_@{i}*(PM_f_@{j}/PH_f_@{i})^epsM_@{j}*M_f_@{j}
         @#endfor
         ;
-@#endif
 
 
     //% Labor costs FOC  (allows for firing costs)
@@ -631,31 +598,10 @@ r = (1-rhoirule)*(1/beta) + rhoirule*r(-1)
 //% Shock processes
 vi = rhoi*vi(-1) + sigma_i*eps_i;
 
-//% Goods/Services level-1 shares: STOCHASTIC as of 2026-08-19.
-//%
-//% WAS pinned (exp(om_g)=ombar; exp(om_s)=1-ombar) with the note "aggregate
-//% demand shock removed; demand fluctuations are now sectoral, via
-//% om_1..om_nsec below". But the sectoral taste shifters are normalised by
-//% norm_g/norm_s (below) precisely to PRESERVE the goods and services budgets,
-//% so they are pure within-bundle reallocation and carry no aggregate demand
-//% at all: 0.5% of employment variance and 0.1% of GDP variance. Pinning om_g
-//% therefore removed the only aggregate demand-reallocation margin in the model.
-//%
-//% This is Ferrante, Graves & Iacoviello (2023 JME) omega_t. Their eq. 11 is
-//% our aggregator at line ~195; their eq. 12, P^g C^g = omega_t P C, makes
-//% omega_t EQUAL to the nominal goods expenditure share — "the expenditure
-//% share on goods in the model is simply equal to omega_t". So it is calibrated
-//% off an observable, not estimated. FGI: omega_bar=0.31 (US 2019), shock size
-//% 0.045, rho=0.975. Chile (BCCh CCNN, 2006-2023, HP(1600) on log omega):
-//% ombar=0.5304, sigma_omg=0.0322, rho_omg=0.5007 — see
-//% Data/build_reallocation_calibration.py. FGI's rho=0.975 is NOT transferable:
-//% it traces one slow post-COVID decline, not a business-cycle autocorrelation.
-//%
-//% Shares still sum to one exactly: exp(om_s) = 1 - exp(om_g).
-//% SS is unchanged because omg_hat = 0 there.
-exp(om_g) = ombar*exp(omg_hat);
-exp(om_s) = 1 - exp(om_g);
-omg_hat   = rho_omg*omg_hat(-1) + sigma_omg*eps_omg;
+//% Goods/Services level-1 shares fixed at SS (aggregate demand shock removed;
+//% demand fluctuations are now sectoral, via om_1..om_nsec below).
+exp(om_g) = ombar;
+exp(om_s) = 1 - ombar;
 
 //% Normalizers for the sectoral demand taste shocks (preserve goods/services
 //% budgets; equal 1 at SS because om_i = 0). sum_j gammag_j = sum_j gammas_j = 1.
@@ -728,8 +674,8 @@ PX_f=(1
 
 //% Trade balance: exports minus oil imports (at PO) and non-oil imports (at PV)
 //% Consumer imports (CFs, CFg) priced at PV (non-oil)
-TB = PX*X - chiX_2*X*PX + PH_2*X_cu - phi_cu*((PH_2-MC_2)*Y_2 - Pi_cu_ss) - PO*VOil - PV*(VNon+CFs+CFg);
-TB_f = PX_f*X_f - chiX_2*X_f*PX_f + PH_f_2*X_cu_f - phi_cu*((PH_f_2-MC_f_2)*Y_f_2 - Pi_cu_ss) - PO_f*VOil_f - PV_f*(VNon_f+CFs_f+CFg_f);
+TB = PX*X - PO*VOil - PV*(VNon+CFs+CFg);
+TB_f = PX_f*X_f - PO_f*VOil_f - PV_f*(VNon_f+CFs_f+CFg_f);
 
 X = omegaX*(PX/Q)^(-etastar)*Ystar;
 X_f = omegaX*(PX_f/Q_f)^(-etastar)*Ystar;
@@ -858,7 +804,6 @@ vi = 0;
 
 om_g=log(ombar);     // SS: exp(om_g) = ombar, so om_g = log(ombar)
 om_s=log(1-ombar);  // SS: exp(om_s) = 1-ombar
-omg_hat=0;          // reallocation shock at SS => exp(omg_hat)=1, SS unchanged
 // Sectoral demand taste shocks at SS = 0; normalizers = 1
 om_1=0; om_2=0; om_3=0; om_4=0; om_5=0; om_6=0;
 om_7=0; om_8=0; om_9=0; om_10=0; om_11=0; om_12=0;
@@ -966,8 +911,6 @@ PV_f = Q_f*PVstar*mkupV;
 
 POstar = POstar_ss;
 Pcstar = Pcstar_ss;
-X_cu = X_cu_ss;
-X_cu_f = X_cu_ss;
 PO = Q_ss*POstar_ss;
 PO_f = Q_ss*POstar_ss;
 
@@ -1000,8 +943,6 @@ pi_w = pi_ss;
 
 GDP = C+TB;
 GDP_f = C_f+TB_f;
-GDP_vol = C+TB;
-GDP_vol_f = C_f+TB_f;
 
 Lab_costs_f = 0;
 
@@ -1080,8 +1021,6 @@ var eps_xi=shock_eps_xi;
 @#for z in 1:nsec
    var eps_om_@{z}=shock_eps_om_@{z};
 @#endfor
-// Goods/services demand-reallocation shock (FGI 2023 omega_t), 2026-08-19
-var eps_omg=shock_eps_omg;
 end;
 
 check;

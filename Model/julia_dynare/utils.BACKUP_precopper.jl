@@ -100,15 +100,6 @@ function write_params_mod(mod_dir::String, p::NamedTuple)
         _wp(io, "sigma_postar",    p.sigma_postar_val)
         _wp(io, "POstar_ss",       p.POstar_ss_val)
         _wp(io, "shock_eps_postar",p.shock_eps_postar_val)
-        _wp(io, "rho_pc",         p.rho_pc_val)
-        _wp(io, "sigma_pc",       p.sigma_pc_val)
-        _wp(io, "Pcstar_ss",      p.Pcstar_ss_val)
-        _wp(io, "shock_eps_pc",   p.shock_eps_pc_val)
-        _wp(io, "Y2_ss",          p.Y2_ss_val)
-        _wp(io, "X_cu_ss",        p.X_cu_ss_val)
-        _wp(io, "phi_cu",         p.phi_cu_val)
-        _wp(io, "Pi_cu_ss",       p.Pi_cu_ss_val)
-        _wp(io, "PH2_ss",         p.PH2_ss_val)
         println(io)
 
         # ---- Steady-state scalars ---------------------------------------- #
@@ -146,21 +137,11 @@ function write_params_mod(mod_dir::String, p::NamedTuple)
         _wp(io, "shock_eps_i",      p.shock_eps_i_val)
         _wp(io, "shock_eps_pvstar", p.shock_eps_pvstar_val)
         _wp(io, "shock_eps_xi",     p.shock_eps_xi_val)
-        # NOTE: the per-sector activation flags shock_eps_om_i and std devs
-        # sigma_om_i are written below. Do NOT write a scalar sigma_om /
-        # rho_om2 — those parameters do not exist in NK_SOE_lev_gap2.mod and
-        # Dynare would reject them.
-        #
-        # Goods/services demand-reallocation shock (2026-08-19). The aggregate
-        # om_g shock was previously removed on the grounds that "demand is now
-        # sectoral"; but the 12 sectoral taste shifters are normalised by
-        # norm_g/norm_s to preserve the goods and services budgets, so they are
-        # pure within-bundle reallocation and carry 0.1% of GDP variance. This
-        # is FGI (2023 JME) omega_t, calibrated off the observable goods
-        # expenditure share — see Data/build_reallocation_calibration.py.
-        _wp(io, "rho_omg",          p.rho_omg_val)
-        _wp(io, "sigma_omg",        p.sigma_omg_val)
-        _wp(io, "shock_eps_omg",    p.shock_eps_omg_val)
+        # NOTE: the aggregate eps_om shock was removed in the unified model; demand
+        # is now sectoral (eps_om_1..nsec). The per-sector activation flags
+        # shock_eps_om_i and std devs sigma_om_i are written below. Do NOT write a
+        # scalar shock_eps_om / sigma_om / rho_om2 — those parameters no longer
+        # exist in NK_SOE_lev_gap2.mod and Dynare would reject them.
         println(io)
 
         # ---- Option-A: 12 sectoral demand shock parameters -------------- #
@@ -422,11 +403,7 @@ const ESTIMATION_DIR = joinpath(@__DIR__, "estimation_results")
 #   θ[31] rho_pvstar θ[32] sigma_pvstar θ[33] rho_xi θ[34] sigma_xi
 #   θ[35] etastar   θ[36] kappaw (0 = flexible wages; added 2026-07-08)
 const PARAM_LABELS = vcat(
-    # θ[1] drives cl_i, the sectoral labour adjustment cost = FGI (2023 JME)
-    # hiring cost c (their estimate 19.1, s.e. 12.6). The CSV key stays
-    # "ilabcosts" for back-compatibility with existing checkpoints; the display
-    # label says what it actually is. See the note in smm_estimation.jl.
-    ["cl (FGI hiring c)", "epsY", "epsM", "log(kappaV)", "rho_om", "rho_A"],
+    ["ilabcosts", "epsY", "epsM", "log(kappaV)", "rho_om", "rho_A"],
     ["isigma_tfp_$(i)" for i in 1:12],
     ["sigma_om_$(i)" for i in 1:12],
     ["rho_pvstar", "sigma_pvstar", "rho_xi", "sigma_xi"],
@@ -464,23 +441,7 @@ const UB = [50.0; 0.82; 0.21; log(1e8);   0.99;  0.99;
             400.0]    # kappaw ≤ 400 (≈ 7q Calvo duration at epsw = 10)
 
 # ---- Moment layout (60 moments) ------------------------------------------- #
-# 61 as of 2026-08-19: std(omG), the goods expenditure share, appended LAST.
-# Appended rather than inserted into the aggregates block so that every
-# existing index is unchanged — the block slices 1:12, 13:24, 25:36, 37:43,
-# 44:46, 47:58, 59:60 are hardcoded in the decomposition printers in
-# smm_estimation.jl and would all have shifted.
-# Indices of the parameters actually SEARCHED by CMA-ES. The other 29 are
-# pinned via SMM_PIN and are OVERRIDDEN inside smm_model_moments, so perturbing
-# them cannot move the moments — any Jacobian column for a pinned parameter is
-# identically zero. Promoted to a module-level const on 2026-08-19 so that
-# smm_inference.jl uses the same list (it previously differenced all 36, which
-# made the sandwich rank-deficient and returned std errors of exactly 0.0 with
-# t = Inf for every parameter, and used dof = K-36 instead of K-7).
-#   1 = cl (FGI hiring cost c)   4 = log(kappaV)   5 = rho_om   6 = rho_A
-#  33 = rho_xi   34 = sigma_xi   36 = kappaw
-const FREE_THETA = [1, 4, 5, 6, 33, 34, 36]
-
-const N_MOMENTS = 63
+const N_MOMENTS = 60
 const MOMENT_NAMES = vcat(
     ["std(Y_$(i))"  for i in 1:12], ["std(PH_$(i))" for i in 1:12],
     ["std(L_$(i))"  for i in 1:12],
@@ -489,16 +450,7 @@ const MOMENT_NAMES = vcat(
      "rank corr: output (model vs data)", "rank corr: prices (model vs data)",
      "rank corr: labor  (model vs data)"],
     ["corr(Y_$(i),PH_$(i))" for i in 1:12],
-    ["corr(N,GDP)", "corr(N,GDP/N)"],
-    ["std(omG) goods expenditure share"],
-    # 62-63 (2026-08-19): the goods-services relative price channel. This is how
-    # Ferrante, Graves & Iacoviello (2023) identify their hiring cost c — "with
-    # no hiring costs there would be no change in relative prices in response to
-    # a demand reallocation shock". Two-sided in cl (too little => no response,
-    # too much => overshoot), unlike every other moment here, all of which are
-    # monotone in cl and therefore send a free search to the upper bound.
-    # Only informative because om_g is now stochastic.
-    ["std(pi_g - pi_s)", "corr(pi_g - pi_s, om_g)"])
+    ["corr(N,GDP)", "corr(N,GDP/N)"])
 
 const MOMENT_BLOCKS = [
     (1:12,  "std(Y_i) sectoral output vol"),
@@ -508,35 +460,14 @@ const MOMENT_BLOCKS = [
     (44:46, "rank correlations"),
     (47:58, "corr(Y_i,PH_i) supply/demand mix"),
     (59:60, "labor comovement corr(N,·)"),
-    (61:61, "goods expenditure share"),
-    (62:63, "goods-services relative price (identifies cl)"),
 ]
 
 # ---- Weighting matrix ------------------------------------------------------ #
-# Sectoral value-added shares, % of total VA. Fixed, for ECONOMIC-SIZE moment
-# weighting. Order = the 12 model sectors.
-#
-# SOURCE (2026-08-19): Chilean IO tables 2021, Data/2021_Cuadros_12x12.xlsx,
-# Cuadro 23 "Valor agregado" — the same table the calibration is built from.
-#
-# WAS: [5.07, 12.63, 15.87, 2.90, 3.14, 3.34, 10.93, 6.71, 2.13, 26.03, 11.08,
-# 0.17] — hardcoded from an OLD MODEL RUN, not from data, and that run used the
-# pre-2026-08-19 cost-base alpha convention, so it was stale twice over. It
-# systematically downweighted exactly the sectors the model fits worst:
-#
-#   sector                  old      data     ratio
-#   Administracion publica  0.17%    5.08%    x29.9
-#   Serv. inmobiliarios     2.13%    8.55%    x4.0
-#   Comercio                3.34%   12.66%    x3.8
-#   Construccion            3.14%    6.45%    x2.1
-#   Serv. empresariales    26.03%    9.75%    x0.37
-#
-# Effect on the criterion is small (total objective 15.09 -> 15.13 at the July
-# theta) because the sectoral blocks are only ~21% of it — but it changes WHICH
-# sectors the optimiser chases, and a model-derived weight matrix is not
-# defensible in a replication package.
-const SECTOR_VA_SHARE = let s = [3.92, 15.78, 9.54, 2.79, 6.45, 12.66,
-                                 8.31,  3.91, 8.55, 9.75, 13.27, 5.08]
+# Sectoral value-added shares (Chile), fixed, for ECONOMIC-SIZE moment weighting.
+# From the model steady-state VA decomposition (%ΣVA); swap for official national-
+# accounts sectoral GDP shares if/when preferred. Order = the 12 model sectors.
+const SECTOR_VA_SHARE = let s = [5.07, 12.63, 15.87, 2.90, 3.14, 3.34,
+                                 10.93, 6.71, 2.13, 26.03, 11.08, 0.17]
     s ./ sum(s)
 end
 
@@ -545,11 +476,8 @@ function build_weighting_matrix(dm::Vector{<:Real})
     # Sectoral volatility moments 1:36 = output(1:12), price(13:24), labor(25:36).
     # Weight each by the sector's VALUE-ADDED SHARE (economic size), NOT 1/d².
     # WHY: 1/d^2 pathologically over-weighted the SMALLEST-volatility sector —
-    # Public Admin (data std 0.011) received weight ~7650, about 1200x
-    # Agriculture, and its std(Y) miss alone was 40% of the objective.
-    # (The original note here justified this with "0.17% of VA", which was the
-    # MODEL's public-admin share under the old calibration, not the data's —
-    # Cuadro 23 puts it at 5.08%. The 1/d^2 argument stands on its own.)
+    # Public Admin (0.17% of VA, data std 0.011) received weight ~7650, about
+    # 1200x Agriculture, and its std(Y) miss alone was 40% of the objective.
     # Size-weighting makes the objective track economic relevance; cross-sector
     # ORDERING stays disciplined by the rank-correlation moments (44-46).
     # SECT_BLOCK_W = total weight per 12-sector block (tunable).
@@ -573,19 +501,6 @@ function build_weighting_matrix(dm::Vector{<:Real})
         w[k] = 3.0
     end
     w[59] = 2.0; w[60] = 2.0   # corr(N,GDP), corr(N,GDP/N)
-    # std(omG), the goods expenditure share (2026-08-19). Inverse-squared-data
-    # weighting, as for the other aggregate std moments (37,38,40,41). This is
-    # the moment that identifies sigma_omg — under Cobb-Douglas omega_t IS the
-    # goods expenditure share (FGI 2023 eq. 12), so the mapping is direct.
-    let d = abs(dm[61]); w[61] = d > 1e-4 ? 1.0/d^2 : 1.0/0.01^2 end
-    # 62 std(pi_g - pi_s): inverse-squared-data, consistent with the other
-    # aggregate std moments (37,38,40,41). 63 corr(pi_g - pi_s, om_g): fixed
-    # weight, as for every other correlation — bounded in [-1,1], so a
-    # proportional weight would explode near zero (that pathology is what the
-    # corr(Y_i,PH_i) note above records). 3.0 matches the corr(Y_i,PH_i) block,
-    # i.e. the same emphasis as the other identification-carrying correlations.
-    let d = abs(dm[62]); w[62] = d > 1e-4 ? 1.0/d^2 : 1.0/0.01^2 end
-    w[63] = 3.0
     return Diagonal(w) |> Matrix
 end
 
@@ -622,124 +537,6 @@ function print_fit_table(dm::AbstractVector, mm::AbstractVector, W::AbstractMatr
     end
     println(io, "  ", repeat("-", 84))
     @printf(io, "  %-34s %29s %10.4f %6s\n", "TOTAL OBJECTIVE", "", tot, "100%")
-end
-
-# =========================================================================== #
-#  OBJECTIVE PROVENANCE  (added 2026-08-19)                                   #
-# =========================================================================== #
-# WHY. The checkpoint written 2026-07-24 10:21 carries obj = 21.4718.
-# Re-evaluating the SAME θ on 2026-08-19 gives 15.0909, with every block of the
-# decomposition moved (Rank 8.639→4.777, PH 4.180→1.742, Agg 1.313→0.837).
-# That is NOT the estimator disagreeing with main_SOE_gap.jl. Between 10:21 and
-# 13:40 that same day the model changed underneath the checkpoint:
-#
-#   10:48  NK_SOE_lev_gap2.mod  + eps_pc   (world copper price — a 28th ACTIVE
-#                                           shock the 10:21 run never had)
-#   11:16  NK_SOE_lev_gap2.mod  + choice3
-#   13:23  NK_SOE_lev_gap2.mod  + ownership
-#   13:40  NK_SOE_lev_gap2.mod  + GDP_vol  (volume GDP — redefines std(GDP),
-#                                           corr(GDP,pi), corr(GDP,Q),
-#                                           corr(N,GDP), corr(N,GDP/N))
-#
-# The stored objective was simply computed on a model that no longer exists.
-# A stored objective is comparable to a fresh one only when EVERY file that
-# defines the objective is byte-identical. Stamp it on write, verify it on read.
-#
-# Deliberately dependency-free (no SHA / no new `using`): the stamp is
-# "basename:bytes:mtime" per file. Byte count catches ordinary edits; mtime
-# catches same-size edits.
-
-const OBJ_PROVENANCE_FILE = "objective_provenance.txt"
-
-"""
-    objective_dep_files(script_dir, mod_dir, data_dir) -> Vector{String}
-
-Every file whose contents change the VALUE of the SMM objective: the model, the
-moment/weight definitions, the two solver front-ends, and the data moments.
-Missing files are dropped silently so this works on a partial checkout.
-"""
-function objective_dep_files(script_dir::AbstractString,
-                             mod_dir::AbstractString,
-                             data_dir::AbstractString)
-    return filter(isfile, [
-        # model + moment/weight definitions + steady state
-        joinpath(mod_dir,    "NK_SOE_lev_gap2.mod"),
-        joinpath(script_dir, "utils.jl"),
-        joinpath(script_dir, "smm_estimation.jl"),
-        joinpath(script_dir, "smm_model_moments.jl"),
-        joinpath(script_dir, "steady_ntwsoe_system.jl"),
-        joinpath(script_dir, "steady_ntwsoe.jl"),
-        # data moments (the LHS of the objective)
-        joinpath(data_dir,   "sectoral_moments.csv"),
-        joinpath(data_dir,   "aggregate_moments.csv"),
-        # calibration inputs — these move the steady state, hence every model
-        # moment. sector_calibration.csv in particular: its alpha/alpha_V
-        # convention changed on 2026-08-19 (cost base -> gross output, to match
-        # Ferrante, Graves & Iacoviello 2023), which shifts the whole SS.
-        joinpath(data_dir,   "sector_calibration.csv"),
-        joinpath(data_dir,   "IO_2021_chile_domestic.csv"),
-        joinpath(data_dir,   "IO_2021_chile.csv"),
-        joinpath(data_dir,   "fpa_vector_few_industries_chile.csv"),
-        joinpath(data_dir,   "sectoral_shock_calibration.csv"),
-        joinpath(data_dir,   "external_shock_calibration.csv"),
-    ])
-end
-
-"""
-    objective_fingerprint(files) -> String
-
-One `basename:bytes:mtime` line per file, newline separated.
-"""
-objective_fingerprint(files::AbstractVector{<:AbstractString}) =
-    join([@sprintf("%s:%d:%.0f", basename(f), filesize(f), mtime(f)) for f in files], "\n")
-
-"""
-    write_objective_provenance(dir, files)
-
-Record the current fingerprint next to the estimation output. Call this from
-`save_checkpoint` so every stored objective carries the model it was computed on.
-"""
-function write_objective_provenance(dir::AbstractString,
-                                    files::AbstractVector{<:AbstractString})
-    open(joinpath(dir, OBJ_PROVENANCE_FILE), "w") do io
-        println(io, "# Fingerprint of every file that defines the SMM objective.")
-        println(io, "# A stored obj_hat is comparable to a fresh evaluation ONLY if")
-        println(io, "# this block still matches. See utils.jl OBJECTIVE PROVENANCE.")
-        println(io, "# written ", Libc.strftime("%Y-%m-%d %H:%M:%S", time()))
-        println(io, objective_fingerprint(files))
-    end
-    return nothing
-end
-
-"""
-    check_objective_provenance(dir, files, θ_mtime) -> (comparable::Bool, changed::Vector{String})
-
-`comparable == false` means a stored objective from `dir` must NOT be compared
-against, or reported alongside, a freshly computed one. `changed` names the
-offending files.
-
-Falls back to an mtime comparison when no provenance file is present (every
-checkpoint written before 2026-08-19). The fallback is conservative: it flags
-anything modified after the θ file, which is the correct default.
-"""
-function check_objective_provenance(dir::AbstractString,
-                                    files::AbstractVector{<:AbstractString},
-                                    θ_mtime::Real)
-    prov = joinpath(dir, OBJ_PROVENANCE_FILE)
-    if isfile(prov)
-        stored = [l for l in split(read(prov, String), '\n')
-                  if !isempty(l) && !startswith(l, "#")]
-        stored_d = Dict(String(first(split(l, ':'))) => String(l) for l in stored)
-        changed = String[]
-        for l in split(objective_fingerprint(files), '\n')
-            nm = String(first(split(l, ':')))
-            get(stored_d, nm, "") == String(l) || push!(changed, nm)
-        end
-        return isempty(changed), changed
-    end
-    # No stamp: fall back to mtime. 1 s slack absorbs timestamp granularity.
-    newer = [basename(f) for f in files if mtime(f) > θ_mtime + 1.0]
-    return isempty(newer), newer
 end
 
 end  # include guard (_SMM_SHARED_DEFS_LOADED)

@@ -277,8 +277,10 @@ services = spend_serv .> spend_good    # Bool vector
 modgammag = spend_good ./ sum(spend_good)  # within-goods sector shares γ^g_i
 modgammas = spend_serv ./ sum(spend_serv)  # within-services sector shares γ^s_i
 
-# Labor adjustment cost (set to zero in baseline — controlled by ilabcosts_val below)
-modcl    = fill(parse(Float64, get(ENV, "SMM_CL", "0.0")), nsec)  # sectoral labor reallocation cost (env SMM_CL; 0 = free reallocation, the current baseline)
+# Labour adjustment cost. Placeholder only — the real value is assigned after
+# θ is loaded (search "modcl = fill"), because it defaults to θ[1] and
+# ilabcosts_val is not final until the SMM estimates are read.
+modcl    = zeros(nsec)
 modclneg = zeros(nsec)
 modcm    = zeros(nsec)
 
@@ -298,7 +300,23 @@ rhoirule_val = 0.74     # smoothing parameter
 # Structural
 gammaind_val = 0.0       # price indexation
 ilabcosts_val = 0.1      # inverse of aggregate labor adjustment cost (1/Ψ^L)
-ombar_val     = 0.57     # steady-state goods share in consumption basket
+# Steady-state goods share in the consumption basket. Under the Cobb-Douglas
+# aggregator this IS the nominal goods expenditure share (FGI 2023 eq. 12), so
+# it is an observable — but it must be measured on the SAME basis as the
+# consumption weights spend_good/spend_serv, i.e. household consumption by
+# producing ACTIVITY at BASIC prices (Cuadro 20): 0.2631. Overridden below by
+# Data/consumption_calibration.csv.
+#   0.57   — matched the old purchaser-price weights (57.19%), internally
+#            consistent but the wrong valuation for this model
+#   0.5304 — CCNN bienes/servicios, a PRODUCT classification: consistent with
+#            neither the weights nor the is_goods flags (my error, 2026-08-19)
+#   0.2631 — activity basis, consistent with the rebuilt weights. FGI's US
+#            omega_bar = 0.31 is the same concept.
+ombar_val     = 0.2631
+# Goods/services demand-reallocation shock (FGI 2023 omega_t), added 2026-08-19.
+rho_omg_val   = 0.5007   # autocorr of the HP(1600) cycle of log(omega), Chile
+sigma_omg_val = 0.0322   # std of that cycle
+shock_eps_omg_val = 1.0  # 1 = active
 
 # SOE / foreign sector
 Pistar_ss    = 1.00      # steady-state foreign inflation (zero net inflation)
@@ -417,6 +435,7 @@ shock_eps_om_vec     = Float64.(sigma_om_vec .> 0)
 shock_eps_i_val      = Float64(sigma_i_val  > 0)
 shock_eps_pvstar_val = Float64(EXERCISE == 0 && sigma_pvstar_val > 0)
 shock_eps_xi_val     = Float64(EXERCISE == 0 && sigma_xi_val > 0)
+shock_eps_omg_val    = Float64(EXERCISE == 0 && sigma_omg_val > 0)   # goods-share reallocation
 shock_eps_postar_val = Float64(EXERCISE == 0 && sigma_postar_val > 0 && any(modalphaOil .> 0))
 shock_eps_pc_val = Float64(EXERCISE == 0 && sigma_pc_val > 0)   # copper price shock active in baseline
 shock_epsA_val       = ones(nsec)
@@ -500,6 +519,21 @@ if !isempty(_theta_file)
     smm_param_source = basename(_theta_file)
 end
 
+# ---- kappaw override (2026-08-19) ----------------------------------------- #
+# Rotemberg wage adjustment cost. Enters the wage Phillips curve at
+# NK_SOE_lev_gap2.mod:337-338; to first order the slope is epsw/kappaw, so
+# HIGHER kappaw = FLATTER = stickier wages, and kappaw = 0 collapses the
+# equation to w = MRS (flexible wages). epsw = 10.
+#
+# Added so kappaw can be swept from the shell the way SMM_CL can. Without it a
+# `SMM_KAPPAW=... julia main_SOE_gap.jl` ladder silently does nothing — every
+# run returns the θ[36] value and produces byte-identical output.
+_kw_env = get(ENV, "SMM_KAPPAW", "")
+if !isempty(_kw_env)
+    kappaw_val = parse(Float64, _kw_env)
+    @printf "  kappaw = %.4g  [SMM_KAPPAW override]  (wage PC slope epsw/kappaw = %.4g%s)\n" kappaw_val (kappaw_val > 0 ? 10/kappaw_val : Inf) (kappaw_val == 0 ? "; flexible wages, w = MRS" : "")
+end
+
 # Enforce the AR-persistence box [0, 0.99] on the parameters that will drive the
 # simulation, regardless of source. A stored estimate from BEFORE the [0,1)
 # non-negativity floor (e.g. rho_om = -0.82) would otherwise produce oscillatory
@@ -538,6 +572,47 @@ if isfile(joinpath(DATA_DIR, "sectoral_shock_calibration.csv"))
         @printf "  [redesign] WARNING sectoral_shock_calibration.csv has %d rows != nsec=%d; ignored\n" nrow(_sc) nsec
     end
 end
+# ombar is the goods share of the CONSUMPTION WEIGHTS, so it must come from the
+# same source and valuation as spend_good/spend_serv: Cuadro 20, activity-based
+# at basic prices. consumption_calibration.csv owns it (written by
+# build_sector_calibration.py). Earlier today it was briefly set from the CCNN
+# bienes/servicios split (0.5304) — a PRODUCT classification, consistent with
+# neither the weights nor the model's is_goods flags. The pre-existing 0.57 was
+# consistent with the old purchaser-price weights; both are superseded.
+if isfile(joinpath(DATA_DIR, "consumption_calibration.csv"))
+    _cc = CSV.read(joinpath(DATA_DIR, "consumption_calibration.csv"), DataFrame)
+    _cm = Dict(String.(_cc.param) .=> Float64.(_cc.value))
+    ombar_val = get(_cm, "ombar", ombar_val)
+    @printf "  [redesign] ombar <- consumption_calibration.csv (%.4f, activity basis; FGI US 0.31)\n" ombar_val
+else
+    @printf "  WARNING: consumption_calibration.csv missing — ombar may not match the\n"
+    @printf "           consumption weights. Run: python3 Data/build_sector_calibration.py\n"
+end
+if isfile(joinpath(DATA_DIR, "reallocation_shock_calibration.csv"))
+    _rc = CSV.read(joinpath(DATA_DIR, "reallocation_shock_calibration.csv"), DataFrame)
+    _rm = Dict(String.(_rc.param) .=> Float64.(_rc.value))
+    rho_omg_val   = get(_rm, "rho_omg",   rho_omg_val)
+    sigma_omg_val = get(_rm, "sigma_omg", sigma_omg_val)
+    @printf "  [redesign] goods-share reallocation shock <- reallocation_shock_calibration.csv (rho=%.3f sigma=%.4f)\n" rho_omg_val sigma_omg_val
+else
+    @printf "  WARNING: reallocation_shock_calibration.csv missing — using built-in defaults for ombar/rho_omg/sigma_omg.\n"
+    @printf "           Regenerate with: python3 Data/build_reallocation_calibration.py\n"
+end
+# Overrides so the reallocation shock can be switched off INDEPENDENTLY of the
+# ombar level (2026-08-19). Both changed together in the first run, which made
+# the effect of the shock unattributable. SMM_SIGMA_OMG=0 turns the shock off
+# while leaving the steady state alone; SMM_OMBAR restores the old 0.57 level.
+_so_env = get(ENV, "SMM_SIGMA_OMG", "")
+isempty(_so_env) || (sigma_omg_val = parse(Float64, _so_env))
+_ob_env = get(ENV, "SMM_OMBAR", "")
+isempty(_ob_env) || (ombar_val = parse(Float64, _ob_env))
+(isempty(_so_env) && isempty(_ob_env)) ||
+    @printf "  [override] ombar=%.4f sigma_omg=%.4f%s\n" ombar_val sigma_omg_val (sigma_omg_val == 0 ? "  (reallocation shock OFF)" : "")
+# Recompute the activation flag: it is first set at ~line 431, before the
+# calibration CSV and the overrides above are read, so it would otherwise carry
+# the built-in default. (sigma_omg = 0 already neutralises the shock, but a
+# unit innovation variance on a zero-loading shock is untidy in the .mod.)
+shock_eps_omg_val = Float64(EXERCISE == 0 && sigma_omg_val > 0)
 if isfile(joinpath(DATA_DIR, "external_shock_calibration.csv"))
     _ec = CSV.read(joinpath(DATA_DIR, "external_shock_calibration.csv"), DataFrame)
     _em = Dict(String.(_ec.param) .=> Float64.(_ec.value))
@@ -545,6 +620,27 @@ if isfile(joinpath(DATA_DIR, "external_shock_calibration.csv"))
     sigma_pvstar_val = get(_em, "sigma_pvstar", sigma_pvstar_val)
     @printf "  [redesign] external shock <- external_shock_calibration.csv (rho=%.3f sigma=%.3f)\n" rho_pvstar_val sigma_pvstar_val
 end
+
+# ---- Labour adjustment cost (assigned here: ilabcosts_val is now final) ---- #
+# `cl_i` IS Ferrante, Graves & Iacoviello's (2023 JME) hiring cost c, one-for-one:
+# their FOC + envelope condition appears term for term at
+# NK_SOE_lev_gap2.mod:557-560, and their aggregate labour-market clearing
+# (their eq. 24) at .mod:302-307. FGI estimate c = 19.1 (s.e. 12.6) off the
+# cross-section of sectoral employment changes.
+#
+# WAS `fill(get(ENV,"SMM_CL","0.0"), nsec)` — the friction was OFF by default,
+# so Lab_costs ≡ 0 and the model had no labour adjustment cost at all. θ[1] was
+# wired to `ilabcosts`, which appears ONLY in the definition of the reporting
+# variable Lab_costs (.mod:319) and therefore has no effect on the model at any
+# value. So the estimator's one labour-friction parameter was dead and the live
+# one was pinned to zero (both fixed 2026-08-19).
+#
+# The steady state is independent of cl — at L_i/L_i(-1) = 1 every adjustment
+# term vanishes — so this cannot move the calibration, only the dynamics.
+_cl_env = get(ENV, "SMM_CL", "")
+modcl   = fill(isempty(_cl_env) ? ilabcosts_val : parse(Float64, _cl_env), nsec)
+@printf "  labour adjustment cost cl = %.4g  (= FGI 2023 hiring cost c; their estimate 19.1, s.e. 12.6)%s\n" modcl[1] (isempty(_cl_env) ? "  [from θ[1]]" : "  [SMM_CL override]")
+all(modcl .== 0) && @printf "  WARNING: cl = 0 — labour reallocation is frictionless.\n"
 
 @printf "--- Parameters (%s) ---\n" smm_param_source
 param_vals = [ilabcosts_val, modepsY[1], modepsM[1], kappaV_val,
@@ -1086,6 +1182,9 @@ params_nt = (
     shock_eps_i_val      = shock_eps_i_val,
     shock_eps_pvstar_val = shock_eps_pvstar_val,
     shock_eps_xi_val     = shock_eps_xi_val,
+    rho_omg_val          = rho_omg_val,
+    sigma_omg_val        = sigma_omg_val,
+    shock_eps_omg_val    = shock_eps_omg_val,
     shock_epsA_val       = shock_epsA_val,
     # Option-A: 12 sectoral demand shock parameters
     sigma_om_vec         = sigma_om_vec,
@@ -1244,7 +1343,10 @@ m_std_pi     = NaN
 m_std_Q      = NaN
 m_corr_GDPpi = NaN
 m_corr_GDPQ  = NaN
-m_omG        = ombar_val   # fixed by calibration
+m_omG        = ombar_val   # SS goods share — fixed by calibration
+m_std_omG    = NaN         # moment 61: std of the goods expenditure share
+m_std_pigap  = NaN         # moment 62: std(pi_g - pi_s)
+m_corr_pigap_om = NaN      # moment 63: corr(pi_g - pi_s, om_g)
 m_autocorr_Q = NaN
 m_std_TBGDP  = NaN
 rho_y = 0.0; rho_p = 0.0; rho_l = 0.0
@@ -1268,7 +1370,7 @@ try
     n_active = 0
     if isfile(exo_names_file)
         exo_names_jl = String.(CSV.read(exo_names_file, DataFrame).shock)
-        active_set = Set(vcat(["eps_i", "eps_pvstar", "eps_xi", "eps_pc"],
+        active_set = Set(vcat(["eps_i", "eps_pvstar", "eps_xi", "eps_pc", "eps_omg"],
                               ["epsA_$(i)"   for i in 1:nsec],
                               ["eps_om_$(i)" for i in 1:nsec]))
         for (k, nm) in enumerate(exo_names_jl)
@@ -1304,7 +1406,9 @@ try
         ["Y_$(i)"  for i in 1:nsec],
         ["PH_$(i)" for i in 1:nsec],
         ["L_$(i)"  for i in 1:nsec],
-        ["GDP", "GDP_vol", "pi", "Q", "TB", "N"]   # GDP_vol = volume GDP for the aggregate moments
+        # GDP_vol = volume GDP for the aggregate moments; om_g = goods share
+        # (moment 61, added 2026-08-19)
+        ["GDP", "GDP_vol", "pi", "Q", "TB", "N", "om_g", "pi_g", "pi_s"]
     )
     needed_idx  = [get(endo_idx, nm, 0) for nm in needed_names]
     valid_mask  = needed_idx .> 0
@@ -1384,6 +1488,28 @@ try
     m_std_TBGDP = (i_TB_sub > 0) ?
         sqrt(max(Γ_val[i_TB_sub, i_TB_sub], 0.0)) / GDP_ss_val : NaN
 
+    # Moment 61 (2026-08-19): std of the goods expenditure share.
+    # omega_t = exp(om_g); Γ is in deviations of om_g from log(ombar), so
+    # sqrt(Γ) = std(log omega) and the LEVEL std is sqrt(Γ)·ombar — matching
+    # how std_omG is computed from the data.
+    m_std_omG = let k = get(ei_sub, "om_g", 0)
+        k == 0 ? 0.0 : sqrt(max(Γ_val[k,k], 0.0)) * ombar_val
+    end
+
+    # Moments 62-63 (2026-08-19): goods-services relative price channel, the
+    # moment pair that identifies cl. See utils.jl MOMENT_NAMES and
+    # smm_estimation.jl for the derivation; must stay identical to that version.
+    let i_pg = get(ei_sub,"pi_g",0), i_ps = get(ei_sub,"pi_s",0), i_og = get(ei_sub,"om_g",0)
+        vgap = (i_pg==0 || i_ps==0) ? 0.0 :
+               max(Γ_val[i_pg,i_pg] + Γ_val[i_ps,i_ps] - 2Γ_val[i_pg,i_ps], 0.0)
+        m_std_pigap = sqrt(vgap)
+        m_corr_pigap_om = (i_pg==0 || i_ps==0 || i_og==0 || vgap < 1e-20) ? 0.0 :
+            let cg = Γ_val[i_pg,i_og] - Γ_val[i_ps,i_og],
+                dd = sqrt(vgap * max(Γ_val[i_og,i_og], 0.0))
+                dd < 1e-15 ? 0.0 : clamp(cg/dd, -1.0, 1.0)
+            end
+    end
+
     # Autocorrelation of Q
     i_Q_sub = get(ei_sub, "Q", 0)
     m_autocorr_Q = (i_Q_sub > 0 && Γ_val[i_Q_sub, i_Q_sub] > 1e-15) ?
@@ -1419,6 +1545,8 @@ d_std_GDP = NaN; d_std_pi = NaN; d_corr_GDPpi = NaN; d_omG = 0.57
 d_std_Q = NaN; d_autocorr_Q = NaN; d_corr_GDPQ = NaN; d_TBGDP = NaN
 d_std_TBGDP = NaN   # std of HP-filtered TB/GDP — add "std_TBGDP" to aggregate_moments.csv
 d_corr_NGDP = NaN; d_corr_NAPL = NaN
+d_std_omG = NaN     # moment 61 — "std_omG" in aggregate_moments.csv
+d_std_pigap = NaN; d_corr_pigap_om = NaN   # moments 62-63
 y_d_tab = y_d; p_d_tab = p_d; l_d_tab = l_d
 
 if isfile(agg_mom_path)
@@ -1427,7 +1555,7 @@ if isfile(agg_mom_path)
     d_std_GDP    = get(agg_d, "std_GDP",     NaN)
     d_std_pi     = get(agg_d, "std_pi",      NaN)
     d_corr_GDPpi = get(agg_d, "corr_GDPpi", NaN)
-    d_omG        = get(agg_d, "omG",         0.57)
+    d_omG        = get(agg_d, "omG",         ombar_val)
     d_std_Q      = get(agg_d, "std_Q",       NaN)
     d_autocorr_Q = get(agg_d, "autocorr_Q", NaN)
     d_corr_GDPQ  = get(agg_d, "corr_GDPQ",  NaN)
@@ -1435,6 +1563,10 @@ if isfile(agg_mom_path)
     d_std_TBGDP  = get(agg_d, "std_TBGDP",  NaN)
     d_corr_NGDP  = get(agg_d, "corr_NGDP",  NaN)
     d_corr_NAPL  = get(agg_d, "corr_NAPL",  NaN)
+    d_std_omG    = get(agg_d, "std_omG",    NaN)
+    d_std_pigap     = get(agg_d, "std_pigap",     NaN)
+    d_corr_pigap_om = get(agg_d, "corr_pigap_om", NaN)
+    isnan(d_std_omG) && @printf "  WARNING: std_omG missing from aggregate_moments.csv (moment 61).\n           Regenerate with: python3 Data/build_reallocation_calibration.py\n"
 end
 
 # Build the FULL 60-element data and model vectors — same layout, same
@@ -1445,14 +1577,18 @@ data_vec = [y_d_tab; p_d_tab; l_d_tab;
             d_std_Q; d_autocorr_Q; d_corr_GDPQ;
             1.0; 1.0; 1.0;             # rank corr targets = 1
             c_d;                        # corr(Y_i,PH_i), 12 sectors
-            d_corr_NGDP; d_corr_NAPL]  # labor comovement
+            d_corr_NGDP; d_corr_NAPL;  # labor comovement
+            d_std_omG;                 # moment 61: goods expenditure share
+            d_std_pigap; d_corr_pigap_om]   # 62-63: relative price (identifies cl)
 
 model_vec = [std_Y_m; std_PH_m; std_L_m;
              m_std_GDP; m_std_pi; m_corr_GDPpi; m_std_TBGDP;
              m_std_Q; m_autocorr_Q; m_corr_GDPQ;
              rho_y; rho_p; rho_l;
              corr_YPH_m;
-             m_corr_NGDP; m_corr_NAPL]
+             m_corr_NGDP; m_corr_NAPL;
+             m_std_omG;
+             m_std_pigap; m_corr_pigap_om]
 
 @assert length(data_vec)  == N_MOMENTS "data_vec has $(length(data_vec)) ≠ N_MOMENTS=$N_MOMENTS"
 @assert length(model_vec) == N_MOMENTS "model_vec has $(length(model_vec)) ≠ N_MOMENTS=$N_MOMENTS"
@@ -1518,7 +1654,7 @@ model_source    = smm_model_vec !== nothing ? "SMM (Klein)" : "Dynare (QZ)"
 @printf "\n--- Parameters in effect (%s) ---\n" smm_param_source
 print_param_table(θ_report)
 
-# ---- Moment fit (same 60 moments, weights, and layout as the estimator) --- #
+# ---- Moment fit (same N_MOMENTS moments, weights and layout as the estimator) --- #
 @printf "\n--- Moment fit (%s) ---\n" model_source
 print_fit_table(data_vec, model_vec_final, W_smm)
 
@@ -1528,7 +1664,7 @@ total_loss = dot(data_vec .- model_vec_final, W_smm*(data_vec .- model_vec_final
 mom_table_path = joinpath(TABLES_DIR, "moment_fit_$(tag).txt")
 open(mom_table_path, "w") do f_mom
     write(f_mom, "NK-SOE Chile — Moment fit (Exercise: $(exercise_labels[EXERCISE+1]), source: $model_source)\n")
-    write(f_mom, "Same 60 moments and weighting matrix as the SMM objective.\n")
+    write(f_mom, "Same $(N_MOMENTS) moments and weighting matrix as the SMM objective.\n")
     print_param_table(θ_report; io=f_mom)
     print_fit_table(data_vec, model_vec_final, W_smm; io=f_mom)
 end

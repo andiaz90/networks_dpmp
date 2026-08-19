@@ -30,7 +30,7 @@ using CMAEvolutionStrategy
 
 # θ-REDUCTION: SMM_PIN holds a full 36-vector whose 28 non-transmission entries PIN
 # the objective (elasticities, 24 measured sectoral shock sizes, external rho/sigma).
-# Only the 7 transmission params are searched. This is now the ONLY estimation mode.
+# Only the 8 transmission params are searched. This is now the ONLY estimation mode.
 const SMM_PIN = Ref{Union{Nothing,Vector{Float64}}}(nothing)
 
 # Thrown from the CMA-ES objective when the wall-clock self-limit is hit, so the
@@ -104,28 +104,6 @@ if isfile(sec_mom_file) && isfile(agg_mom_file)
         """)
     d_corr_NGDP  = agg_dict["corr_NGDP"]
     d_corr_NAPL  = agg_dict["corr_NAPL"]
-    # std(omG), moment 61 (added 2026-08-19): HP-filtered std of the nominal
-    # goods expenditure share. Under Cobb-Douglas this IS the FGI (2023) omega_t,
-    # so it identifies sigma_omg directly. NO fallback — a stale
-    # aggregate_moments.csv would silently mis-score the new reallocation shock.
-    haskey(agg_dict, "std_omG") || error("""
-        aggregate_moments.csv is STALE: std_omG not found.
-        It predates the 2026-08-19 goods-share moment. Regenerate with:
-            python3 Data/build_reallocation_calibration.py
-        (compute_data_moments.jl does not yet compute this moment, and it
-        hardcodes omG = 0.57 — re-running it will clobber both entries.)
-        """)
-    d_std_omG    = agg_dict["std_omG"]
-    # Moments 62-63 (2026-08-19): the relative-price channel that identifies cl.
-    (haskey(agg_dict, "std_pigap") && haskey(agg_dict, "corr_pigap_om")) || error("""
-        aggregate_moments.csv is STALE: std_pigap / corr_pigap_om not found.
-        These are the goods-services relative price moments that identify the
-        labour adjustment cost cl; without them cl is not interior-identified
-        and a free search returns the upper bound. Regenerate with:
-            python3 Data/build_reallocation_calibration.py
-        """)
-    d_std_pigap     = agg_dict["std_pigap"]
-    d_corr_pigap_om = agg_dict["corr_pigap_om"]
     @printf "  Loaded sectoral_moments.csv + aggregate_moments.csv\n\n"
 elseif get(ENV, "SMM_SMOKE", "0") == "1"
     # SMOKE-TEST MODE ONLY (set by smoke_test.jl): allow include-time syntax/
@@ -137,10 +115,9 @@ elseif get(ENV, "SMM_SMOKE", "0") == "1"
     y_d = fill(0.04, NSEC); p_d = fill(0.02, NSEC); l_d = fill(0.03, NSEC)
     corr_YPH_d = fill(0.0, NSEC)
     d_std_GDP=0.0215; d_std_pi=0.0041; d_corr_GDPpi=-0.15
-    d_omG=0.5304; d_std_Q=0.0520; d_autocorr_Q=0.75
+    d_omG=0.57; d_std_Q=0.0520; d_autocorr_Q=0.75
     d_corr_GDPQ=-0.15; d_TBGDP=-0.02; d_std_TBGDP=0.025
-    d_corr_NGDP=0.698; d_corr_NAPL=0.065; d_std_omG=0.0172
-    d_std_pigap=0.0154; d_corr_pigap_om=0.376
+    d_corr_NGDP=0.698; d_corr_NAPL=0.065
 else
     # NO placeholder fallback (removed 2026-07-08): estimating against
     # invented moments silently produces meaningless results.
@@ -162,7 +139,7 @@ end
 
 data_moments = [y_d; p_d; l_d; d_std_GDP; d_std_pi; d_corr_GDPpi;
                 d_std_TBGDP; d_std_Q; d_autocorr_Q; d_corr_GDPQ; 1.0; 1.0; 1.0; corr_YPH_d;
-                d_corr_NGDP; d_corr_NAPL; d_std_omG; d_std_pigap; d_corr_pigap_om]
+                d_corr_NGDP; d_corr_NAPL]
 @assert length(data_moments) == length(MOMENT_NAMES) "data_moments ($(length(data_moments))) ≠ MOMENT_NAMES ($(length(MOMENT_NAMES)))"
 
 # GUARD: NaN anywhere in data_moments poisons the objective for ALL evaluations
@@ -204,19 +181,8 @@ end
 
 # N_MOMENTS (= 60) is defined in utils.jl.
 
-# Weighted contribution of one moment block, ψ' W ψ restricted to `rng`.
-# Used by every decomposition printer so they all follow MOMENT_BLOCKS and can
-# never again drift out of sync with N_MOMENTS (2026-08-19).
-_blk0(ψ, W, rng) = dot(view(ψ, rng), view(W, rng, rng) * view(ψ, rng))
-
 function validate_smm_setup(data_moments)
     errs = String[]
-    # The decomposition printers sum MOMENT_BLOCKS; if that does not tile
-    # 1:N_MOMENTS the printed blocks silently stop adding up to the objective.
-    _covered = sort(vcat([collect(rng) for (rng, _) in MOMENT_BLOCKS]...))
-    _covered == collect(1:N_MOMENTS) ||
-        push!(errs, "MOMENT_BLOCKS does not tile 1:$(N_MOMENTS) exactly " *
-                    "(covers $(length(_covered)) indices) — update MOMENT_BLOCKS in utils.jl")
 
     length(LB) == N_THETA ||
         push!(errs, "length(LB)=$(length(LB)) ≠ N_THETA=$N_THETA")
@@ -305,11 +271,6 @@ function save_checkpoint(θ::AbstractVector, obj::Real)
         open(joinpath(ESTIMATION_DIR, "min_loss.txt"), "w") do io
             @printf(io, "%.8f\n# loss at best_sol.txt  |  %s\n", Float64(obj), _ts)
         end
-        # Stamp the objective definition this obj was computed under, so a
-        # later main_SOE_gap.jl run can tell whether the stored number is still
-        # comparable (2026-08-19; see OBJECTIVE PROVENANCE in utils.jl).
-        write_objective_provenance(ESTIMATION_DIR,
-            objective_dep_files(SCRIPT_DIR, joinpath(SCRIPT_DIR, "mod"), DATA_DIR))
     catch err
         @printf "  [warn] checkpoint write failed: %s\n" sprint(showerror, err)
     end
@@ -538,26 +499,6 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
         set_param!(context,"isigma_tfp_$(i)",isigma_tfp[i])
         set_param!(context,"sigma_om_$(i)",sigma_om_vec[i])   # now EXISTS in the model (fixes C2)
         set_param!(context,"rho_tfp1_$(i)",rho_A)             # model uses sector-specific rho_tfp1_i
-        # θ[1] DRIVES THE LABOUR ADJUSTMENT COST (2026-08-19).
-        #
-        # It used to set only `ilabcosts`, which is a DEAD parameter: in
-        # NK_SOE_lev_gap2.mod `ilabcosts` appears in exactly one place, the
-        # definition of the reporting variable `Lab_costs` (line 319), and
-        # `Lab_costs` is used in no other equation. The live parameter is
-        # `cl_i`, which enters BOTH the labour-agency FOC (line 557) and
-        # labour-market clearing (line 302) — and it was pinned to 0 by
-        # main_SOE_gap.jl's `SMM_CL` default, so the friction was switched off
-        # and θ[1] had no effect on anything at any value.
-        #
-        # `cl_i` IS Ferrante, Graves & Iacoviello's (2023 JME) hiring cost c,
-        # one-for-one: their FOC + envelope condition is reproduced term for
-        # term at .mod:557-560, and their aggregate labour-market clearing
-        # (their eq. 24) at .mod:302-307. FGI estimate c = 19.1 (s.e. 12.6).
-        # θ[1]'s bounds [0.001, 50] bracket that comfortably.
-        #
-        # The steady state does not depend on cl (at L_i/L_i(-1) = 1 every
-        # adjustment term vanishes), so this cannot disturb the calibration.
-        set_param!(context,"cl_$(i)",ilabcosts)
     end
 
     epsY_prev    = get_param_val(context,"epsY_1"); epsM_prev = get_param_val(context,"epsM_1")
@@ -603,8 +544,7 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
 
     # HP-filtered covariance on the ~40 needed variables only (25× faster)
     needed_names = vcat(["Y_$(i)" for i in 1:nsec], ["PH_$(i)" for i in 1:nsec],
-                        ["L_$(i)" for i in 1:nsec],
-                        ["GDP","GDP_vol","pi","Q","TB","N","om_g","pi_g","pi_s"])
+                        ["L_$(i)" for i in 1:nsec], ["GDP","pi","Q","TB","N"])
     ei          = sc.endo_idx
     needed_idx  = [get(ei, nm, 0) for nm in needed_names]
     valid_mask  = needed_idx .> 0
@@ -671,8 +611,8 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
     # Γ_v in LEVEL deviations, convert to log-dev (co)variances by dividing by
     # steady states:  v_n = Γ_nn/N̄²,  v_g = Γ_gg/Ḡ²,  c_ng = Γ_ng/(N̄Ḡ).
     # Then corr(n, g−n) = (c_ng − v_n)/√(v_n·(v_g + v_n − 2c_ng)).
-    corr_NGDP_m = xcorr("N","GDP_vol")
-    corr_NAPL_m = let iN=get(ei_sub,"N",0), iG=get(ei_sub,"GDP_vol",0)
+    corr_NGDP_m = xcorr("N","GDP")
+    corr_NAPL_m = let iN=get(ei_sub,"N",0), iG=get(ei_sub,"GDP",0)
         if iN==0 || iG==0
             NaN
         else
@@ -686,42 +626,11 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
         end
     end
 
-    # Moment 61 (2026-08-19): std of the goods expenditure share.
-    # In the model omega_t = exp(om_g), and Dynare gives Γ in deviations of om_g
-    # from its SS log(ombar), so sqrt(Γ) = std(log omega) and the LEVEL std is
-    # sqrt(Γ)·ombar. That matches how std_omG is built from the data in
-    # Data/build_reallocation_calibration.py (std of the HP cycle of the level).
-    # Under Cobb-Douglas omega_t IS the goods expenditure share (FGI 2023 eq. 12),
-    # so this moment maps one-for-one onto sigma_omg.
-    _ombar = get_param_val(context, "ombar")
-    isnan(_ombar) && (_ombar = baseline.d_omG)
-    std_omG = let k = get(ei_sub, "om_g", 0)
-        k == 0 ? 0.0 : sqrt(max(Γ_v[k,k], 0.0)) * _ombar
-    end
-
-    # Moments 62-63 (2026-08-19): the goods-services relative price channel that
-    # identifies cl. gap = pi_g - pi_s, so var(gap) = var(pi_g)+var(pi_s)-2cov.
-    # Γ_v holds LEVEL deviations of gross inflation, and gross-inflation
-    # deviations equal net-inflation deviations to first order, which is the same
-    # object as the data's HP cycle of log gross inflation
-    # (compute_data_moments.jl:539-542). om_g = log(omega), matching hp(log omega)
-    # in the data.
-    i_pg = get(ei_sub, "pi_g", 0); i_ps = get(ei_sub, "pi_s", 0); i_og = get(ei_sub, "om_g", 0)
-    var_gap = (i_pg == 0 || i_ps == 0) ? 0.0 :
-              max(Γ_v[i_pg,i_pg] + Γ_v[i_ps,i_ps] - 2Γ_v[i_pg,i_ps], 0.0)
-    std_pigap = sqrt(var_gap)
-    corr_pigap_om = (i_pg == 0 || i_ps == 0 || i_og == 0 || var_gap < 1e-20) ? 0.0 :
-        let cov_go = Γ_v[i_pg,i_og] - Γ_v[i_ps,i_og],
-            d = sqrt(var_gap * max(Γ_v[i_og,i_og], 0.0))
-            d < 1e-15 ? 0.0 : clamp(cov_go / d, -1.0, 1.0)
-        end
-
-    # Return 63 moments: 12×std_Y + 12×std_PH + 12×std_L + 10×aggregate +
-    # 12×corr(Y_i,PH_i) + corr(N,GDP) + corr(N,GDP/N) + std(omG)
-    # + std(pi_g-pi_s) + corr(pi_g-pi_s, om_g)
-    return [std_Y;std_PH;std_L;pstd("GDP_vol");pstd("pi");xcorr("GDP_vol","pi");
-            std_TBGDP;pstd("Q");acQ;xcorr("GDP_vol","Q");rY;rP;rL;corr_YPH;
-            corr_NGDP_m;corr_NAPL_m;std_omG;std_pigap;corr_pigap_om], true
+    # Return 60 moments: 12×std_Y + 12×std_PH + 12×std_L + 10×aggregate +
+    # 12×corr(Y_i,PH_i) + corr(N,GDP) + corr(N,GDP/N)
+    return [std_Y;std_PH;std_L;pstd("GDP");pstd("pi");xcorr("GDP","pi");
+            std_TBGDP;pstd("Q");acQ;xcorr("GDP","Q");rY;rP;rL;corr_YPH;
+            corr_NGDP_m;corr_NAPL_m], true
 end
 
 
@@ -743,29 +652,17 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
 
     baseline = build_baseline(context, endo_names, y_d, p_d, l_d, d_TBGDP, d_omG)
 
-    # Verify the name-based shock mapping resolved (fixes C1). The expected
-    # count is DERIVED from active_shock_indices' own name list rather than
-    # hardcoded (2026-08-19): the literal "4 + 2*NSEC = 28" went stale the
-    # moment eps_omg was added, and the error text then blamed a stale context
-    # when the context was in fact correct (591 endogenous, 31 shocks, 29
-    # active). A count guard whose expectation is a magic number just moves the
-    # staleness from the data to the check.
-    let na = length(baseline.active_exo_idx), exo = smm_exo_names(context),
-        want = length(active_shock_indices(context, NSEC))
+    # Verify the name-based shock mapping resolved (fixes C1). Expect 27 active
+    # shocks: eps_i + eps_pvstar + eps_xi + 12 epsA + 12 eps_om. A wrong count
+    # means the loaded context is not the unified model — abort with guidance.
+    let na = length(baseline.active_exo_idx), exo = smm_exo_names(context)
         @printf "  Active shocks (by name): %d of %d exogenous\n" na length(exo)
-        if na != want
+        if na != 3 + 2*NSEC
             error("""
-            Active-shock mismatch: build_baseline resolved $(na) but
-            active_shock_indices resolves $(want) from the same context
-            ($(length(exo)) exogenous). These two must agree — they are separate
-            code paths over the same name list. Check that build_baseline and
-            active_shock_indices in smm_model_moments.jl use the same set.
-            """)
-        elseif na == 0
-            error("""
-            No shocks matched by name against the loaded context's exogenous
-            list ($(length(exo)) shocks). The context is almost certainly the
-            OLD model. Rebuild it:
+            Expected $(3 + 2*NSEC) active shocks (eps_i, eps_pvstar, eps_xi,
+            epsA_1:$(NSEC), eps_om_1:$(NSEC)) but resolved $(na) from the loaded
+            context's exogenous list ($(length(exo)) shocks).
+            The loaded context is almost certainly the OLD model. Rebuild it:
               julia --project=. main_SOE_gap.jl     # recompiles the unified .mod
             then re-run the estimation.
             """)
@@ -782,7 +679,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     @printf "  Weighting: proportional std devs + 5× rank correlations.\n\n"
 
     # Initial θ — θ-REDUCTION (the only mode): pin 28 params via SMM_PIN (elasticities +
-    # 24 measured sectoral shocks + external rho/sigma + etastar); estimate only the 7 transmission
+    # 24 measured sectoral shocks + external rho/sigma); estimate only the 8 transmission
     # params (θ 1,4,5,6,33,34,35,36), seeded at interior values.
     θ0 = default_theta0(context)
     θ0[2] = parse(Float64, get(ENV, "SMM_EPSY", "0.80"))   # epsY (Atalay eps_Q) — pinned
@@ -799,8 +696,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         haskey(_em, "rho_pvstar")   && (θ0[31] = _em["rho_pvstar"])
         haskey(_em, "sigma_pvstar") && (θ0[32] = _em["sigma_pvstar"])
     end
-    θ0[35] = parse(Float64, get(ENV, "SMM_ETASTAR", "1.0"))  # η* export elasticity — now PINNED (paper Table 3 = 1; Feenstra ~1-1.5), was estimated & drifted to ~4.5
-    SMM_PIN[] = copy(θ0)                  # objective reads the pinned entries from here (now 29 pins incl. etastar)
+    SMM_PIN[] = copy(θ0)                  # objective reads the 28 pinned entries from here
     # 8 FREE transmission params — interior seeds (never at a bound):
     θ0[1]  = 1.0        # ilabcosts
     θ0[4]  = log(1e6)   # log(kappaV)
@@ -808,12 +704,12 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     θ0[6]  = 0.5        # rho_A
     θ0[33] = 0.7        # rho_xi (persistent demand shock; data autocorr(Q)=0.72)
     θ0[34] = 0.010      # sigma_xi (small: a persistent shock needs less innovation size)
-    # θ0[35] (etastar) pinned above — not seeded here
+    θ0[35] = 2.0        # etastar
     θ0[36] = 100.0      # kappaw
     θ0 = clamp.(θ0, LB, UB)              # pinned dims clamped so scaled space stays [0,1]; objective overrides exactly
-    @printf "  θ-reduction: 7 transmission params estimated, 29 pinned (etastar calibrated to 1).\n"
+    @printf "  θ-reduction: 8 transmission params estimated, 28 pinned.\n"
     @printf "  pins: epsY=%.2f epsM=%.2f | 24 measured sectoral shocks | rho_pvstar=%.3f sigma_pvstar=%.3f\n" SMM_PIN[][2] SMM_PIN[][3] SMM_PIN[][31] SMM_PIN[][32]
-    @printf "  free seeds: sigma_xi=%.3f ilabcosts=%.2f kappaw=%.0f | pinned etastar=%.2f\n" θ0[34] θ0[1] θ0[36] θ0[35]
+    @printf "  free seeds: sigma_xi=%.3f etastar=%.2f ilabcosts=%.2f kappaw=%.0f\n" θ0[34] θ0[35] θ0[1] θ0[36]
 
     # Pre-flight
     @printf "=== PRE-FLIGHT ===\n"
@@ -840,7 +736,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         θ0[1]  = clamp(0.18,       LB[1],  UB[1])    # ilabcosts
         θ0[4]  = clamp(log(4.6e6), LB[4],  UB[4])    # log(kappaV)
         θ0[34] = clamp(0.020,      LB[34], UB[34])   # sigma_xi (was 0.049; keep the fallback modest post-discipline)
-        # θ0[35] (etastar) stays at its pinned value (1.0) — no longer a free seed
+        θ0[35] = clamp(6.0,        LB[35], UB[35])   # etastar
         m_test, ok_test = _safe_moments(θ0)
     end
     if !ok_test || any(isnan, m_test)
@@ -852,14 +748,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     @printf "  obj(θ₀) = %.6f\n" obj_test
 
     ψ0 = data_moments .- m_test
-    # Driven by MOMENT_BLOCKS (2026-08-19) rather than hardcoded 1:12 … 59:60.
-    # Adding moment 61 (std(omG)) left it inside the TOTAL but outside every
-    # printed slice, so the blocks silently stopped summing to the objective.
-    # Now any future moment addition is picked up automatically.
-    @printf "  Decomp: %s  (Σ=%.3f, obj=%.3f)\n" join(
-        [@sprintf("%s=%.3f", first(split(lbl)), _blk0(ψ0, W, rng))
-         for (rng, lbl) in MOMENT_BLOCKS], " ") sum(
-        _blk0(ψ0, W, rng) for (rng, _) in MOMENT_BLOCKS) obj_test
+    @printf "  Decomp: Y=%.3f PH=%.3f L=%.3f Agg=%.3f Rank=%.3f CorrYP=%.3f NLab=%.3f\n" dot(ψ0[1:12],W[1:12,1:12]*ψ0[1:12]) dot(ψ0[13:24],W[13:24,13:24]*ψ0[13:24]) dot(ψ0[25:36],W[25:36,25:36]*ψ0[25:36]) dot(ψ0[37:43],W[37:43,37:43]*ψ0[37:43]) dot(ψ0[44:46],W[44:46,44:46]*ψ0[44:46]) dot(ψ0[47:58],W[47:58,47:58]*ψ0[47:58]) dot(ψ0[59:60],W[59:60,59:60]*ψ0[59:60])
 
     print_param_table(θ0)
     print_fit_table(data_moments, m_test, W)
@@ -908,7 +797,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
 
     # CMA-ES
     max_evals = 300_000
-    _FREE = FREE_THETA   # single source of truth in utils.jl — shared with smm_inference.jl
+    _FREE = [1, 4, 5, 6, 33, 34, 35, 36]   # the 8 estimated transmission params
     @printf "--- CMA-ES ---\n"
     @printf "  %d FREE params (of %d; %d pinned) | %d moments | max %d evals | %d threads\n" length(_FREE) N_THETA (N_THETA-length(_FREE)) N_MOMENTS max_evals n_threads_active
     @printf "  free: %s\n" join(PARAM_LABELS[_FREE], ", ")
@@ -933,7 +822,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     mkpath(ESTIMATION_DIR)
     progress_log = joinpath(ESTIMATION_DIR, "smm_progress_log.csv")
     open(progress_log, "w") do io
-        println(io, "timestamp,elapsed_s,evals,best_obj,decomp_Y,decomp_PH,decomp_L,decomp_Agg,decomp_Rank,decomp_CorrYP,decomp_NLab,decomp_Om,fails,ms_per_eval,klein_hit_pct")
+        println(io, "timestamp,elapsed_s,evals,best_obj,decomp_Y,decomp_PH,decomp_L,decomp_Agg,decomp_Rank,decomp_CorrYP,decomp_NLab,fails,ms_per_eval,klein_hit_pct")
     end
 
     # Wall-clock self-limit: set SMM_MAX_HOURS a bit under the SLURM --time so the
@@ -950,8 +839,8 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         (max_seconds < Inf && (time() - t_start[]) > max_seconds) && throw(SMMTimeout())
 
         tid   = _tid_cma()
-        θ = copy(SMM_PIN[])           # 36-vec: 29 pinned entries; 7 free set below
-        θ[_FREE] = LB[_FREE] .+ θ_sc .* span   # unscale the 7 free dims [0,1] → original
+        θ = copy(SMM_PIN[])           # 36-vec: 28 pinned entries; 8 free set below
+        θ[_FREE] = LB[_FREE] .+ θ_sc .* span   # unscale the 8 free dims [0,1] → original
         # A single bad evaluation must NEVER take down a multi-hour run. Any
         # exception inside the moment computation is converted to the failure
         # penalty (1e8); only SMMTimeout is allowed to propagate.
@@ -1001,24 +890,20 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
                         # Snapshot best moments for decomposition (brief lock, no alloc in hot path)
                         b_mom  = lock(best_lock) do; copy(best_moments[]); end
                         ψ_now  = data_moments .- b_mom
-                        # MOMENT_BLOCKS-driven (2026-08-19) — see the pre-flight
-                        # note above. dOm is the goods expenditure share.
-                        dY  = _blk0(ψ_now, W, MOMENT_BLOCKS[1][1])
-                        dPH = _blk0(ψ_now, W, MOMENT_BLOCKS[2][1])
-                        dL  = _blk0(ψ_now, W, MOMENT_BLOCKS[3][1])
-                        dAg = _blk0(ψ_now, W, MOMENT_BLOCKS[4][1])
-                        dRk = _blk0(ψ_now, W, MOMENT_BLOCKS[5][1])
-                        dCY = _blk0(ψ_now, W, MOMENT_BLOCKS[6][1])
-                        dNL = _blk0(ψ_now, W, MOMENT_BLOCKS[7][1])
-                        dOm = length(MOMENT_BLOCKS) >= 8 ?
-                              _blk0(ψ_now, W, MOMENT_BLOCKS[8][1]) : 0.0
-                        @printf "  %-6d  %-10.4f  [Y=%.2f PH=%.2f L=%.2f Agg=%.2f Rk=%.2f CY=%.2f NL=%.2f Om=%.2f]  fail=%-5d  %.1fms  Klein=%d%%\n" n b_obj dY dPH dL dAg dRk dCY dNL dOm fail_count[] ms kpct
+                        dY  = dot(ψ_now[1:12],  W[1:12,1:12]   * ψ_now[1:12])
+                        dPH = dot(ψ_now[13:24], W[13:24,13:24] * ψ_now[13:24])
+                        dL  = dot(ψ_now[25:36], W[25:36,25:36] * ψ_now[25:36])
+                        dAg = dot(ψ_now[37:43], W[37:43,37:43] * ψ_now[37:43])
+                        dRk = dot(ψ_now[44:46], W[44:46,44:46] * ψ_now[44:46])
+                        dCY = dot(ψ_now[47:58], W[47:58,47:58] * ψ_now[47:58])
+                        dNL = dot(ψ_now[59:60], W[59:60,59:60] * ψ_now[59:60])
+                        @printf "  %-6d  %-10.4f  [Y=%.2f PH=%.2f L=%.2f Agg=%.2f Rk=%.2f CY=%.2f NL=%.2f]  fail=%-5d  %.1fms  Klein=%d%%\n" n b_obj dY dPH dL dAg dRk dCY dNL fail_count[] ms kpct
                         flush(stdout)
                         # Append to the machine-readable progress log (best effort:
                         # a full disk or NFS hiccup must never kill the run).
                         try
                             open(progress_log, "a") do io
-                                @printf io "%s,%.1f,%d,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%.1f,%d\n" Dates.format(Dates.now(), "yyyy-mm-ddTHH:MM:SS") (t_now - t_start[]) n b_obj dY dPH dL dAg dRk dCY dNL dOm fail_count[] ms kpct
+                                @printf io "%s,%.1f,%d,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%.1f,%d\n" Dates.format(Dates.now(), "yyyy-mm-ddTHH:MM:SS") (t_now - t_start[]) n b_obj dY dPH dL dAg dRk dCY dNL fail_count[] ms kpct
                             end
                         catch; end
                         last_printed[] = n
@@ -1039,11 +924,11 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     # hundreds of evaluations on infeasible or uninformative candidates.
     # CMAEvolutionStrategy.jl takes scalar sigma — pass the mean, but
     # pre-scale the parameter space so all dimensions have unit range.
-    insigma = 0.25   # initial step for the 7-dim reduced search (larger avoids early stall)
+    insigma = 0.25   # initial step for the 8-dim reduced search (larger avoids early stall)
 
     # Rescale θ to [0,1] so CMA-ES works in a unit hypercube.
     # The objective wrapper maps back to the original scale.
-    # TRUE 7-dim search: scale only the 7 free transmission dims to [0,1].
+    # TRUE 8-dim search: scale only the 8 free transmission dims to [0,1].
     span  = UB[_FREE] .- LB[_FREE]
     θ0_sc = (clamp.(θ0[_FREE], LB[_FREE], UB[_FREE]) .- LB[_FREE]) ./ span
     LB_sc = zeros(length(_FREE))

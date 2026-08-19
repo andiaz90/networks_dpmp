@@ -112,10 +112,20 @@ function compute_smm_inference(θ_hat, m_hat, context, baseline, endo_names; T::
     g = data_moments .- m_hat
     S, have_boot = _load_or_build_S(data_moments)
 
-    # Moment Jacobian G = ∂ model_moments / ∂θ  (K×P), central differences.
+    # Moment Jacobian G = ∂ model_moments / ∂θ, central differences.
+    #
+    # Only the FREE_THETA columns are differenced (2026-08-19). The other 29
+    # parameters are pinned through SMM_PIN and overridden inside
+    # smm_model_moments, so perturbing them returns identical moments and their
+    # Jacobian columns are identically zero. Differencing all 36 made
+    # bread = G'WG rank-deficient at rank <= 7 out of 36; the pinv sandwich then
+    # returned std errors of exactly 0.0 and t = Inf for EVERY parameter, which
+    # is what estimation_results/smm_inference.csv currently shows. It also
+    # wasted 58 model solves per inference call on columns known to be zero.
     K = N_MOMENTS; P = N_THETA
+    Pfree = length(FREE_THETA)
     G = zeros(K, P)
-    for p in 1:P
+    for p in FREE_THETA
         h  = 1e-4 * max(1.0, abs(θ_hat[p]))
         θp = copy(θ_hat); θm = copy(θ_hat)
         θp[p] = min(θ_hat[p] + h, UB[p]); θm[p] = max(θ_hat[p] - h, LB[p])
@@ -138,24 +148,37 @@ function compute_smm_inference(θ_hat, m_hat, context, baseline, endo_names; T::
     tstat = θ_hat ./ se
 
     # Overidentification J-test (efficient weighting S^{-1}).
+    # dof counts only the parameters actually estimated: K - Pfree, not K - 36.
+    # The 29 pinned parameters are calibrated inputs, not degrees of freedom
+    # consumed by the fit (2026-08-19).
     Sinv = pinv(S)
     Jstat = T * (g' * Sinv * g)
-    dof = max(K - P, 1)
+    dof = max(K - Pfree, 1)
     pval = chisq_pvalue(Jstat, dof)
 
     # Report
     @printf "\n  %-3s  %-16s  %10s  %10s  %8s\n" "#" "Parameter" "Estimate" "Std.Err" "t"
     @printf "  %s\n" repeat("-", 54)
     for p in 1:P
-        @printf "  %-3d  %-16s  %10.4f  %10.4f  %8.2f\n" p PARAM_LABELS[p] θ_hat[p] se[p] tstat[p]
+        _free = p in FREE_THETA
+        @printf "  %-3d  %-16s  %10.4f  %10s  %8s  %s\n" p PARAM_LABELS[p] θ_hat[p] (
+            _free ? @sprintf("%.4f", se[p]) : "—") (
+            _free ? @sprintf("%.2f", tstat[p]) : "—") (_free ? "" : "pinned")
     end
+    @printf "\n  Std errors are reported only for the %d estimated parameters;\n" Pfree
+    @printf "  the other %d are calibrated inputs, not estimates.\n" (P - Pfree)
     @printf "\n  J-test of overidentifying restrictions:\n"
-    @printf "    J = %.3f,  df = %d (= %d moments − %d params),  p-value = %.4f%s\n" Jstat dof K P pval (have_boot ? "" : "  [INDICATIVE — diagonal S]")
+    @printf "    J = %.3f,  df = %d (= %d moments − %d estimated params),  p-value = %.4f%s\n" Jstat dof K Pfree pval (have_boot ? "" : "  [INDICATIVE — diagonal S]")
     @printf "    %s\n" (pval < 0.05 ? "Overidentifying restrictions REJECTED at 5% (model misspecification)." :
                                       "Fail to reject overid restrictions at 5%.")
 
+    # NaN rather than 0.0 for pinned parameters, so a reader cannot mistake a
+    # calibrated input for a precisely-estimated one (2026-08-19).
+    _isfree = [p in FREE_THETA for p in 1:P]
     df = DataFrame(param=PARAM_LABELS, estimate=collect(Float64, θ_hat),
-                   std_err=se, t_stat=tstat)
+                   std_err=[_isfree[p] ? se[p] : NaN for p in 1:P],
+                   t_stat=[_isfree[p] ? tstat[p] : NaN for p in 1:P],
+                   estimated=_isfree)
     try
         atomic_write_csv(joinpath(ESTIMATION_DIR, "smm_inference.csv"), df)
         @printf "\n  Saved: %s\n\n" joinpath(ESTIMATION_DIR, "smm_inference.csv")
