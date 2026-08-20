@@ -9,6 +9,10 @@
 var chi xi Zc Lab_costs Price_costs w VA C Ctot Ctotg Ctots M C_g C_s p_g p_s N pi pi_g pi_s pi_w r om_g om_s vi Y
 PV r_star Rworld pi_e Bstar Pipstar Q TB PX X Ystar V PVstar GDP IMP mkupV CFs CFg X_cu GDP_vol
 POstar PO VOil VNon Pcstar
+// LPR semi-fixed capital: PI_inv is the investment deflator (their P^I_f, which
+// eq. 6 mistypes as P_f); EInv is nominal investment expenditure, the fraction
+// nu/(1+nu) of capital income that buys goods.
+PI_inv EInv PI_inv_f EInv_f
 // Sectoral demand (taste) shocks om_1..om_nsec and basket normalizers norm_g, norm_s.
 // At steady state om_i = 0 and norm_g = norm_s = 1, so the SS is unchanged.
 om_1 om_2 om_3 om_4 om_5 om_6 om_7 om_8 om_9 om_10 om_11 om_12 norm_g norm_s
@@ -45,6 +49,13 @@ omg_hat
     @#endfor
     @#for i in 1:nsec
         V_@{i}
+    @#endfor
+    // Capital utilisation U_i = K_i/Kbar_i and the rental RK_i (LPR eqs. 6-7).
+    @#for i in 1:nsec
+        U_@{i}
+        RK_@{i}
+        U_f_@{i}
+        RK_f_@{i}
     @#endfor
     @#for i in 1:nsec
     CHg_@{i}
@@ -131,6 +142,9 @@ epsw kappaw
 epsilonV_oil rho_postar sigma_postar POstar_ss shock_eps_postar
 // Copper sector parameters (world price process)
 rho_pc sigma_pc Pcstar_ss shock_eps_pc Y2_ss X_cu_ss phi_cu Pi_cu_ss PH2_ss
+// nuK = 1/phi = elasticity of capital services to the real rental (LPR eq. 6).
+// Calibrated to 0.4288 from the Chilean accounts; see Data/capital_calibration.csv.
+nuK PIinv_ss
 Ctot_ss Ctotg_ss Ctots_ss VA_ss M_tot_ss Y_ss IMP_ss
 // Shock activation parameters (set by params_jl.mod; 0=off, 1=on)
 shock_eps_i shock_eps_pvstar shock_eps_xi
@@ -162,6 +176,19 @@ Bstar_ss Q_ss TB_ss PX_ss V_ss CF_ss CFg_total_ss CFs_total_ss
         cm_@{i}
         chiX_@{i}
         alphaV_@{i}
+        // Capital is an ENDOWMENT combined with an investment good, so the
+        // endowment itself never enters goods-market clearing — only the
+        // investment demand it generates does. The retailer profit
+        // nu/(1+nu)*R*K is rebated lump sum and needs no budget-constraint
+        // equation (Walras), exactly like Rotemberg profits.
+        alphaK_@{i}
+        Kbar_@{i}
+        // LPR (2024) semi-fixed capital. alphaK_i = EBE_i/GO_i; Kbar_i is the
+        // endowment solved in calibration; chiI_i = investment bundle weight
+        // (Cuadro 20 FBCF by producing activity); RKss_i, PIinv_ss normalise the
+        // supply curve so U = 1 at the steady state.
+        chiI_@{i}
+        RKss_@{i}
         varrho_@{i}
         isigma_tfp_@{i}
         rho_tfp1_@{i}
@@ -436,8 +463,40 @@ VA_f = (
 );
 
 
-GDP = C + TB;
-GDP_f = C_f + TB_f;
+//% ---- LPR semi-fixed capital: investment block ---------------------------
+//% Investment deflator: Cobb-Douglas over sectoral output with the FBCF weights
+//% chiI_i from Cuadro 20. (LPR never calibrate their investment bundle; these
+//% weights are ours, read off the Chilean accounts.)
+PI_inv = 1
+@#for i in 1:nsec
+    *PH_@{i}^chiI_@{i}
+@#endfor
+;
+PI_inv_f = 1
+@#for i in 1:nsec
+    *PH_f_@{i}^chiI_@{i}
+@#endfor
+;
+
+//% Nominal investment expenditure = capital income / (1+phi) = nu/(1+nu) * R K
+//% (LPR eq. 9). The complement, nu-free share 1/(1+nu), is retailer profit
+//% rebated to households (their eq. 8) and needs no equation: with no explicit
+//% budget constraint it closes by Walras, exactly like Rotemberg profits.
+EInv = (nuK/(1+nuK))*(0
+@#for i in 1:nsec
+    + RK_@{i}*Kbar_@{i}*U_@{i}
+@#endfor
+);
+EInv_f = (nuK/(1+nuK))*(0
+@#for i in 1:nsec
+    + RK_f_@{i}*Kbar_@{i}*U_f_@{i}
+@#endfor
+);
+
+//% GDP. LPR Definition 1: "Nominal GDP is the sum of consumption and investment
+//% expenditures." Here TB carries the external block as before.
+GDP = C + EInv + TB;
+GDP_f = C_f + EInv_f + TB_f;
 //% Volume (real) GDP: strips the copper terms-of-trade revaluation, matching the data's
 //% chained-volume GDP rather than a terms-of-trade-inclusive income measure.
 GDP_vol = GDP - (PH_2 - PH2_ss)*X_cu;
@@ -492,14 +551,18 @@ Price_costs = (
 
 
     //% Production Function
-        Y_@{i} = exp(A_@{i})*((alpha_@{i})^(1/epsY_@{i})*(M_@{i})^((epsY_@{i}-1)/epsY_@{i}) 
+    //% Four CES limbs: domestic materials M, imported inputs V, capital services
+    //% Kbar*U (weight alphaK), and labour L with the residual weight.
+        Y_@{i} = exp(A_@{i})*((alpha_@{i})^(1/epsY_@{i})*(M_@{i})^((epsY_@{i}-1)/epsY_@{i})
                                + (alphaV_@{i})^(1/epsY_@{i})*(V_@{i})^((epsY_@{i}-1)/epsY_@{i})
-                               + (1-alpha_@{i}-alphaV_@{i})^(1/epsY_@{i})*(L_@{i})^((epsY_@{i}-1)/epsY_@{i}))^(epsY_@{i}/(epsY_@{i}-1));
+                               + (alphaK_@{i})^(1/epsY_@{i})*(Kbar_@{i}*U_@{i})^((epsY_@{i}-1)/epsY_@{i})
+                               + (1-alpha_@{i}-alphaV_@{i}-alphaK_@{i})^(1/epsY_@{i})*(L_@{i})^((epsY_@{i}-1)/epsY_@{i}))^(epsY_@{i}/(epsY_@{i}-1));
 
     //% Production Function
-        Y_f_@{i} = exp(A_@{i})*((alpha_@{i})^(1/epsY_@{i})*(M_f_@{i})^((epsY_@{i}-1)/epsY_@{i}) 
+        Y_f_@{i} = exp(A_@{i})*((alpha_@{i})^(1/epsY_@{i})*(M_f_@{i})^((epsY_@{i}-1)/epsY_@{i})
                                + (alphaV_@{i})^(1/epsY_@{i})*(V_f_@{i})^((epsY_@{i}-1)/epsY_@{i})
-                               + (1-alpha_@{i}-alphaV_@{i})^(1/epsY_@{i})*(L_f_@{i})^((epsY_@{i}-1)/epsY_@{i}))^(epsY_@{i}/(epsY_@{i}-1));
+                               + (alphaK_@{i})^(1/epsY_@{i})*(Kbar_@{i}*U_f_@{i})^((epsY_@{i}-1)/epsY_@{i})
+                               + (1-alpha_@{i}-alphaV_@{i}-alphaK_@{i})^(1/epsY_@{i})*(L_f_@{i})^((epsY_@{i}-1)/epsY_@{i}))^(epsY_@{i}/(epsY_@{i}-1));
 
     //% Intermediates Demand
         exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*(alpha_@{i}*Y_@{i}/M_@{i})^(1/epsY_@{i}) = PM_@{i};
@@ -522,10 +585,28 @@ Price_costs = (
     VOil_f_@{i} = alphaOilShare_@{i}*(PIV_f_@{i}/PO_f)^epsilonV_oil*V_f_@{i};
     VNon_f_@{i} = (1-alphaOilShare_@{i})*(PIV_f_@{i}/PV_f)^epsilonV_oil*V_f_@{i};
 
+    //% ---- LPR (2024) semi-fixed capital, eqs. (6)-(7) ---------------------
+    //% Rental from the capital FOC. Unlike the pure fixed factor, RK now feeds
+    //% back into the model through the supply curve, so it is no longer a purely
+    //% recursive definition.
+        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*(alphaK_@{i}*Y_@{i}/(Kbar_@{i}*U_@{i}))^(1/epsY_@{i}) = RK_@{i};
+        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_f_@{i}*(alphaK_@{i}*Y_f_@{i}/(Kbar_@{i}*U_f_@{i}))^(1/epsY_@{i}) = RK_f_@{i};
+
+    //% Capital supply curve. LPR write U^phi = R Kbar / P^I; we invert to
+    //% U = (R/P^I)^{1/phi} and write it in deviation form so that U = 1 at the
+    //% steady state (the level is absorbed into the units of Kbar). nuK = 1/phi,
+    //% so nuK is the elasticity of capital services to the real rental.
+        U_@{i}   = ((RK_@{i}/RKss_@{i})*(PIinv_ss/PI_inv))^nuK;
+        U_f_@{i} = ((RK_f_@{i}/RKss_@{i})*(PIinv_ss/PI_inv_f))^nuK;
+
+    //% Labor Demand — weight net of the capital share.
+    //% With the endowment only semi-fixed and epsY < 1, marginal cost rises in
+    //% output: decreasing returns in the variable factors. Effective RTS is
+    //% 1 - alphaK in the phi -> infinity limit and rises with nuK; at nuK =
+    //% 0.4288 it is 0.53 in mining, 0.39 in housing, 0.88 in manufactura.
+        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*((1-alpha_@{i}-alphaV_@{i}-alphaK_@{i})*Y_@{i}/L_@{i})^(1/epsY_@{i}) = PL_@{i};
     //% Labor Demand
-        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*((1-alpha_@{i}-alphaV_@{i})*Y_@{i}/L_@{i})^(1/epsY_@{i}) = PL_@{i};
-    //% Labor Demand
-        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_f_@{i}*((1-alpha_@{i}-alphaV_@{i})*Y_f_@{i}/L_f_@{i})^(1/epsY_@{i}) = PL_f_@{i};
+        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_f_@{i}*((1-alpha_@{i}-alphaV_@{i}-alphaK_@{i})*Y_f_@{i}/L_f_@{i})^(1/epsY_@{i}) = PL_f_@{i};
 
 
     //% Market Clearing in Each Sector
@@ -533,13 +614,15 @@ Price_costs = (
         //% Mining (copper): output is exogenous (own supply/TFP shock A_2), capacity-bound.
         Y_@{i} = Y2_ss*exp(A_@{i});
         //% Copper exports = production minus domestic use (residual), sold at world price PH_2=Q*Pcstar.
-        X_cu = Y_@{i} - CHs_@{i} - CHg_@{i}
+        X_cu = Y_@{i} - CHs_@{i} - CHg_@{i} - chiI_@{i}*EInv/PH_@{i}
         @#for j in 1:nsec
             - beta_@{j}_@{i}*(PM_@{j}/PH_@{i})^epsM_@{j}*M_@{j}
         @#endfor
         ;
 @#else
         Y_@{i} = CHs_@{i} + CHg_@{i} + chiX_@{i}*X*PX/PH_@{i}
+        //% Investment demand (LPR eq. 9): chiI_i share of nu/(1+nu) of capital income.
+        + chiI_@{i}*EInv/PH_@{i}
         @#for j in 1:nsec
             + beta_@{j}_@{i}*(PM_@{j}/PH_@{i})^epsM_@{j}*M_@{j}
         @#endfor
@@ -548,13 +631,14 @@ Price_costs = (
     //% Market Clearing in Each Sector
 @#if i == 2
         Y_f_@{i} = Y2_ss*exp(A_@{i});
-        X_cu_f = Y_f_@{i} - CHs_f_@{i} - CHg_f_@{i}
+        X_cu_f = Y_f_@{i} - CHs_f_@{i} - CHg_f_@{i} - chiI_@{i}*EInv_f/PH_f_@{i}
         @#for j in 1:nsec
             - beta_@{j}_@{i}*(PM_f_@{j}/PH_f_@{i})^epsM_@{j}*M_f_@{j}
         @#endfor
         ;
 @#else
         Y_f_@{i} = CHs_f_@{i} + CHg_f_@{i} + chiX_@{i}*X_f*PX_f/PH_f_@{i}
+        + chiI_@{i}*EInv_f/PH_f_@{i}
         @#for j in 1:nsec
             + beta_@{j}_@{i}*(PM_f_@{j}/PH_f_@{i})^epsM_@{j}*M_f_@{j}
         @#endfor
@@ -931,6 +1015,13 @@ Lab_costs = 0;
     M_f_@{i}   = Mi_ss@{i};
     PL_f_@{i} = PL_ss@{i};    
 
+    //% U = 1 by the deviation-form supply curve; RK = RKss by the calibration
+    //% normalisation (Kbar_i = alphaK_i * Y_ss_i, hence RKss_i = MC_ss_i).
+    U_@{i}    = 1;
+    U_f_@{i}  = 1;
+    RK_@{i}   = RKss_@{i};
+    RK_f_@{i} = RKss_@{i};
+
     A_@{i}   = 0;
 @#endfor
 
@@ -998,9 +1089,19 @@ w  = w_ss;
 w_f  = w_ss;
 pi_w = pi_ss;
 
-GDP = C+TB;
-GDP_f = C_f+TB_f;
-GDP_vol = C+TB;
+//% Investment block at the steady state.
+PI_inv   = PIinv_ss;
+PI_inv_f = PIinv_ss;
+EInv = (nuK/(1+nuK))*(0
+@#for i in 1:nsec
+    + RKss_@{i}*Kbar_@{i}
+@#endfor
+);
+EInv_f = EInv;
+
+GDP = C+EInv+TB;
+GDP_f = C_f+EInv_f+TB_f;
+GDP_vol = C+EInv+TB;
 GDP_vol_f = C_f+TB_f;
 
 Lab_costs_f = 0;

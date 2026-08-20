@@ -243,6 +243,110 @@ theta_vec = vec(Matrix{Float64}(fpa_df))
 modalpha  = alpha
 modalphaV = alpha_V
 
+# ---------------------------------------------------------------------------- #
+#  CAPITAL — Luttini, Pastén & Rubbo (2024) semi-fixed capital assets
+# ---------------------------------------------------------------------------- #
+# A fourth CES limb: a sector-specific capital asset with weight
+# alpha_K_i = EBE_i/GO_i, so the labour weight is 1 - alpha_i - alpha_Vi -
+# alpha_Ki. The asset combines a fixed endowment Kbar_i with an investment good,
+# giving the supply curve U_i = ((R_i/P^I))^nu with nu = 1/phi (LPR eq. 6), and
+# investment expenditure nu/(1+nu) of capital income (their eq. 9) which is real
+# final demand. Everything is read from Data/*.csv — there are no switches and
+# no env-var defaults, so there is exactly one version of this model to run.
+#
+# WHY. With three limbs and constant returns, labour must absorb the entirety of
+# value added — Rubbo (2023, Econometrica) Remark 3: "With constant returns to
+# scale and labor being the only factor of production, labor must account for
+# the entirety of value added." The model therefore implies a labour share of VA
+# of 1.000 against 0.416 in the Chilean accounts, and mining (EBE/GO = 0.58) and
+# housing (0.70) are the worst offenders. FGI (2023) accept this and let convex
+# hiring costs stand in for the missing margin: "as our model does not include
+# capital, these hiring costs capture a variety of frictions affecting a firm's
+# ability to expand its productive capacity."
+#
+# The fixed factor is the alternative repair, and it leaves alpha_i alone — so
+# Gamma, the Leontief multiplier and GO/VA = 1.92 are all untouched. Only the
+# split of value added between labour and the fixed factor changes:
+# labour share of VA falls 1.000 -> 0.432 (data: 0.416; the 1.6pp gap is net
+# taxes on production, which the model has no home for).
+#
+# WHAT IT DOES ECONOMICALLY. With the endowment semi-fixed and epsY < 1, sectoral
+# marginal cost rises with output — decreasing returns in the variable factors.
+# Effective RTS is 1 - alpha_K in the phi -> infinity limit and rises with nu; at
+# nu = 0.4288 it is 0.53 in mining, 0.39 in housing, 0.88 in manufactura, mean
+# 0.77. That steepens sectoral supply curves and hence the sectoral Phillips
+# curves, so it bears directly on the sectoral output-volatility moments. Every
+# SMM estimate stored before 2026-08-20 predates it.
+#
+# LINEAGE. Baqaee & Farhi (2022) fn. 8 licence it via McKenzie's (1959)
+# replication argument; Comin, Johnson & Jones (2023) use a hard capacity
+# constraint instead; Imbs, Jondeau & Pelgrin (2011) put decreasing returns
+# directly in the labour exponent; Luttini, Pastén & Rubbo (2024, BCCh) — the
+# closest template, same country — use semi-fixed capital assets with supply
+# curve U_f^{phi_f} = R_f Kbar_f / P_f. Ours is their phi -> infinity limit.
+# Atalay (2017) has sector-specific accumulated capital, Cobb-Douglas with
+# labour inside value added; our flat CES imposes sigma(K,L) = epsY = 0.8
+# instead of his 1 (Baqaee-Farhi use 0.6), which is the price of not adding a
+# separate value-added nest.
+modalphaK = let
+    hasproperty(cal_df, :alpha_K) || error(
+        "sector_calibration.csv has no alpha_K column. " *
+        "Run: python3 Data/build_sector_calibration.py"
+    )
+    v = Float64.(cal_df.alpha_K)
+    _lab = 1 .- modalpha .- modalphaV .- v
+    all(>(0), _lab) || error(
+        "non-positive labour weight in sectors $(findall(<=(0), _lab)) — " *
+        "alpha + alpha_V + alpha_K >= 1."
+    )
+    v
+end
+
+modchiI = let
+    hasproperty(cal_df, :chi_I) || error(
+        "sector_calibration.csv has no chi_I column. " *
+        "Run: python3 Data/build_sector_calibration.py"
+    )
+    v = Float64.(cal_df.chi_I)
+    abs(sum(v) - 1) < 1e-8 || error("investment bundle chi_I sums to $(sum(v)), expected 1.")
+    v
+end
+
+# nu = 1/phi, the elasticity of capital services to the real rental (LPR eq. 6).
+# Read from Data/capital_calibration.csv — no env var and no default, so the
+# model cannot silently run with a different capital block than the calibration.
+NU_K = let
+    p = joinpath(DATA_DIR, "capital_calibration.csv")
+    isfile(p) || error("missing $(p). Run: python3 Data/build_sector_calibration.py")
+    d = CSV.read(p, DataFrame)
+    i = findfirst(==("nu_K"), String.(d.param))
+    i === nothing && error("capital_calibration.csv has no nu_K row.")
+    Float64(d.value[i])
+end
+
+@printf "  capital     : mean alpha_K = %.3f, mean labour weight = %.3f\n" (
+    sum(modalphaK)/nsec) (sum(1 .- modalpha .- modalphaV .- modalphaK)/nsec)
+@printf "  capital sup.: nu = %.4f  (phi = %.3f), investment share of capital income = %.4f\n" (
+    NU_K) (1/NU_K) (NU_K/(1+NU_K))
+
+# MINING. Two things are worth writing down here, because neither is obvious.
+#
+# (1) Our model already pins mining output exogenously (Y_2 = Y2_ss*exp(A_2) in
+#     NK_SOE_lev_gap2.mod), so capital does NOT damp mining quantities. It moves
+#     MC_2, hence PH_2 through the NKPC, hence the copper rent (PH_2-MC_2)*Y_2
+#     that phi_cu repatriates. alpha_K_2 = 0.576 reassigns most of mining's
+#     operating surplus from an unmodelled residual to an explicit factor rent,
+#     while the copper block still treats (PH_2-MC_2)*Y_2 as the rent leaking
+#     abroad. With phi_cu = 0 (the default) there is no double count; with
+#     SMM_PHI_CU > 0 there may be. CHECK BEFORE SETTING SMM_PHI_CU > 0.
+#
+# (2) LPR give no guidance. They never mention mining, copper or CODELCO, and
+#     they strip the external sector out entirely ("As the model is a closed
+#     economy, we adjust totals by excluding exports and imports"), so Chilean
+#     copper is absent from their numbers. Their capital shares are still a
+#     useful external check: mean 0.302 across 111 industries against our
+#     GO-weighted 0.295.
+
 @printf "  Loaded %d sectors from data files.\n\n" nsec
 
 
@@ -680,6 +784,7 @@ etastar    = etastar_val
 Ystar      = ystar_ss_val
 alpha_vec  = modalpha
 alphaV_vec = modalphaV
+alphaK_vec = modalphaK
 beta_mat   = modbeta
 epsY_vec   = modepsY
 epsM_vec   = modepsM
@@ -723,6 +828,7 @@ ss_result = nlsolve(
         x, PVstar_ss, epsilon, varrho_val, sigmaH,
         gammag_vec, gammas_vec, om_g, om_s, chiX_vec, omegaX, etastar, Ystar,
         alpha_vec, alphaV_vec, beta_mat, epsY_vec, epsM_vec,
+        alphaK_vec, modchiI, NU_K,
         gamma, chi, psi, A_vec, tb_target
     ),
     x_guess;
@@ -791,21 +897,25 @@ end
 ig_ss .*= mean(CHi_ss .+ Xi_ss)
 
 M_init  = (MCi_ss ./ PMi_ss) .^ epsY_vec .* alpha_vec .* (CHi_ss .+ Xi_ss .+ ig_ss)
-L_init  = (MCi_ss ./ PL_ss)  .^ epsY_vec .* (1 .- alpha_vec .- alphaV_vec) .* (CHi_ss .+ Xi_ss .+ ig_ss)
+L_init  = (MCi_ss ./ PL_ss)  .^ epsY_vec .* (1 .- alpha_vec .- alphaV_vec .- alphaK_vec) .* (CHi_ss .+ Xi_ss .+ ig_ss)
 Vi_init = (MCi_ss ./ PV_ss)  .^ epsY_vec .* alphaV_vec .* (CHi_ss .+ Xi_ss .+ ig_ss)
 Yi_init = A_vec .* (
     alpha_vec .^ (1 ./ epsY_vec) .* max.(M_init, 1e-20) .^ ((epsY_vec .- 1) ./ epsY_vec)
   .+ alphaV_vec .^ (1 ./ epsY_vec) .* max.(Vi_init, 1e-20) .^ ((epsY_vec .- 1) ./ epsY_vec)
-  .+ (1 .- alphaV_vec .- alpha_vec) .^ (1 ./ epsY_vec) .* max.(L_init, 1e-20) .^ ((epsY_vec .- 1) ./ epsY_vec)
+  .+ (1 .- alphaV_vec .- alpha_vec .- alphaK_vec) .^ (1 ./ epsY_vec) .* max.(L_init, 1e-20) .^ ((epsY_vec .- 1) ./ epsY_vec)
 ) .^ (epsY_vec ./ (epsY_vec .- 1))
+
+# CALIBRATION mode: K is solved jointly with the rest under the normalisation
+# K_i = alpha_Ki * Y_i, so the SS capital cost share equals alpha_Ki exactly.
+K_init = alphaK_vec .* Yi_init
 
 inner_sol = nlsolve(
     (F, x) -> steady_ntwsoe_system!(
         F, x, alpha_vec, alphaV_vec, beta_mat,
         MCi_ss, PMi_ss, PL_ss, PV_ss, CHi_ss, Xi_ss,
-        epsY_vec, epsM_vec, A_vec, pH_ss
+        epsY_vec, epsM_vec, A_vec, pH_ss, alphaK_vec, modchiI, NU_K
     ),
-    [M_init; L_init; Vi_init; Yi_init];
+    [M_init; L_init; Vi_init; Yi_init; K_init];
     ftol = 1e-10, show_trace = false, method = :trust_region,
 )
 
@@ -813,6 +923,23 @@ M_ss   = inner_sol.zero[1:nsec]
 L_ss   = inner_sol.zero[nsec+1:2*nsec]
 Vi_ss  = inner_sol.zero[2*nsec+1:3*nsec]
 Yi_ss  = inner_sol.zero[3*nsec+1:4*nsec]
+# Kbar_i is the ENDOWMENT written to the .mod and held fixed during estimation.
+Kbar_ss = inner_sol.zero[4*nsec+1:5*nsec]
+# SS rental. The calibration normalisation K_i = alphaK_i*Y_i makes this exactly
+# MC_ss_i, but computing it from the FOC keeps the two in step if the
+# normalisation is ever changed. RKss_i and PIinv_ss enter the .mod only to write
+# the capital supply curve in deviation form, so that U = 1 at the SS.
+RKss_ss = [MCi_ss[i] * (modalphaK[i]*Yi_ss[i]/max(Kbar_ss[i],1e-20))^(1/epsY_vec[i])
+           for i in 1:nsec]
+PIinv_ss_val = prod(pH_ss .^ modchiI)
+let
+    @printf "  capital SS check: max|RKss - MC_ss| = %.2e (normalisation implies 0)\n" (
+        maximum(abs.(RKss_ss .- MCi_ss)))
+    _EInv = NU_K/(1+NU_K)*sum(RKss_ss .* Kbar_ss)
+    _VA   = sum(pH_ss .* Yi_ss) - sum(PMi_ss .* M_ss) - sum(PV_ss .* Vi_ss)
+    @printf "  SS investment expenditure = %.4f,  EInv/VA = %.4f  (data FBCF/VA = 0.1704)\n" (
+        _EInv) (_EInv / _VA)
+end
 
 # ── SS ACCOUNTING DIAGNOSTIC (2026-07): locate the GDP=C+TB vs ΣVA gap ──
 # National-accounts identity: with goods markets clearing, C+TB ≡ ΣVA exactly
@@ -820,21 +947,36 @@ Yi_ss  = inner_sol.zero[3*nsec+1:4*nsec]
 # Σ pH·Y = Σ PM·M + Σ pH·CH + PX·X by clearing). Any gap therefore isolates to
 # ONE of: (a) a goods-market-clearing residual (nested SS solver not converged),
 # or (b) a consumption-aggregation inconsistency. This block prints each piece.
+#
+# CAPITAL NEST (2026-08-20). With nuK > 0 investment is a genuine block of final
+# demand, so BOTH sides of the identity move: goods-market clearing gains
+# chiI_i*EInv/pH_i, and the expenditure side becomes C + EInv + TB ≡ ΣVA. That is
+# the correct national-accounts identity (VA = C + I + X - M); the old C+TB form
+# was only right because the model had no investment. With nuK = 0, EInv = 0 and
+# every line below is numerically identical to before.
+EInv_ss = NU_K/(1+NU_K) * sum(RKss_ss .* Kbar_ss)
 let
     interm_use = zeros(nsec)
     for i in 1:nsec, j in 1:nsec
         interm_use[i] += beta_mat[j,i] * (PMi_ss[j]/pH_ss[i])^epsM_vec[j] * M_ss[j]
     end
-    gmc_resid = Yi_ss .- CHi_ss .- Xi_ss .- interm_use            # ≈ 0 if markets clear
+    inv_use   = modchiI .* EInv_ss ./ pH_ss
+    gmc_resid = Yi_ss .- CHi_ss .- Xi_ss .- interm_use .- inv_use  # ≈ 0 if markets clear
     nom_cons  = sum(pH_ss .* CHi_ss) + PV_ss * sum(CFi_ss)        # should equal C_ss
     VA_chk    = sum(pH_ss .* Yi_ss .- PMi_ss .* M_ss .- PV_ss .* Vi_ss)
-    GDP_chk   = C_ss + (PX_ss*X_ss - PV_ss*(sum(Vi_ss)+sum(CFi_ss)))
+    GDP_chk   = C_ss + EInv_ss + (PX_ss*X_ss - PV_ss*(sum(Vi_ss)+sum(CFi_ss)))
     @printf "  [SS-ACCT] outer residual_norm = %.3e (converged=%s)\n" ss_result.residual_norm string(converged(ss_result))
     @printf "  [SS-ACCT] max|goods-mkt clearing resid| = %.3e   Σ|resid| = %.3e\n" maximum(abs, gmc_resid) sum(abs, gmc_resid)
     @printf "  [SS-ACCT] nominal consumption Σ(pH·CH+PV·CF) = %.4f  vs  C_ss = %.4f  (gap %+.4f)\n" nom_cons C_ss (nom_cons - C_ss)
-    @printf "  [SS-ACCT] ΣVA = %.4f  vs  GDP = %.4f  (gap %+.4f)\n" VA_chk GDP_chk (VA_chk - GDP_chk)
+    @printf "  [SS-ACCT] investment expenditure EInv = %.4f  (EInv/ΣVA = %.4f, data FBCF/VA = 0.1704)\n" EInv_ss (EInv_ss/VA_chk)
+    @printf "  [SS-ACCT] ΣVA = %.4f  vs  GDP = C+EInv+TB = %.4f  (gap %+.4f)\n" VA_chk GDP_chk (VA_chk - GDP_chk)
     worst = sortperm(abs.(gmc_resid), rev=true)[1:min(3,nsec)]
     @printf "  [SS-ACCT] worst-clearing sectors: %s\n" join(["$(w): resid=$(round(gmc_resid[w],digits=4))" for w in worst], "  ")
+
+    # Factor shares actually delivered by the solved SS — the number the paper
+    # quotes. Labour share of VA is 1.000 without the nest, ≈0.43 with it.
+    @printf "  [SS-ACCT] factor shares of ΣVA: labour %.3f, capital %.3f (data 0.416 / 0.568)\n" (
+        sum(PL_ss .* L_ss)/VA_chk) (sum(RKss_ss .* Kbar_ss)/VA_chk)
 end
 
 V_ss          = sum(Vi_ss)
@@ -842,7 +984,8 @@ CF_ss         = sum(CFi_ss)
 mkupV         = 1.0
 IMP_tot_ss    = mkupV * (V_ss + CF_ss)
 TB_ss         = PX_ss * X_ss - PV_ss * IMP_tot_ss
-GDP_ss        = C_ss + TB_ss
+# GDP = C + I + TB. EInv_ss is 0 unless the LPR semi-fixed capital block is on.
+GDP_ss        = C_ss + EInv_ss + TB_ss
 N_ss          = sum(L_ss)
 Y_ss          = sum(Yi_ss)
 r_star_ss     = Rworld_ss
@@ -1194,6 +1337,14 @@ params_nt = (
     modgammas    = modgammas,
     modalpha     = modalpha,
     modalphaV    = modalphaV,
+    # Capital nest. Both are always written so the .mod always parses; with the
+    # nest off they are alphaK = 0 and Kbar = 1, which zeroes the limb exactly.
+    modalphaK    = modalphaK,
+    modKbar      = Kbar_ss,
+    modchiI      = modchiI,
+    modRKss      = RKss_ss,
+    nuK_val      = NU_K,
+    PIinv_ss_val = PIinv_ss_val,
     modepsY      = modepsY,
     modepsM      = modepsM,
     modkappa     = modkappa,
@@ -1736,6 +1887,13 @@ sec_results_for_figs = DataFrame(
     sector  = 1:nsec,
     pH_ss   = pH_ss,  Yi_ss = Yi_ss, L_ss = L_ss,
     std_Y   = std_Y_m, std_PH = std_PH_m, std_L = std_L_m,
+    # CAPITAL NEST (2026-08-20). Carried through so the figure and table code can
+    # report factor shares and investment without recomputing the steady state.
+    # PMi_ss / Vi_ss / PL_ss are needed for the value-added denominator; Kbar_ss
+    # and RKss_ss for the capital share. All inert on a baseline run (Kbar = 1,
+    # RKss = 1, alphaK = 0), where the capital rows are simply not printed.
+    PMi_ss  = PMi_ss, M_ss = M_ss, Vi_ss = Vi_ss, PL_ss = PL_ss,
+    Kbar_ss = Kbar_ss, RKss_ss = RKss_ss, alphaK = modalphaK, chiI = modchiI,
 )
 
 # ---- figs_SOE_gap.jl: Dynare-style IRF plots → figures/irfs/ -----------
@@ -1751,7 +1909,8 @@ generate_figures(
     nsec           = nsec,
     names_vec      = names_vec,
     ss_results     = (GDP_ss=GDP_ss, TB_ss=TB_ss, Q_ss=Q_ss,
-                      C_ss=C_ss, N_ss=N_ss, Bstar_ss=Bstar_ss, w_ss=w_ss),
+                      C_ss=C_ss, N_ss=N_ss, Bstar_ss=Bstar_ss, w_ss=w_ss,
+                      EInv_ss=EInv_ss, PV_ss=PV_ss, nuK=NU_K),
     sec_results    = sec_results_for_figs,
     exercise_label = exercise_labels[EXERCISE+1],
 )
@@ -1769,7 +1928,8 @@ if isfile(irf_path) && filesize(irf_path) > 10
             EXERCISE    = EXERCISE,
             names_vec   = names_vec,
             ss_results  = (GDP_ss=GDP_ss, TB_ss=TB_ss, Q_ss=Q_ss,
-                           C_ss=C_ss, N_ss=N_ss, Bstar_ss=Bstar_ss, w_ss=w_ss),
+                           C_ss=C_ss, N_ss=N_ss, Bstar_ss=Bstar_ss, w_ss=w_ss,
+                           EInv_ss=EInv_ss, PV_ss=PV_ss, nuK=NU_K),
             sec_results = sec_results_for_figs,
             FIGURES_DIR = FIGURES_EX_DIR,   # → figures/exercises/
             TABLES_DIR  = TABLES_DIR,

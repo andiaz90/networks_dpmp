@@ -59,6 +59,45 @@ const _MODFILE_PATH = joinpath(_MODEL_BASE, "model", "json", "modfile.json")
 # Julia world as all calling code.  Including them inside a function creates
 # world-age gaps that cause silent failures on all platforms.
 const _DYNARE_MODEL_LOADED = Ref(false)
+
+"""
+    get_power_deriv(x, p, k) -> d^k(x^p)/dx^k
+
+Dynare's helper for derivatives of a power. The generated SparseDynamicG1!.jl
+CALLS it (e.g. `get_power_deriv(y[594], -params[1], 1)`) but no generated file
+DEFINES it, and it is not exported by the installed Dynare.jl either — Dynare
+normally supplies it inside its own module, whereas these files are included
+into Main. So every call raised
+
+    UndefVarError: `get_power_deriv` not defined in `Main`
+
+ROOT CAUSE OF THE FLAT OBJECTIVE (found 2026-08-19). _eval_dynamic_jacobian
+therefore ALWAYS threw, the Klein path could never run, and
+resolve_first_order! fell through to its last resort: the decision rule already
+in the context. That fallback returns success while returning a θ-INDEPENDENT
+solution, so the SMM objective was exactly constant in all 7 free parameters.
+CMA-ES "converged" in ~126 evaluations with θ unchanged, every Jacobian column
+was zero (std err 0.0, t = Inf), and both the July and August runs estimated
+nothing while reporting success. main_SOE_gap.jl was never affected: it rewrites
+params_jl.mod and re-runs Dynare in a subprocess.
+
+Semantics match Dynare's own implementation exactly, including the guard that
+returns 0 for a zero base with a positive integer exponent below the derivative
+order (where x^(p-k) would otherwise be a division by zero).
+"""
+function get_power_deriv(x::Real, p::Real, k::Integer)
+    if abs(x) < 1e-12 && p > 0 && k > p && abs(p - round(p)) < 1e-12
+        return 0.0
+    end
+    dxp = float(x)^(float(p) - k)
+    pp  = float(p)
+    for _ in 1:k
+        dxp *= pp
+        pp  -= 1.0
+    end
+    return dxp
+end
+
 if isdir(_JULIA_DIR)
     include(joinpath(_JULIA_DIR, "SparseDynamicResidTT!.jl"))
     include(joinpath(_JULIA_DIR, "SparseDynamicResid!.jl"))
@@ -137,6 +176,85 @@ const _KLEIN_CACHE_R    = [Ref{Matrix{Float64}}(zeros(0,0)) for _ in 1:_N_THREAD
 const _KLEIN_CACHE_ΘSTR = [Ref{Vector{Float64}}(Float64[]) for _ in 1:_N_THREADS]
 const _KLEIN_HITS       = Threads.Atomic{Int}(0)
 const _KLEIN_MISSES     = Threads.Atomic{Int}(0)
+# Counts evaluations that fell back to the decision rule already in the context,
+# i.e. the one at θ_baseline rather than at the requested θ. Any non-zero value
+# means some evaluations did not reflect θ (2026-08-19).
+const _STALE_DR_USES    = Threads.Atomic{Int}(0)
+# Klein aborts. The Klein path is dead code whenever Dynare's solver works, so
+# its diagnostics are printed ONCE and then counted — printing per evaluation
+# buried the log. Totals are reported at the end of the run: silent failure is
+# what made the flat-objective bug survive two estimation runs, so the
+# information is suppressed, never discarded.
+const _KLEIN_ABORTS     = Threads.Atomic{Int}(0)
+# One-shot flag so fast-path diagnostics print once, not once per evaluation.
+const _FASTPATH_REPORTED = Ref(false)
+
+# Per-thread Dynare solver workspaces (2026-08-19). Constructing these is not
+# free, so they are built once per thread and reused. They depend only on model
+# DIMENSIONS, not on parameter values, so caching them across θ is safe.
+const _DYN_WS     = [Ref{Any}(nothing) for _ in 1:_N_THREADS]
+const _CSS_WS     = [Ref{Any}(nothing) for _ in 1:_N_THREADS]
+const _SS_OPTS    = Ref{Any}(nothing)
+
+"""
+    _dynare_solve!(context, params) -> (ok, g1_1, g1_2, Sigma_e)
+
+Call Dynare.jl's own first-order solver.
+
+The previous code invoked `compute_first_order_solution!(context)`, which has no
+such method — it takes nine arguments in this version (Dynare TkH8b,
+perturbations.jl:637). The MethodError was swallowed by a bare `catch`, so the
+fast path appeared to "not work on this platform" when it had simply never been
+called correctly.
+
+Why this rather than the hand-rolled Klein: `_klein_solve` assumes the backward
+and forward variable sets are DISJOINT (it forms `[y_b y_f]` and treats it as
+square). That held for the old 491-variable model (78 + 56 = 134) but not for
+the current one, where |bkwrd| = 92, |fwrd| = 58 and the union is 112 — i.e. 38
+variables are MIXED. Handling mixed variables correctly is the fiddly heart of
+any Klein implementation, and Dynare already does it.
+"""
+function _dynare_solve!(context, params)
+    tid = _tid()
+    m   = context.models[1]
+    res = context.results.model_results[1]
+
+    if _DYN_WS[tid][] === nothing
+        _DYN_WS[tid][] = Dynare.DynamicWs(context; order = 1)
+        _CSS_WS[tid][] = Dynare.ComputeStochSimulWs(context)
+    end
+    if _SS_OPTS[] === nothing
+        _SS_OPTS[] = Dynare.StochSimulOptions(Dict{String,Any}("order" => 1, "irf" => 0))
+    end
+
+    # Argument convention copied verbatim from Dynare's own caller,
+    # compute_stoch_simul! (perturbations.jl:547-551):
+    #
+    #     endogenous  = results.trends.endogenous_steady_state
+    #     set_endogenous3!(css_ws.endogenous3, endogenous)
+    #     exogenous   = results.trends.exogenous_steady_state
+    #     compute_first_order_solution!(context, endogenous3, exogenous,
+    #                                   endogenous, params, model, ws, css_ws, options)
+    #
+    # i.e. the first argument is the STACKED [y_{t-1}; y_t; y_{t+1}] buffer
+    # css_ws.endogenous3 (3*591 = 1773 — hence "AssertionError: length(y) ==
+    # 1773" when the flat steady state was passed), the third is the flat one.
+    # Dynare also zeroes the exogenous steady state first, so we do too.
+    css     = _CSS_WS[tid][]
+    endo_ss = res.trends.endogenous_steady_state
+    exo_ss  = res.trends.exogenous_steady_state
+    fill!(exo_ss, 0.0)
+    Dynare.set_endogenous3!(css.endogenous3, endo_ss)
+
+    Dynare.compute_first_order_solution!(
+        context, css.endogenous3, exo_ss, endo_ss, params, m,
+        _DYN_WS[tid][], css, _SS_OPTS[];
+        variance_decomposition = false)
+
+    lre = res.linearrationalexpectations
+    (isempty(lre.g1_1) || isempty(lre.g1_2)) && return false, zeros(0,0), zeros(0,0), zeros(0,0)
+    return true, Matrix{Float64}(lre.g1_1), Matrix{Float64}(lre.g1_2), m.Sigma_e
+end
 
 function _resolve_cached!(context, θ)
     tid = _tid()
@@ -192,7 +310,10 @@ function _load_fwrd_indices!()
         lead_col = parse(Int, row.captures[3])
         lead_col > 0 && push!(_I_FWRD_B, j)
     end
-    length(rows) == 491 || @printf "  [SMM] Warning: parsed %d rows, expected 491\n" length(rows)
+    # Cross-check against the Jacobian's own equation count rather than a
+    # hardcoded 491 (stale since the model grew to 591 equations, 2026-08-19).
+    _N_EQ[] > 0 && length(rows) != _N_EQ[] &&
+        @printf "  [SMM] Warning: parsed %d lead_lag rows, Jacobian has %d equations\n" length(rows) _N_EQ[]
     _FWRD_LOADED[] = true
     @printf "  [SMM] Forward indices loaded from modfile.json: %d of %d vars are forward-looking\n" length(_I_FWRD_B) length(rows)
 end
@@ -466,31 +587,86 @@ Uses the compiled Dynare Jacobian + GenericSchur.jl (Klein 2000).
 Works on all platforms — no LAPACK dependency.
 """
 function resolve_first_order!(context)
+    # ---------------------------------------------------------------------- #
+    # CRITICAL (2026-08-19): push our parameter vector INTO the context before
+    # any solver runs.
+    #
+    # set_param! writes to _SMM_PARAMS (see the note at ~line 204: context.work
+    # .params was unreliable on ARM Macs, so this file keeps its own vector).
+    # But the fast path below calls Dynare's OWN solver, which reads
+    # context.work.params. When that field is readable — as it is on this
+    # machine, cf. "[SMM] Params loaded from context.work.params (655 params)" —
+    # the fast path succeeds, returns immediately, and Klein never runs. Every
+    # evaluation then returns the decision rule at the ORIGINAL parameters,
+    # whatever θ says.
+    #
+    # Consequence: the SMM objective was EXACTLY CONSTANT in all 7 free
+    # parameters. A full-range probe confirmed zero spread for every one of
+    # them, including sigma_xi = 0 (which removes a shock worth 10.4% of
+    # employment variance) and kappaw 0->400. That is why CMA-ES terminated
+    # after ~126 evaluations with best_obj never improving, why every Jacobian
+    # column was zero (std err 0.0, t = Inf), and why the July run behaved
+    # identically. main_SOE_gap.jl was unaffected because it rewrites
+    # params_jl.mod and re-runs Dynare in a subprocess.
+    # ---------------------------------------------------------------------- #
     try
-        # Fast path: try Dynare.jl's own solver (works on some platforms)
-        for fn in [:compute_first_order_solution!, :first_order_solution!]
-            isdefined(Dynare, fn) || continue
-            try
-                getfield(Dynare, fn)(context)
-                mr  = context.results.model_results[1]
-                lre = mr.linearrationalexpectations
-                return true,
-                       Matrix{Float64}(lre.g1_1),
-                       Matrix{Float64}(lre.g1_2),
-                       context.models[1].Sigma_e
-            catch; end
+        sp = _SMM_PARAMS[_tid()][]
+        if !isempty(sp)
+            wp = context.work.params
+            length(wp) == length(sp) && copyto!(wp, sp)
+        end
+    catch
+        # context.work.params unreadable (the ARM case the design anticipated):
+        # the fast path will fail too and we fall through to Klein, which reads
+        # _SMM_PARAMS directly. Nothing to do.
+    end
+
+    try
+        # Fast path: try Dynare.jl's own solver (works on some platforms).
+        # Failures were silently swallowed; they are now reported once each, so
+        # we can tell whether this path is unavailable or merely untried
+        # (2026-08-19). Dynare's solver demonstrably works on this machine in
+        # main_SOE_gap.jl's subprocess, so knowing WHY it fails in-process is
+        # worth more than reimplementing Klein.
+        try
+            ok, g1_1, g1_2, Se = _dynare_solve!(context, _load_smm_params!(context))
+            if ok
+                _FASTPATH_REPORTED[] || (@printf "  [SMM] using Dynare's own first-order solver\n"; _FASTPATH_REPORTED[] = true)
+                return true, g1_1, g1_2, Se
+            end
+            _FASTPATH_REPORTED[] || (@printf "  [SMM] Dynare solver returned an empty decision rule; falling back\n"; _FASTPATH_REPORTED[] = true)
+        catch err
+            if !_FASTPATH_REPORTED[]
+                @printf "  [SMM] Dynare solver FAILED -> %s\n" first(split(sprint(showerror, err), '\n'))
+                _FASTPATH_REPORTED[] = true
+            end
         end
 
         # Klein (2000) pure-Julia path
         ok, g1_1, g1_2, Σe = _klein_solve(context)
         ok && return true, g1_1, g1_2, Σe
 
-        # Fallback: use the existing decision rule already in the context.
-        # This is exact for θ = θ_baseline, approximate for other θ.
-        # Allows estimation of shock parameters (which enter via Σe, not g1).
+        # Fallback: the decision rule ALREADY in the context — i.e. the one at
+        # θ_baseline, NOT at the requested θ.
+        #
+        # This is the same hazard as the fast path above (2026-08-19): it
+        # reports success while returning a solution that does not depend on θ,
+        # so the objective goes flat and the estimator silently converges at its
+        # starting point. The original note claimed it "allows estimation of
+        # shock parameters (which enter via Σe, not g1)", but in THIS model the
+        # shock sizes are in-equation parameters (isigma_tfp_i * epsA_i), so
+        # they enter g1_2 — and the Σe returned here is stale too.
+        #
+        # Kept as a last resort so a single bad evaluation cannot kill a long
+        # run, but it now announces itself. If this fires often, the estimates
+        # are not trustworthy.
         mr  = context.results.model_results[1]
         lre = mr.linearrationalexpectations
         if !isempty(lre.g1_1) && size(lre.g1_1, 1) >= 400
+            Threads.atomic_add!(_STALE_DR_USES, 1)
+            if _STALE_DR_USES[] <= 3 || _STALE_DR_USES[] % 500 == 0
+                @printf "  [WARN] resolve_first_order! fell back to the STALE decision rule (use #%d) — this evaluation does NOT reflect θ.\n" _STALE_DR_USES[]
+            end
             return true,
                    Matrix{Float64}(lre.g1_1),
                    Matrix{Float64}(lre.g1_2),
@@ -507,11 +683,34 @@ function _klein_solve(context)
     try
         # ---- 1. Assemble dynamic Jacobian -------------------------------- #
         G = _eval_dynamic_jacobian(context)
-        n_eq = _N_EQ[]   # 491
+        n_eq = _N_EQ[]
 
-        # Column partition (confirmed from dynamic.json):
-        n_bk  = 78;  n_endo = 491;  n_fw = 56;  n_exo = 17
-        # A: cols 1:78       B: cols 79:569    C: cols 570:625   D: cols 626:642
+        # ------------------------------------------------------------------ #
+        # Column partition, DERIVED from the loaded model (2026-08-19).
+        #
+        # WAS hardcoded: n_bk=78; n_endo=491; n_fw=56; n_exo=17 — the dimensions
+        # of a much older model. The current one is 92/591/58/31. The immediate
+        # consequence was that the fwrd_b length check below (== n_fw) failed,
+        # _klein_solve returned false, and resolve_first_order! fell through to
+        # the stale decision rule — which reports success while ignoring θ. That
+        # is what made the SMM objective exactly constant in all 7 free
+        # parameters and caused two estimation runs to "converge" instantly
+        # having estimated nothing.
+        #
+        # Everything is now read from the model, and cross-checked against the
+        # Jacobian's own column count so a future model change fails loudly
+        # instead of silently degrading to a θ-independent solution.
+        # ------------------------------------------------------------------ #
+        n_endo = length(context.results.model_results[1].trends.endogenous_steady_state)
+        n_exo  = context.models[1].exogenous_nbr
+        n_bk   = length(context.models[1].i_bkwrd_b)
+        n_fw   = _N_COL[] - n_bk - n_endo - n_exo
+        if n_fw <= 0 || n_bk + n_endo + n_fw + n_exo != _N_COL[]
+            Threads.atomic_add!(_KLEIN_ABORTS, 1)
+            _KLEIN_ABORTS[] == 1 && @printf "  [SMM] Klein: inconsistent column partition (bk=%d endo=%d fw=%d exo=%d, Jacobian has %d cols)\n" n_bk n_endo n_fw n_exo _N_COL[]
+            return false, zeros(0,0), zeros(0,0), zeros(0,0)
+        end
+        # A: 1:n_bk | B: next n_endo | C: next n_fw | D: last n_exo
         A = Matrix{Float64}(G[:, 1:n_bk])
         B = Matrix{Float64}(G[:, n_bk+1 : n_bk+n_endo])
         C = Matrix{Float64}(G[:, n_bk+n_endo+1 : n_bk+n_endo+n_fw])
@@ -531,7 +730,11 @@ function _klein_solve(context)
                 length(_I_FWRD_B) == n_fw ? copy(_I_FWRD_B) : nothing
             end
         end
-        isnothing(fwrd_b) && return false, zeros(0,0), zeros(0,0), zeros(0,0)
+        if isnothing(fwrd_b)
+            Threads.atomic_add!(_KLEIN_ABORTS, 1)
+            _KLEIN_ABORTS[] == 1 && @printf "  [SMM] Klein: could not resolve %d forward-looking indices (i_fwrd_b=%d, modfile=%d) — ABORTING rather than returning a stale rule.\n" n_fw (isdefined(context.models[1], :i_fwrd_b) ? length(context.models[1].i_fwrd_b) : -1) length(_I_FWRD_B)
+            return false, zeros(0,0), zeros(0,0), zeros(0,0)
+        end
 
         # ---- 3. Static variable elimination ------------------------------ #
         # The full 491×491 QZ has only 56 finite eigenvalues (rank(C_pad)=56),
@@ -548,7 +751,8 @@ function _klein_solve(context)
         dyn_eq = setdiff(1:n_eq, s_eq)   # 134 dynamic equations (have A or C ≠ 0)
 
         if length(s_eq) != n_s
-            @printf "  [Klein] Static elimination mismatch: %d static eqs, %d static vars (expected both=%d)\n" length(s_eq) n_s n_s
+            Threads.atomic_add!(_KLEIN_ABORTS, 1)
+            _KLEIN_ABORTS[] == 1 && @printf "  [Klein] Static elimination mismatch: %d static eqs, %d static vars (expected both=%d) — Klein path unusable; further occurrences counted silently\n" length(s_eq) n_s n_s
             return false, zeros(0,0), zeros(0,0), zeros(0,0)
         end
 
@@ -599,7 +803,8 @@ function _klein_solve(context)
 
         n_stable = sum(λ .< 1.0)
         if n_stable != n_bk
-            @printf "  [Klein] BK failed on 134×134 reduced system: %d stable eigenvalues, expected %d\n" n_stable n_bk
+            Threads.atomic_add!(_KLEIN_ABORTS, 1)
+            _KLEIN_ABORTS[] == 1 && @printf "  [Klein] BK failed on the reduced system: %d stable eigenvalues, expected %d\n" n_stable n_bk
             return false, zeros(0,0), zeros(0,0), zeros(0,0)
         end
 
@@ -655,7 +860,8 @@ function _klein_solve(context)
         # FieldError / UndefVarError from missing/uninitialized context fields
         # are expected — suppress to avoid flooding 115k CMA-ES iterations.
         if !(e isa FieldError || e isa UndefVarError)
-            @printf "  [Klein] Exception type: %s\n" typeof(e)
+            Threads.atomic_add!(_KLEIN_ABORTS, 1)
+            _KLEIN_ABORTS[] == 1 && @printf "  [Klein] Exception type: %s\n" typeof(e)
         end
         return false, zeros(0,0), zeros(0,0), zeros(0,0)
     end
@@ -690,6 +896,8 @@ function recompute_ss!(context, epsY, epsM, baseline, endo_names; etastar=nothin
                                       eta_for_ss, baseline.ystar_ss_val,
                                       baseline.modalpha, baseline.modalphaV,
                                       baseline.modbeta, modepsY, modepsM,
+                                      baseline.modalphaK, baseline.modchiI,
+                                      baseline.nuK_val,
                                       baseline.gamma_val, baseline.chi_val,
                                       baseline.psi_val, ones(nsec), baseline.tb_target)
 
@@ -728,10 +936,16 @@ function recompute_ss!(context, epsY, epsM, baseline, endo_names; etastar=nothin
     X  = baseline.omegaX_val * (PX/Q_ss)^(-etastar_eff) * baseline.ystar_ss_val
     Xi = baseline.modchiX .* X .* PX ./ pH_ss
 
+    # ESTIMATION mode (see steady_ntwsoe_system.jl): the endowment Kbar is held
+    # FIXED at its calibrated value, so the system stays 4*nsec and the capital
+    # cost share is free to drift with the estimated parameters — as in
+    # Baqaee-Farhi and LPR, where Kbar_f is a datum.
     inner = nlsolve(
         (F, x) -> steady_ntwsoe_system!(F, x, baseline.modalpha, baseline.modalphaV,
                                          baseline.modbeta, MCi_ss, PMi_ss, PL_ss, PV_ss,
-                                         CHi, Xi, modepsY, modepsM, ones(nsec), pH_ss),
+                                         CHi, Xi, modepsY, modepsM, ones(nsec), pH_ss,
+                                         baseline.modalphaK, baseline.modchiI,
+                                         baseline.nuK_val, baseline.modKbar),
         vcat(max.(MCi_ss./PMi_ss,1e-20), max.(MCi_ss./PL_ss,1e-20),
              max.(MCi_ss./PV_ss,1e-20), fill(0.2,nsec));
         ftol=1e-10, method=:trust_region, show_trace=false)

@@ -196,6 +196,10 @@ const IPOM_RED       = "#C21E24"   # red         (Servicios sin volátiles)
 const IPOM_ORANGE    = "#ED6331"   # orange      (Alimentos volátiles)
 const IPOM_GREEN     = "#3BB957"   # green       (Bienes sin volátiles)
 const IPOM_YELLOW    = "#E7EB13"   # yellow      (Alimentos sin volátiles)
+# Added 2026-08-20 for the capital bar in the marginal-cost decomposition. Muted
+# slate so it reads as a cost component without competing with the six IPoM
+# category colours above, which are reserved for the published CPI breakdown.
+const IPOM_PURPLE    = "#7A6FA8"   # slate purple (Capital — cost decomposition only)
 
 
 # =========================================================================== #
@@ -310,10 +314,21 @@ vectors via the companion `ge_component_style(kind)`.
 function ge_mc_components(kind::Symbol, h::Int, ph_irf_mat, mc_irf_mat, w_irf,
                           modalphaV, modalpha, alpha_L_vec, modbeta;
                           po_irf=nothing, pv_irf=nothing, modalphaOil=nothing,
-                          a_irf_mat=nothing)
+                          a_irf_mat=nothing,
+                          modalphaK, rk_irf_mat)
     net_h = modalpha .* (modbeta * ph_irf_mat[:, h])
     lab_h = alpha_L_vec .* w_irf[h]
     mc_h  = mc_irf_mat[:, h]
+    # CAPITAL NEST (2026-08-20). Two things change once alpha_K > 0.
+    #  (1) alpha_L_vec must be 1 - alpha - alpha_V - alpha_K, NOT 1 - alpha -
+    #      alpha_V. Callers are responsible for that; passing the old expression
+    #      overstates the labour bar by alpha_K*ŵ and the residual silently
+    #      absorbs the offsetting error, so the stack still sums to marginal cost
+    #      and the figure looks fine.
+    #  (2) the rental is a genuine cost-push channel, alpha_K_i * r̂K_i, and it
+    #      moves even though the endowment is only semi-fixed: leaving it in the
+    #      residual would hide the mechanism the capital block exists for.
+    cap_h = modalphaK .* rk_irf_mat[:, h]
     if kind === :price
         dir_h = modalphaV .* modalphaOil .* po_irf[h]
         imp_h = modalphaV .* (1.0 .- modalphaOil) .* pv_irf[h]
@@ -323,23 +338,25 @@ function ge_mc_components(kind::Symbol, h::Int, ph_irf_mat, mc_irf_mat, w_irf,
     else
         error("ge_mc_components: unknown kind $kind")
     end
-    res_h = mc_h .- dir_h .- net_h .- imp_h .- lab_h
+    res_h = mc_h .- dir_h .- net_h .- imp_h .- lab_h .- cap_h
     ph_h  = ph_irf_mat[:, h]
     mu_h  = ph_h .- mc_h                              # markup: p̂H − m̂c
     return (comps=(copy(dir_h), copy(net_h), copy(imp_h), copy(lab_h),
-                   copy(res_h), copy(mu_h)),
-            mc=copy(mc_h), price=copy(ph_h))
+                   copy(cap_h), copy(res_h), copy(mu_h)),
+            mc=copy(mc_h), price=copy(ph_h), capital=copy(cap_h))
 end
 
-"Colours (IPoM palette) and legend labels for the 6-way price decomposition bars."
+"""Colours (IPoM palette) and legend labels for the 7-way price decomposition bars.
+
+"Capital" (alpha_K * r̂K) sits between "Trabajo" and "Residual".
+"""
 function ge_component_style(kind::Symbol)
-    colors = [IPOM_NAVY, IPOM_LIGHTBLUE, IPOM_GREEN, IPOM_ORANGE, IPOM_YELLOW, IPOM_RED]
-    labels = kind === :price ?
-        ["Petróleo directo", "Red vía precios", "Import. no-petróleo",
-         "Trabajo", "Residual", "Margen"] :
-        ["PTF propia", "Red vía precios", "Importaciones",
-         "Trabajo", "Residual", "Margen"]
-    return colors, labels
+    colors = [IPOM_NAVY, IPOM_LIGHTBLUE, IPOM_GREEN, IPOM_ORANGE,
+              IPOM_PURPLE, IPOM_YELLOW, IPOM_RED]
+    base = kind === :price ?
+        ["Petróleo directo", "Red vía precios", "Import. no-petróleo", "Trabajo"] :
+        ["PTF propia", "Red vía precios", "Importaciones", "Trabajo"]
+    return colors, [base; "Capital"; "Residual"; "Margen"]
 end
 
 """
@@ -351,14 +368,20 @@ Collapse the 6-way GE price decomposition into four groups for the coarser
   * Indirecto = network propagation via input prices (component 2)
   * Margen    = markup p̂H − m̂c (component 6)
   * Otros     = imports + labour + residual (components 3 + 4 + 5)
-`comps6` is the 6-tuple of `nsec`-vectors returned in `ge_mc_components(...).comps`.
+`comps` is the tuple of `nsec`-vectors returned in `ge_mc_components(...).comps`
+— 7 entries since the capital nest (2026-08-20), 6 before. Both are accepted:
+the markup is always the LAST entry and "others" is everything between the
+network term and the markup, so capital lands in "Otros Costos Marginales"
+without any change at the call sites.
 Returns a 4-tuple `(direct, indirect, markup, others)`.
 """
-function group3_components(comps6)
-    direct   = copy(comps6[1])
-    indirect = copy(comps6[2])
-    markup   = copy(comps6[6])
-    others   = comps6[3] .+ comps6[4] .+ comps6[5]
+function group3_components(comps)
+    n = length(comps)
+    n >= 5 || error("group3_components: expected >= 5 components, got $n")
+    direct   = copy(comps[1])
+    indirect = copy(comps[2])
+    markup   = copy(comps[n])                 # markup is always last
+    others   = reduce(.+, comps[3:n-1])       # imports + labour [+ capital] + residual
     return (direct, indirect, markup, others)
 end
 

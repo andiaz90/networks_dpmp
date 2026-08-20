@@ -1,0 +1,54 @@
+name = "NKIOSOE"
+
+# Julia environment for the local NK-IOSOE run.
+#
+# This file was missing until 2026-08-20: the README told you to use
+# `julia --project=.` here, but with no Project.toml that creates an EMPTY
+# environment, so `Pkg.instantiate()` installs nothing and the scripts only work
+# if the packages happen to be in your global environment.
+#
+# ⚠ DO NOT COPY UUIDs FROM cluster/Project.toml OR cluster_lite/Project.toml.
+# Five of theirs are wrong and were corrected here against the General registry
+# on 2026-08-20 (verified: `Pkg.resolve()` picks Dynare v0.10.4 cleanly):
+#
+#   package                wrong (cluster files)                  correct
+#   CMAEvolutionStrategy   8d3b24bd-414e-40e7-9bd7-1d1a89e4bd10   8d3b24bd-414e-49e0-94fb-163cc3a3e411
+#   DataFrames             a93c6f00-e57d-5684-b890-f30d63e87cba   a93c6f00-e57d-5684-b7b6-d8193f3e46c0
+#   Dynare                 a1ed8f70-d7c1-11e9-1c33-f1a92f1b4a2a   5203de40-99df-439e-afbc-014de65cb9ef
+#   MAT                    23992021-4e7a-acd7-8559-a50a4c15d98e   23992714-dd62-5051-b70f-ba57cb901cac
+#   Printf                 de0858da-6303-5e67-8744-51eddeeeb8d3   de0858da-6303-5e67-8744-51eddeeeb8d7
+#
+# Those environments therefore cannot instantiate from scratch — worth checking
+# against the cluster failure in job 7198.
+#
+# FIRST RUN:
+#     cd Model/julia_dynare
+#     julia --project=. -e 'import Pkg; Pkg.instantiate()'
+#
+# Then COMMIT the generated Manifest.toml. Unpinned dependency versions are what
+# let the cluster resolve a different Dynare from the laptop and return a
+# silently wrong decision rule (job 7198, 2026-07-09).
+
+[deps]
+CMAEvolutionStrategy = "8d3b24bd-414e-49e0-94fb-163cc3a3e411"
+CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+Dynare = "5203de40-99df-439e-afbc-014de65cb9ef"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
+MAT = "23992714-dd62-5051-b70f-ba57cb901cac"
+NLsolve = "2774e3e8-f4cf-5e23-947b-6d7e65073b56"
+Plots = "91a5bcdd-55d7-5caf-9e0b-520d859cae80"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
+XLSX = "fdbf4ff8-1666-58a4-91e7-1b58723a45e0"
+
+# Dynare >= 0.10.1 requires julia "1.10.0 - 1", so 1.10 is the real floor
+# regardless of what the cluster files claim.
+[compat]
+julia = "1.10"

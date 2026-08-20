@@ -108,8 +108,10 @@ function generate_figures(;
     @printf "  Main shock for sectoral plots: %s\n" main_shock
 
     # ---- 1. AGGREGATE IRF TABLE ----------------------------------------- #
-    agg_vars   = ["GDP", "pi", "Q", "TB"]
-    agg_labels = ["GDP (%%)", "Inflation π (%%)", "Real XR Q (%%)", "Trade balance TB (%%)"]
+    # EInv is investment expenditure, the third leg of GDP = C + EInv + TB.
+    agg_vars   = ["GDP", "EInv", "pi", "Q", "TB"]
+    agg_labels = ["GDP (%%)", "Investment (%%)", "Inflation π (%%)",
+                  "Real XR Q (%%)", "Trade balance TB (%%)"]
 
     @printf "\n  Aggregate IRFs — %s (period 1 impact, %% dev. from SS):\n" main_shock
     @printf "  %-8s" "Shock"
@@ -127,15 +129,20 @@ function generate_figures(;
     end
 
     # ---- 2. SECTORAL OUTPUT IMPACT TABLE --------------------------------- #
+    # U_i is capital utilisation K_i/Kbar_i; RK_i the rental. Both are part of
+    # the transmission: with nu = 0.4288 capital services respond to the rental,
+    # so a sector's marginal cost rises less than under a pure fixed factor.
     @printf "\n  Sectoral output IRFs (period 1 impact, %% dev. from SS) — shock: %s\n" main_shock
-    @printf "  %-6s  %-32s  %10s  %10s  %10s\n" "Sector" "Name" "ΔY" "ΔPH" "ΔL"
-    @printf "  %s\n" repeat("-", 74)
+    @printf "  %-6s  %-32s  %10s  %10s  %10s  %10s  %10s\n" "Sector" "Name" "ΔY" "ΔPH" "ΔL" "ΔU" "ΔRK"
+    @printf "  %s\n" repeat("-", 98)
     for i in 1:nsec
         nm  = string(names_vec[i])[1:min(30, length(string(names_vec[i])))]
         dy  = get_irf(df_irf, "Y_$(i)",  main_shock; n_periods=n_periods)[1]
         dph = get_irf(df_irf, "PH_$(i)", main_shock; n_periods=n_periods)[1]
         dl  = get_irf(df_irf, "L_$(i)",  main_shock; n_periods=n_periods)[1]
-        @printf "  %-6d  %-32s  %10.4f  %10.4f  %10.4f\n" i nm dy dph dl
+        du  = get_irf(df_irf, "U_$(i)",  main_shock; n_periods=n_periods)[1]
+        drk = get_irf(df_irf, "RK_$(i)", main_shock; n_periods=n_periods)[1]
+        @printf "  %-6d  %-32s  %10.4f  %10.4f  %10.4f  %10.4f  %10.4f\n" i nm dy dph dl du drk
     end
 
     # ---- 3. STEADY-STATE SUMMARY TABLE ---------------------------------- #
@@ -157,6 +164,23 @@ function generate_figures(;
                                     max(ss_results.GDP_ss, 1e-10)),
         ("Foreign debt/GDP",        ss_results.Q_ss * abs(ss_results.Bstar_ss) / max(ss_results.GDP_ss, 1e-10)),
     ]
+    # Factor shares and investment. The labour share of value added is the
+    # headline number the paper quotes: 1.000 in a model without capital, 0.43
+    # here, against 0.416 in the Chilean accounts.
+    let
+        _VA = sum(sec_results.pH_ss .* sec_results.Yi_ss) -
+              sum(sec_results.PMi_ss .* sec_results.M_ss) -
+              ss_results.PV_ss * sum(sec_results.Vi_ss)
+        append!(ss_rows, [
+            ("Investment (EInv)",       ss_results.EInv_ss),
+            ("Investment/GDP",          ss_results.EInv_ss / max(ss_results.GDP_ss, 1e-10)),
+            ("  data FBCF/VA",          0.1704),
+            ("Labour share of VA",      sum(sec_results.PL_ss .* sec_results.L_ss) / max(_VA, 1e-10)),
+            ("  data REM/VA",           0.416),
+            ("Capital share of VA",     sum(sec_results.RKss_ss .* sec_results.Kbar_ss) / max(_VA, 1e-10)),
+            ("  data EBE/VA",           0.568),
+        ])
+    end
     for (lbl, val) in ss_rows
         @printf "  %-30s  %12.4f\n" lbl val
     end

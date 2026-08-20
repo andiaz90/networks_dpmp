@@ -8,8 +8,13 @@ Unknowns: x_vec = [pH_1,...,pH_nsec, w, Q, C]  (length nsec+3)
 
 The function:
   1. Derives all prices and demands from (pH, w, Q, C)
-  2. Calls steady_ntwsoe_system! (inner NLsolve) for (M, L, Vi, Yi)
+  2. Calls steady_ntwsoe_system! (inner NLsolve) for (M, L, Vi, Yi, K)
   3. Returns nsec+3 market-clearing residuals
+
+Capital (LPR 2024, see steady_ntwsoe_system.jl): the inner solve runs in
+CALIBRATION mode, so K is solved jointly under K_i = alpha_Ki * Y_i. The
+investment expenditure it generates, EInv = nu/(1+nu) * sum(R_i K_i), is real
+final demand and enters BOTH the goods-market residual and GDP.
 
 Returns residual vector of length nsec+3:
   residual[1:nsec]   = output market clearing (Yi = CHi + Xi + intermediate_use)
@@ -39,6 +44,9 @@ function steady_ntwsoe(
     beta_mat :: Matrix{<:Real},
     epsY_vec :: Vector{<:Real},
     epsM_vec :: Vector{<:Real},
+    alphaK_vec :: Vector{<:Real},
+    chiI_vec   :: Vector{<:Real},
+    nuK        :: Real,
     GAMMA    :: Real,
     CHI      :: Real,
     PSI      :: Real,
@@ -102,21 +110,22 @@ function steady_ntwsoe(
     ig .*= mean(CHi .+ Xi)
 
     M_init  = max.(MCi ./ PMi, 1e-20) .^ epsY_vec .* alpha_vec .* (CHi .+ Xi .+ ig)
-    L_init  = max.(MCi ./ PL,  1e-20) .^ epsY_vec .* (1 .- alpha_vec .- alphaV_vec) .* (CHi .+ Xi .+ ig)
+    L_init  = max.(MCi ./ PL,  1e-20) .^ epsY_vec .* (1 .- alpha_vec .- alphaV_vec .- alphaK_vec) .* (CHi .+ Xi .+ ig)
     Vi_init = max.(MCi ./ PV,  1e-20) .^ epsY_vec .* alphaV_vec .* (CHi .+ Xi .+ ig)
     Yi_init = A_vec .* (
         alpha_vec        .^ (1 ./ epsY_vec) .* max.(M_init,  1e-20) .^ ((epsY_vec .- 1) ./ epsY_vec)
       .+ alphaV_vec      .^ (1 ./ epsY_vec) .* max.(Vi_init, 1e-20) .^ ((epsY_vec .- 1) ./ epsY_vec)
-      .+ (1 .- alphaV_vec .- alpha_vec) .^ (1 ./ epsY_vec) .* max.(L_init, 1e-20) .^ ((epsY_vec .- 1) ./ epsY_vec)
+      .+ (1 .- alphaV_vec .- alpha_vec .- alphaK_vec) .^ (1 ./ epsY_vec) .* max.(L_init, 1e-20) .^ ((epsY_vec .- 1) ./ epsY_vec)
     ) .^ (epsY_vec ./ (epsY_vec .- 1))
 
-    x0_inner = [M_init; L_init; Vi_init; Yi_init]
+    x0_inner = [M_init; L_init; Vi_init; Yi_init; alphaK_vec .* Yi_init]
 
     sol = nlsolve(
         (F, x) -> steady_ntwsoe_system!(
             F, x, alpha_vec, alphaV_vec, beta_mat,
             MCi, PMi, PL, PV, CHi, Xi,
-            epsY_vec, epsM_vec, A_vec, pHvec
+            epsY_vec, epsM_vec, A_vec, pHvec,
+            alphaK_vec, chiI_vec, nuK
         ),
         x0_inner;
         ftol      = 1e-10,
@@ -128,6 +137,15 @@ function steady_ntwsoe(
     L_sol  = sol.zero[nsec+1:2*nsec]
     Vi_sol = sol.zero[2*nsec+1:3*nsec]
     Yi_sol = sol.zero[3*nsec+1:4*nsec]
+    K_sol  = sol.zero[4*nsec+1:5*nsec]
+
+    # Investment demand. R_i from the capital FOC (at the inner solution
+    # K = alpha_K Y this equals MC_i, but computing it from the FOC keeps the
+    # two in step if the normalisation ever changes).
+    R_sol = A_vec .^ ((epsY_vec .- 1) ./ epsY_vec) .* MCi .*
+            (alphaK_vec .* max.(Yi_sol, 1e-20) ./ max.(K_sol, 1e-20)) .^ (1 ./ epsY_vec)
+    EInv  = (nuK / (1 + nuK)) * sum(R_sol .* max.(K_sol, 1e-20))
+    inv_use = chiI_vec .* EInv ./ pHvec
 
     # Intermediate use with converged solution (for market clearing)
     intermediate_use_final = zeros(nsec)
@@ -137,12 +155,12 @@ function steady_ntwsoe(
 
     # Macro aggregates
     TB  = PX * X - PV * (sum(CFi) + sum(Vi_sol))
-    GDP = C + TB
+    GDP = C + EInv + TB
     N   = (C^(-GAMMA) * w / CHI)^(1 / PSI)
 
     # Residuals
     residual = zeros(nsec + 3)
-    residual[1:nsec]   .= Yi_sol .- CHi .- Xi .- intermediate_use_final   # output market clearing
+    residual[1:nsec]   .= Yi_sol .- CHi .- Xi .- intermediate_use_final .- inv_use  # output market clearing
     residual[nsec+1]    = TB / GDP - tb_target                             # trade balance target
     residual[nsec+2]    = N - sum(L_sol)                                   # labor market clearing
     residual[nsec+3]    = C - (C_g / om_g)^om_g * (C_s / om_s)^om_s     # consumption identity

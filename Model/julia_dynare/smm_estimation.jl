@@ -247,6 +247,48 @@ function validate_smm_setup(data_moments)
     isempty(bad_klein) ||
         push!(errs, "_KLEIN_STRUCT_IDX has out-of-range entries $bad_klein for N_THETA=$N_THETA")
 
+    # --- capital block (LPR semi-fixed capital, 2026-08-20) ----------------- #
+    # The baseline NamedTuple reads alphaK_i / Kbar_i / chiI_i / nuK out of
+    # params_jl.mod. A params file written BEFORE the capital block simply has no
+    # such lines, and pvec() returns NaN for a missing name. Those NaNs would
+    # propagate silently into the steady-state solve and produce a converged-
+    # looking but meaningless model, so check here and fail loudly instead.
+    # Fix: re-run  julia --project=. main_SOE_gap.jl  to regenerate params_jl.mod.
+    let pf = joinpath(@__DIR__, "mod", "params_jl.mod")
+        if isfile(pf)
+            txt = read(pf, String)
+            for nm in ["alphaK_1", "Kbar_1", "chiI_1", "RKss_1", "nuK", "PIinv_ss"]
+                occursin(Regex("(^|\\n)\\s*$(nm)\\s*="), txt) ||
+                    push!(errs, "params_jl.mod has no `$nm` — it predates the capital " *
+                                "block. Re-run main_SOE_gap.jl before estimating.")
+            end
+        else
+            push!(errs, "mod/params_jl.mod not found — run main_SOE_gap.jl first.")
+        end
+    end
+
+    # The calibration CSVs the capital block reads must exist and be coherent.
+    let cf = joinpath(@__DIR__, "..", "..", "Data", "sector_calibration.csv"),
+        kf = joinpath(@__DIR__, "..", "..", "Data", "capital_calibration.csv")
+        if isfile(cf)
+            d = CSV.read(cf, DataFrame)
+            if !hasproperty(d, :alpha_K) || !hasproperty(d, :chi_I)
+                push!(errs, "sector_calibration.csv lacks alpha_K / chi_I — " *
+                            "run python3 Data/build_sector_calibration.py")
+            else
+                abs(sum(d.chi_I) - 1) < 1e-8 ||
+                    push!(errs, "chi_I sums to $(sum(d.chi_I)), expected 1")
+                lab = 1 .- d.alpha .- d.alpha_V .- d.alpha_K
+                all(>(0), lab) ||
+                    push!(errs, "non-positive labour weight in sectors $(findall(<=(0), lab))")
+            end
+        else
+            push!(errs, "Data/sector_calibration.csv not found")
+        end
+        isfile(kf) || push!(errs, "Data/capital_calibration.csv not found — " *
+                                  "run python3 Data/build_sector_calibration.py")
+    end
+
     if !isempty(errs)
         error("""
         SMM setup is inconsistent — fix before estimating:
@@ -342,6 +384,13 @@ function build_baseline(context::Dynare.Context,
         tb_target=d_TBGDP,
         modalpha=[pvec("alpha_$(i)") for i in 1:nsec],
         modalphaV=[pvec("alphaV_$(i)") for i in 1:nsec],
+        # LPR semi-fixed capital, carried through from params_jl.mod. No NaN
+        # fallbacks: a params file without these was written by a pre-2026-08-20
+        # build and must not be silently reinterpreted as a no-capital model.
+        modalphaK=[pvec("alphaK_$(i)") for i in 1:nsec],
+        modKbar=[pvec("Kbar_$(i)") for i in 1:nsec],
+        modchiI=[pvec("chiI_$(i)") for i in 1:nsec],
+        nuK_val=pvec("nuK"),
         modbeta=[pvec("beta_$(i)_$(j)") for i in 1:nsec, j in 1:nsec],
         modgammag=[pvec("gammag_$(i)") for i in 1:nsec],
         modgammas=[pvec("gammas_$(i)") for i in 1:nsec],
@@ -863,6 +912,57 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
 
     print_param_table(θ0)
     print_fit_table(data_moments, m_test, W)
+
+    # ---- SENSITIVITY GUARD (2026-08-19) ---------------------------------- #
+    # Refuse to start if the objective does not respond to the free parameters.
+    #
+    # From 2026-07 until 2026-08-19 it did not: resolve_first_order!'s fast path
+    # called Dynare's solver, which reads context.work.params, while set_param!
+    # writes to _SMM_PARAMS. Every evaluation therefore returned the decision
+    # rule at the ORIGINAL parameters and the objective was EXACTLY constant in
+    # all 7 free dims. CMA-ES duly "converged" after ~126 evaluations with θ
+    # unchanged, every Jacobian column was zero (std err 0.0, t = Inf), and two
+    # separate estimation runs produced nothing — with no error raised.
+    #
+    # A silent no-op optimiser is the worst possible failure mode, so this is
+    # now a hard stop rather than a warning.
+    let bad = String[]
+        # FREE_THETA, not _FREE: the local alias is not bound until the CMA-ES
+        # section further down.
+        for p in FREE_THETA
+            θt = copy(θ0)
+            θt[p] = θ0[p] + 0.25*(UB[p] - θ0[p]) + 1e-6   # a quarter of the way up
+            mt, okt = smm_model_moments(θt, context, baseline, endo_names)
+            if !okt || any(isnan, mt)
+                @printf "  [sensitivity] θ[%d] %-18s : model FAILED at the test point (skipped)\n" p PARAM_LABELS[p]
+                continue
+            end
+            ψt = data_moments .- mt
+            Δ  = abs(dot(ψt, W*ψt) - obj_test)
+            @printf "  [sensitivity] θ[%d] %-18s : |Δobj| = %.3e%s\n" p PARAM_LABELS[p] Δ (Δ < 1e-10 ? "   <<<< FLAT" : "")
+            Δ < 1e-10 && push!(bad, PARAM_LABELS[p])
+        end
+        isempty(bad) || error("""
+
+            OBJECTIVE DOES NOT RESPOND TO: $(join(bad, ", "))
+
+            These parameters are in the free set but moving them a quarter of the
+            way to their upper bound leaves the objective unchanged to 1e-10.
+            Estimating them is meaningless — CMA-ES will "converge" immediately
+            at θ₀ and report success.
+
+            Most likely causes:
+              1. θ is not reaching the solver. Check that set_param! writes
+                 somewhere resolve_first_order! actually reads
+                 (_SMM_PARAMS vs context.work.params).
+              2. resolve_first_order! is returning the stale decision rule —
+                 look for "[WARN] ... STALE decision rule" above.
+              3. The parameter is genuinely dead in the .mod (as ilabcosts was
+                 until 2026-08-19: it appeared only in a reporting variable).
+
+            Run probe_free_dims.jl to see the full-range response of each.
+            """)
+    end
     @printf "=== PRE-FLIGHT PASSED ===\n\n"
 
     # Report-only mode: print the fit of the current θ (warm start / checkpoint)
@@ -1077,7 +1177,24 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     θ_hat = clamp.(best_θ[], LB, UB)
     total_t = time() - t_start[]
     tot_kl  = _KLEIN_HITS[] + _KLEIN_MISSES[]
-    @printf "\nDone: %d evals | %.1fs | %.1fms/eval | Klein cache=%d%%\n\n" eval_count[] total_t 1000*total_t/max(1,eval_count[]) round(Int,100*_KLEIN_HITS[]/max(1,tot_kl))
+    @printf "\nDone: %d evals | %.1fs | %.1fms/eval | Klein cache=%d%%\n" eval_count[] total_t 1000*total_t/max(1,eval_count[]) round(Int,100*_KLEIN_HITS[]/max(1,tot_kl))
+
+    # Solver-path accounting (2026-08-19). Diagnostics are rate-limited during
+    # the run so the log stays readable; the totals must still be reported,
+    # because a silent solver fallback is exactly what let the flat-objective
+    # bug survive two full estimation runs.
+    @printf "Solver: %d Klein aborts | %d STALE-decision-rule evaluations" _KLEIN_ABORTS[] _STALE_DR_USES[]
+    if _STALE_DR_USES[] > 0
+        @printf "  (%.0f%% of evals wasted)\n" 100*_STALE_DR_USES[]/max(1, eval_count[])
+        @printf "  A stale evaluation returns the θ₀ decision rule, so its objective is\n"
+        @printf "  ~obj(θ₀) regardless of θ. Those candidates are REJECTED by the optimiser,\n"
+        @printf "  so best_θ is always from a genuine evaluation — but the work is wasted.\n"
+        @printf "  Cause: Dynare's solver does not survive deepcopy / is not thread-safe, so\n"
+        @printf "  worker threads fall through. Re-run with --threads=1 to confirm the result.\n"
+    else
+        @printf "  — all evaluations used the real solver.\n"
+    end
+    @printf "\n"
 
     # Use moments cached at best θ — re-evaluating on the main context would give a
     # different result because context has cold SS state (frozen at θ₀ from pre-flight),

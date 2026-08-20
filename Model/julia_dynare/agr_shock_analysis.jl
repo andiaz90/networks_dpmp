@@ -156,6 +156,10 @@ cal_df     = CSV.read(path_cal, DataFrame)
 names_vec  = String.(cal_df.name)
 alpha      = Float64.(cal_df.alpha)
 alpha_V    = Float64.(cal_df.alpha_V)
+# LPR semi-fixed capital. The labour weight in the marginal-cost decomposition
+# is 1 - alpha - alpha_V - alpha_K: without the alpha_K term the "Trabajo" bar is
+# overstated and the residual silently absorbs the offsetting error.
+alpha_K    = Float64.(cal_df.alpha_K)
 var_rho    = Float64.(cal_df.var_rho)
 spend_good = Float64.(cal_df.spend_good)
 spend_serv = Float64.(cal_df.spend_serv)
@@ -178,6 +182,7 @@ theta_vec = vec(Matrix{Float64}(fpa_df))
 
 modalpha  = alpha
 modalphaV = alpha_V
+modalphaK = alpha_K
 
 @printf "  Loaded %d sectors.\n\n" nsec
 
@@ -307,6 +312,13 @@ om_g = ombar_val; om_s = 1 - ombar_val
 chiX_vec = modchiX; omegaX = omegaX_val; etastar = etastar_val
 Ystar = ystar_ss_val
 alpha_vec = modalpha; alphaV_vec = modalphaV
+# Capital block, read from the same CSVs as main_SOE_gap.jl so this script
+# cannot describe a different model from the tables.
+alphaK_vec = modalphaK
+chiI_vec   = Float64.(cal_df.chi_I)
+NU_K       = let d = CSV.read(joinpath(DATA_DIR, "capital_calibration.csv"), DataFrame)
+    Float64(d.value[findfirst(==("nu_K"), String.(d.param))])
+end
 beta_mat = modbeta; epsY_vec = modepsY; epsM_vec = modepsM; A_vec = modA
 
 tb_target = let
@@ -327,6 +339,7 @@ ss_result = nlsolve(
         x, PVstar_ss, epsilon, varrho_val, sigmaH,
         gammag_vec, gammas_vec, om_g, om_s, chiX_vec, omegaX, etastar, Ystar,
         alpha_vec, alphaV_vec, beta_mat, epsY_vec, epsM_vec,
+        alphaK_vec, chiI_vec, NU_K,
         gamma, chi, psi, A_vec, tb_target
     ),
     x_guess; ftol=1e-14, show_trace=false, method=:trust_region)
@@ -363,18 +376,20 @@ for i in 1:nsec, j in 1:nsec; ig_ss[i] += beta_mat[j, i]; end
 ig_ss .*= mean(CHi_ss .+ Xi_ss)
 
 M_init  = (MCi_ss ./ PMi_ss) .^ epsY_vec .* alpha_vec .* (CHi_ss .+ Xi_ss .+ ig_ss)
-L_init  = (MCi_ss ./ PL_ss)  .^ epsY_vec .* (1 .- alpha_vec .- alphaV_vec) .* (CHi_ss .+ Xi_ss .+ ig_ss)
+L_init  = (MCi_ss ./ PL_ss)  .^ epsY_vec .* (1 .- alpha_vec .- alphaV_vec .- alphaK_vec) .* (CHi_ss .+ Xi_ss .+ ig_ss)
 Vi_init = (MCi_ss ./ PV_ss)  .^ epsY_vec .* alphaV_vec .* (CHi_ss .+ Xi_ss .+ ig_ss)
 Yi_init = A_vec .* (
     alpha_vec .^ (1 ./ epsY_vec) .* max.(M_init, 1e-20) .^ ((epsY_vec .- 1) ./ epsY_vec)
   .+ alphaV_vec .^ (1 ./ epsY_vec) .* max.(Vi_init, 1e-20) .^ ((epsY_vec .- 1) ./ epsY_vec)
-  .+ (1 .- alphaV_vec .- alpha_vec) .^ (1 ./ epsY_vec) .* max.(L_init, 1e-20) .^ ((epsY_vec .- 1) ./ epsY_vec)
+  .+ (1 .- alphaV_vec .- alpha_vec .- alphaK_vec) .^ (1 ./ epsY_vec) .* max.(L_init, 1e-20) .^ ((epsY_vec .- 1) ./ epsY_vec)
 ) .^ (epsY_vec ./ (epsY_vec .- 1))
 
 inner_sol = nlsolve(
     (F, x) -> steady_ntwsoe_system!(F, x, alpha_vec, alphaV_vec, beta_mat,
-        MCi_ss, PMi_ss, PL_ss, PV_ss, CHi_ss, Xi_ss, epsY_vec, epsM_vec, A_vec, pH_ss),
-    [M_init; L_init; Vi_init; Yi_init]; ftol=1e-10, show_trace=false, method=:trust_region)
+        MCi_ss, PMi_ss, PL_ss, PV_ss, CHi_ss, Xi_ss, epsY_vec, epsM_vec, A_vec, pH_ss,
+        alphaK_vec, chiI_vec, NU_K),
+    [M_init; L_init; Vi_init; Yi_init; alphaK_vec .* Yi_init];
+    ftol=1e-10, show_trace=false, method=:trust_region)
 
 M_ss  = inner_sol.zero[1:nsec]
 L_ss  = inner_sol.zero[nsec+1:2*nsec]
@@ -384,7 +399,10 @@ Yi_ss = inner_sol.zero[3*nsec+1:4*nsec]
 V_ss       = sum(Vi_ss); CF_ss = sum(CFi_ss)
 mkupV      = 1.0; IMP_tot_ss = mkupV * (V_ss + CF_ss)
 TB_ss      = PX_ss * X_ss - PV_ss * IMP_tot_ss
-GDP_ss     = C_ss + TB_ss; N_ss = sum(L_ss)
+# GDP = C + I + TB
+Kbar_ss    = inner_sol.zero[4*nsec+1:5*nsec]
+EInv_ss    = NU_K/(1+NU_K)*sum(MCi_ss .* Kbar_ss)
+GDP_ss     = C_ss + EInv_ss + TB_ss; N_ss = sum(L_ss)
 r_star_ss  = Rworld_ss; Bstar_ss = -TB_ss / (Q_ss * (1 - r_star_ss / Pistar_ss))
 bbar_val   = Q_ss * Bstar_ss / GDP_ss
 
@@ -637,12 +655,14 @@ end
 @printf "  Verificación shock: A_%d impacto = %+.2f%% (debe ser ≈ -1%%),  Y_%d impacto = %+.2f%% (debe ser negativo)\n" k a_irf_mat[k,1] k y_irf_impact[k]
 
 # 5-way GE marginal-cost decomposition at h = 1, 2, 4
-alpha_L_vec = 1.0 .- modalpha .- modalphaV
+alpha_L_vec = 1.0 .- modalpha .- modalphaV .- modalphaK
+# Rental IRFs feed the capital bar of the marginal-cost decomposition.
+rk_irf_mat = reduce(vcat, [get_irf("RK_$(i)")' for i in 1:nsec])
 ge_kwargs = (pv_irf=pv_irf, a_irf_mat=a_irf_mat)
-ge_h1 = ge_mc_components(:tfp, 1, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; ge_kwargs...)
-ge_h2 = ge_mc_components(:tfp, 2, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; ge_kwargs...)
-ge_h4 = ge_mc_components(:tfp, 4, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; ge_kwargs...)
-ge_fun = h -> ge_mc_components(:tfp, h, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; ge_kwargs...)
+ge_h1 = ge_mc_components(:tfp, 1, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; modalphaK=modalphaK, rk_irf_mat=rk_irf_mat, ge_kwargs...)
+ge_h2 = ge_mc_components(:tfp, 2, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; modalphaK=modalphaK, rk_irf_mat=rk_irf_mat, ge_kwargs...)
+ge_h4 = ge_mc_components(:tfp, 4, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; modalphaK=modalphaK, rk_irf_mat=rk_irf_mat, ge_kwargs...)
+ge_fun = h -> ge_mc_components(:tfp, h, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; modalphaK=modalphaK, rk_irf_mat=rk_irf_mat, ge_kwargs...)
 ge_colors, ge_labels = ge_component_style(:tfp)
 
 @printf "--- Aggregate IRFs (-1%% Agriculture TFP shock, impact) ---

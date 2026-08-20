@@ -52,14 +52,17 @@ function _main()
     # Step 2: Load Dynare context.
     # Single unified model now (NK_SOE_lev_gap2.mod); the separate _smm context
     # was retired. main_SOE_gap.jl compiles the unified model to this context.
-    ctx_path = joinpath(SCRIPT_DIR, "mod", "nk_iosoe_context.jls")
-    !isfile(ctx_path) && error("""
-        No Dynare context found at $(ctx_path). Run main_SOE_gap.jl first:
-          julia --project=. main_SOE_gap.jl
+    # CONTEXT comes from the top-level @dynare below, NOT from deserialisation
+    # (2026-08-19). See the long note there: a deserialised context cannot be
+    # solved, because Dynare's solver calls runtime-generated functions held in
+    # the module-level Dynare.DFunctions, which only @dynare populates.
+    context = _DYNARE_CONTEXT[]
+    context === nothing && error("""
+        Dynare context not built. The top-level @dynare in this file must run
+        before _main(); see the DFunctions note above.
         """)
 
-    @printf "--- Step 2: Loading context from %s ---\n\n" basename(ctx_path)
-    context = deserialize(ctx_path)
+    @printf "--- Step 2: Model loaded via @dynare (DFunctions populated) ---\n\n"
 
     n_endo = length(context.results.model_results[1].trends.endogenous_steady_state)
     @printf "  %d endogenous variables\n" n_endo
@@ -85,5 +88,86 @@ function _main()
 
     @printf "\n%s\n  COMPLETE — obj=%.6f\n%s\n\n" repeat("=",60) obj_hat repeat("=",60)
 end
+
+# =========================================================================== #
+#  BUILD THE DYNARE CONTEXT AT TOP LEVEL  (2026-08-19)                        #
+# =========================================================================== #
+# Why not deserialize mod/nk_iosoe_context.jls, as this script did until today:
+#
+# Dynare's compute_first_order_solution! ultimately calls
+# Dynare.DFunctions.dynamic_resid! / dynamic_g1!, which are RuntimeGenerated
+# functions living in a MODULE-LEVEL namespace. They are populated only when
+# @dynare parses a .mod file IN THIS PROCESS. Deserialising a context restores
+# the data but not those functions, so the call hit whatever model DFunctions
+# happened to hold — a 6-equation leftover from Dynare's own precompilation:
+#
+#     AssertionError: length(residual) == 6      (our model has 591)
+#
+# With Dynare's solver unusable, resolve_first_order! fell through to the
+# hand-rolled Klein path (broken: see smm_model_moments.jl) and then to its last
+# resort, returning the decision rule already in the context — at θ_baseline.
+# That returns success while ignoring θ, which is why the objective was exactly
+# constant in all 7 free parameters and why every estimation run since July
+# "converged" instantly having estimated nothing.
+#
+# Running @dynare here costs ~30-60 s once, against multi-hour estimation runs.
+# It must be at TOP LEVEL: inside a function it hits world-age errors (the same
+# reason run_dynare_subprocess.jl does it this way).
+#
+# NOTE this recompiles the model, so params_jl.mod must already be current —
+# i.e. run main_SOE_gap.jl first, exactly as before.
+const _DYNARE_CONTEXT = Ref{Any}(nothing)
+
+# EVERY statement below must stay at TOP LEVEL, each its own statement.
+# `@dynare` runs the Dynare preprocessor at MACRO-EXPANSION time, not at
+# runtime. Julia expands an entire block (let/function/begin) before executing
+# any of it, so wrapping this in `let` meant the preprocessor ran while the
+# working directory was still the caller's — "Could not open file:
+# NK_SOE_lev_gap2.mod" — and @dynare then returned a Vector instead of a
+# Context. run_dynare_subprocess.jl keeps these as separate top-level
+# statements for exactly this reason; do not "tidy" them into a block.
+_SMM_MOD_DIR = joinpath(SCRIPT_DIR, "mod")
+
+isfile(joinpath(_SMM_MOD_DIR, "params_jl.mod")) || error("""
+    mod/params_jl.mod not found. Run main_SOE_gap.jl first — it writes the
+    parameter file that NK_SOE_lev_gap2.mod includes.
+    """)
+
+_SMM_VERBOSE = get(ENV, "DYNARE_VERBOSE", "0") in ("1", "true")
+_SMM_LOG     = joinpath(_SMM_MOD_DIR, "dynare_smm_load.log")
+_SMM_OLD_PWD = pwd()
+
+@printf "--- Loading model via @dynare (populates Dynare.DFunctions) ---\n"
+@printf "    output → %s%s\n" basename(_SMM_LOG) (_SMM_VERBOSE ? "  [DYNARE_VERBOSE=1: inline]" : "")
+
+cd(_SMM_MOD_DIR)
+
+_SMM_STDOUT = stdout
+_SMM_STDERR = stderr
+_SMM_LOG_IO = _SMM_VERBOSE ? nothing : open(_SMM_LOG, "w")
+if !_SMM_VERBOSE
+    redirect_stdout(_SMM_LOG_IO)
+    redirect_stderr(_SMM_LOG_IO)
+end
+
+_SMM_CTX = try
+    @dynare "NK_SOE_lev_gap2"
+finally
+    if !_SMM_VERBOSE
+        redirect_stdout(_SMM_STDOUT)
+        redirect_stderr(_SMM_STDERR)
+        close(_SMM_LOG_IO)
+    end
+    cd(_SMM_OLD_PWD)
+end
+
+_SMM_CTX isa Dynare.Context || error("""
+    @dynare returned $(typeof(_SMM_CTX)), not a Dynare.Context.
+    The preprocessor almost certainly failed — see $(basename(_SMM_LOG)).
+    """)
+_DYNARE_CONTEXT[] = _SMM_CTX
+
+@printf "    done — %d endogenous, %d exogenous\n\n" length(
+    _SMM_CTX.results.model_results[1].trends.endogenous_steady_state) _SMM_CTX.models[1].exogenous_nbr
 
 Base.invokelatest(_main)
