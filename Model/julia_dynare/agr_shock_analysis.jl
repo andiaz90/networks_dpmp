@@ -126,375 +126,41 @@ end
 
 
 # =========================================================================== #
-#  READ DATA (identical to main_SOE_gap.jl)                                    #
+#  THE MODEL IS READ, NOT REBUILT  (refactored 2026-08-20)                     #
+# =========================================================================== #
+#
+# This script used to rebuild the whole calibration and steady state, overwrite
+# mod/params_jl.mod, and run Dynare a second time — one of five near-identical
+# copies of the same 400 lines, each drifting independently from the model
+# main_SOE_gap.jl actually solves. See the header of read_model_params() in
+# shock_plots_common.jl for what that drift had reached.
+#
+# It now READS mod/params_jl.mod and the decision rules main just wrote. IRFs
+# are linear and shock-specific, so the relevant ghu column of main's decision
+# rule IS this shock's impulse response: no steady state is solved here and
+# Dynare is not re-run. A shock script may SELECT and SCALE a shock; it may not
+# change a parameter. Anything that changes a parameter is a different model and
+# belongs in main_SOE_gap.jl.
+#
+# Run main_SOE_gap.jl first.
 # =========================================================================== #
 
-nsec = 12
+MP = read_model_params(MOD_DIR, DATA_DIR)
+report_model_source(MP)
 
-DATA_CANDIDATES = filter!(!isempty, [DATA_DIR, SCRIPT_DIR])
-function find_file(candidates, fnames...)
-    for d in candidates, fname in fnames
-        p = joinpath(d, fname); isfile(p) && return p
-    end; return ""
-end
-
-path_cal     = find_file(DATA_CANDIDATES, "sector_calibration.csv")
-# Prefer the DOMESTIC intermediate matrix (2026-08-19) — see the note in
-# main_SOE_gap.jl. The total matrix books imported inputs to domestic
-# suppliers (Utilities<-Mining 0.314 vs 0.013), which distorts exactly the
-# oil / mining / agro exercises these scripts run.
-path_io_dom  = find_file(DATA_CANDIDATES, "IO_2021_chile_domestic.csv")
-path_io      = isempty(path_io_dom) ? find_file(DATA_CANDIDATES, "IO_2021_chile.csv") : path_io_dom
-path_fpa     = find_file(DATA_CANDIDATES, "fpa_vector_few_industries_chile.csv")
-path_sec_mom = find_file(DATA_CANDIDATES, "sectoral_moments.csv")
-
-for p in [path_cal, path_io, path_fpa]
-    isempty(p) && error("Required data file not found. Searched: $(join(DATA_CANDIDATES, ", "))")
-end
-
-cal_df     = CSV.read(path_cal, DataFrame)
-names_vec  = String.(cal_df.name)
-alpha      = Float64.(cal_df.alpha)
-alpha_V    = Float64.(cal_df.alpha_V)
-# LPR semi-fixed capital. The labour weight in the marginal-cost decomposition
-# is 1 - alpha - alpha_V - alpha_K: without the alpha_K term the "Trabajo" bar is
-# overstated and the residual silently absorbs the offsetting error.
-alpha_K    = Float64.(cal_df.alpha_K)
-var_rho    = Float64.(cal_df.var_rho)
-spend_good = Float64.(cal_df.spend_good)
-spend_serv = Float64.(cal_df.spend_serv)
-
-if !isempty(path_sec_mom)
-    sec_mom = CSV.read(path_sec_mom, DataFrame)
-    y_d = Float64.(sec_mom.std_Y); p_d = Float64.(sec_mom.std_PH); l_d = Float64.(sec_mom.std_L)
-else
-    y_d = zeros(nsec); p_d = zeros(nsec); l_d = zeros(nsec)
-end
-
-betaio_df = CSV.read(path_io, DataFrame, header=false)
-betaio    = Matrix{Float64}(betaio_df[1:nsec, 1:nsec])
-col_sums  = sum(betaio, dims=1)
-betax     = betaio ./ col_sums
-modbeta   = Matrix(betax')   # modbeta[i,j] = share of inputs sector i gets from j
-
-fpa_df    = CSV.read(path_fpa, DataFrame, header=false)
-theta_vec = vec(Matrix{Float64}(fpa_df))
-
-modalpha  = alpha
-modalphaV = alpha_V
-modalphaK = alpha_K
-
-@printf "  Loaded %d sectors.\n\n" nsec
+(; nsec, names_vec, epsilon, beta_val, gamma, psi, subsMC_val, mc_over_ph,
+   etastar_val, kappaw_val, phi_b_val, ombar_val,
+   modalpha, modalphaV, modalphaK, modepsY, modepsM, modkappa, modalphaOil,
+   modcl, goods, services, modbeta,
+   isigma_tfp_val, rho_tfp1_val, sigma_om_vec,
+   rho_postar_val, sigma_postar_val, epsilonV_oil_val,
+   pH_ss, MCi_ss, Yi_ss, L_ss, M_ss, Vi_ss, PMi_ss, P_ss,
+   C_gi_ss, C_si_ss, PIV_ss_vec, PL_ss,
+   Q_ss, GDP_ss, TB_ss, C_ss, w_ss, N_ss, PV_ss, epsY_baseline) = MP
 
 
-# =========================================================================== #
-#  STRUCTURAL PARAMETERS                                                       #
-# =========================================================================== #
-
-beta_val = 0.986;  epsilon = 10.0;  gamma = 2.0;  chi = 1.0
-psi = haskey(ENV, "PSI_OVERRIDE") ? parse(Float64, ENV["PSI_OVERRIDE"]) : 0.5   # inverse Frisch; lower = flatter labor supply, wage reacts less
-# theta_vec is the FREQUENCY of price adjustment (fraction of firms that reset each
-# quarter). Calvo stickiness = probability of NOT adjusting = 1 - theta_vec.
-stick    = 1 .- theta_vec
-modkappa = stick .* (epsilon - 1) ./ ((1 .- stick) .* (1 .- stick .* beta_val))
-
-goods    = spend_good .> spend_serv
-services = spend_serv .> spend_good
-modgammag = spend_good ./ sum(spend_good)
-modgammas = spend_serv ./ sum(spend_serv)
-
-modcl = zeros(nsec); modclneg = zeros(nsec); modcm = zeros(nsec)
-modepsM  = fill(0.1, nsec)
-modepsY  = fill(0.8, nsec)
-modpsil = fill(-1000.0, nsec); modpsim = fill(-1000.0, nsec)
-
-phi_val = 2.5; rhoi_val = 0.6; rhoirule_val = 0.74
-gammaind_val = 0.0; ilabcosts_val = 0.1; ombar_val = 0.57
-
-Pistar_ss = 1.00; Rworld_ss = Pistar_ss / beta_val
-kappaV_val = 1e13; epsilonV_val = 1e13; epsilonX_val = 1.0; omegaX_val = 1.0
-chii_b_val = 0.0024; etastar_val = 3.5   # chii_b = XMAS posterior (100ψ=0.24, Chile EMBIG); was 0.001
-xi_rstar_val = 0.2; ystar_ss_val = 1.0; PVstar_ss = 1.0; sigmaH_val = 0.999
-
-modchiX   = let   # sectoral export shares chi_i^X from Chilean 2021 supply-use table (Data/computed)
-    _f = joinpath(DATA_DIR, "computed", "export_shares_chile.csv")
-    isfile(_f) ? (v = Float64.(CSV.read(_f, DataFrame).chi_x); v ./ sum(v)) : fill(1/nsec, nsec)
-end
-modvarrho = var_rho
-modA      = ones(nsec)
-
-# ---- Oil price shock parameters ----
-modalphaOil = [0.1635, 0.2164, 0.1890, 0.0871, 0.0417,
-               0.0793, 0.3734, 0.0043, 0.0449, 0.0633, 0.0391, 0.0447]
-epsilonV_oil_val  = haskey(ENV, "OILSUB_OVERRIDE") ? parse(Float64, ENV["OILSUB_OVERRIDE"]) : 0.5   # oil↔non-oil import substitution (default 0.5: model solves)
-rho_postar_val    = 0.9
-sigma_postar_val  = 0.02
-POstar_ss_val     = 1.0
-
-# ---- TFP SHOCK ONLY (sector 1 = Agriculture) ----
+# --- shock selection (the ONLY thing this script chooses) ---
 shock_sector = 1
-sigma_i_val     = 0.0
-rho_om1_val     = 0.1
-sigma_om_vec    = zeros(nsec)
-rho_tfp1_val    = 0.5; rho_tfp2_val = 0.0
-isigma_tfp_val  = zeros(nsec)
-rho_val         = 0.1
-sigma_L_agg_val = 0.0
-rho_pvstar_val  = 0.9; sigma_pvstar_val = 0.0   # import price shock OFF
-rho_xi_val      = 0.80; sigma_xi_val = 0.0      # preference shock OFF
-
-# Shock activation flags
-shock_eps_om_vec     = zeros(nsec)
-shock_eps_i_val      = 0.0
-shock_eps_pvstar_val = 0.0
-shock_eps_xi_val     = 0.0
-shock_eps_postar_val = 0.0   # oil OFF
-shock_epsA_val       = zeros(nsec); shock_epsA_val[shock_sector] = 1.0   # << TFP ON
-
-# Load SMM estimates if available (override structural params)
-smm_est_file = joinpath(ESTIMATION_DIR, "smm_estimates.csv")   # estimation outputs live in julia_dynare/estimation_results (2026-07-10)
-if isfile(smm_est_file)
-    est_df = CSV.read(smm_est_file, DataFrame)
-    est    = Dict(String(r.param) => Float64(r.value) for r in eachrow(est_df))
-    ilabcosts_val    = est["ilabcosts"]
-    modepsY          = fill(est["epsY"], nsec)
-    modepsM          = fill(est["epsM"], nsec)
-    kappaV_val       = exp(est["log_kappaV"])
-    rho_om1_val      = est["rho_om"]
-    rho_tfp1_val     = est["rho_A"]
-    isigma_tfp_val   = [est["isigma_tfp_$(i)"] for i in 1:nsec]
-    haskey(est, "etastar") && (etastar_val = est["etastar"])
-    @printf "  Loaded SMM estimates from %s\n" smm_est_file
-end
-
-# ---- Agriculture TFP persistence: half-life of HALF A QUARTER ------------- #
-# ρ^h = 0.5 with h = 0.5  →  ρ_agr = 0.25.  Sector-specific: only Agriculture
-# (sector 1) gets the transitory persistence; all other sectors keep the
-# common (SMM) value.  rho_tfp1_val becomes an nsec-vector, written as
-# rho_tfp1_<i> by write_params_mod and used sector-by-sector in the lev mod.
-rho_tfp_agr  = 0.25
-rho_tfp1_val = let v = fill(Float64(rho_tfp1_val), nsec); v[1] = rho_tfp_agr; v end
-@printf "  ρ_tfp Agricultura = %.2f (vida media: medio trimestre); resto = %.3f\n" rho_tfp_agr rho_tfp1_val[end]
-
-# ---- εY (production-input elasticity) — pinned default ------------------- #
-# Pinned to 0.5 for ALL runs, overriding the SMM estimate (εY=1.48). The SMM
-# value implied input SUBSTITUTABILITY (εY>1), which produced counterintuitive
-# supply-shock responses (rising employment / output after adverse shocks).
-# εY<1 = complements (gross-complementarity, the network-amplification regime).
-# Override per-run with ENV["EPSY_OVERRIDE"], e.g. `EPSY_OVERRIDE=0.8 julia …`.
-# Propagates to subprocesses launched by run_all_shocks.jl.
-_epsY_set = haskey(ENV, "EPSY_OVERRIDE") ? parse(Float64, ENV["EPSY_OVERRIDE"]) : 0.5
-modepsY   = fill(_epsY_set, nsec)
-@printf "  εY pinned: εY = %.4f (overrides SMM estimate)\n" _epsY_set
-
-
-# =========================================================================== #
-#  THREE ε_Y CASES: NEAR-LEONTIEF / BASELINE / HIGH SUBSTITUTION              #
-# =========================================================================== #
-
-# Use baseline εY from SMM estimates (no εY sensitivity loop)
-epsY_baseline = modepsY[1]
-nT = 40   # IRF horizon
-
-@printf "\n%s\n  Baseline εY = %.4f (from SMM estimates)\n%s\n" repeat("─",60) epsY_baseline repeat("─",60)
-
-# εY is already set in modepsY from the SMM parameter load — no override needed
-
-
-# =========================================================================== #
-#  STEADY STATE (same as main_SOE_gap.jl)                                      #
-# =========================================================================== #
-
-sigmaH     = sigmaH_val
-varrho_val = modvarrho
-gammag_vec = modgammag; gammas_vec = modgammas
-om_g = ombar_val; om_s = 1 - ombar_val
-chiX_vec = modchiX; omegaX = omegaX_val; etastar = etastar_val
-Ystar = ystar_ss_val
-alpha_vec = modalpha; alphaV_vec = modalphaV
-# Capital block, read from the same CSVs as main_SOE_gap.jl so this script
-# cannot describe a different model from the tables.
-alphaK_vec = modalphaK
-chiI_vec   = Float64.(cal_df.chi_I)
-NU_K       = let d = CSV.read(joinpath(DATA_DIR, "capital_calibration.csv"), DataFrame)
-    Float64(d.value[findfirst(==("nu_K"), String.(d.param))])
-end
-beta_mat = modbeta; epsY_vec = modepsY; epsM_vec = modepsM; A_vec = modA
-
-tb_target = let
-    _tb = 0.02
-    agg_mom_tb = joinpath(DATA_DIR, "aggregate_moments.csv")
-    if isfile(agg_mom_tb)
-        try
-            agg_tb = CSV.read(agg_mom_tb, DataFrame)
-            row    = filter(r -> String(r.moment) == "TBGDP", agg_tb)
-            !isempty(row) && isfinite(row[1, :value]) && (_tb = Float64(row[1, :value]))
-        catch; end
-    end; _tb
-end
-
-x_guess = [ones(nsec); 1.0; 1.0; 1.0]
-ss_result = nlsolve(
-    (F, x) -> F .= steady_ntwsoe(
-        x, PVstar_ss, epsilon, varrho_val, sigmaH,
-        gammag_vec, gammas_vec, om_g, om_s, chiX_vec, omegaX, etastar, Ystar,
-        alpha_vec, alphaV_vec, beta_mat, epsY_vec, epsM_vec,
-        alphaK_vec, chiI_vec, NU_K,
-        gamma, chi, psi, A_vec, tb_target
-    ),
-    x_guess; ftol=1e-14, show_trace=false, method=:trust_region)
-
-!converged(ss_result) && @warn "SS solver did not converge (res=$(ss_result.residual_norm))"
-
-pH_ss = ss_result.zero[1:nsec]
-w_ss  = ss_result.zero[nsec+1]
-Q_ss  = ss_result.zero[nsec+2]
-C_ss  = ss_result.zero[nsec+3]
-
-# Full SS evaluation (replicates main_SOE_gap.jl)
-PL_ss  = fill(w_ss, nsec)
-PV_ss  = Q_ss * PVstar_ss
-MCi_ss = (epsilon-1)/epsilon .* pH_ss
-PMi_ss = (beta_mat * (pH_ss .^ (1 .- epsM_vec))) .^ (1 ./ (1 .- epsM_vec))
-P_ss   = (varrho_val .^ sigmaH .* pH_ss .^ (1-sigmaH)
-         .+ (1 .- varrho_val) .^ sigmaH .* PV_ss .^ (1-sigmaH)) .^ (1/(1-sigmaH))
-p_g_ss = prod(P_ss .^ gammag_vec); p_s_ss = prod(P_ss .^ gammas_vec)
-C_g_ss = om_g * C_ss / p_g_ss; C_s_ss = om_s * C_ss / p_s_ss
-C_gi_ss = gammag_vec .* (p_g_ss ./ P_ss) .* C_g_ss
-C_si_ss = gammas_vec .* (p_s_ss ./ P_ss) .* C_s_ss
-CHg_ss = varrho_val .^ sigmaH .* (pH_ss ./ P_ss) .^ (-sigmaH) .* C_gi_ss
-CHs_ss = varrho_val .^ sigmaH .* (pH_ss ./ P_ss) .^ (-sigmaH) .* C_si_ss
-CFg_ss = (1 .- varrho_val) .^ sigmaH .* (PV_ss ./ P_ss) .^ (-sigmaH) .* C_gi_ss
-CFs_ss = (1 .- varrho_val) .^ sigmaH .* (PV_ss ./ P_ss) .^ (-sigmaH) .* C_si_ss
-CHi_ss = CHg_ss .+ CHs_ss; CFi_ss = CFg_ss .+ CFs_ss
-PX_ss  = prod(pH_ss .^ chiX_vec)
-X_ss   = omegaX * (PX_ss / Q_ss)^(-etastar) * Ystar
-Xi_ss  = chiX_vec .* X_ss .* PX_ss ./ pH_ss
-
-ig_ss = zeros(nsec)
-for i in 1:nsec, j in 1:nsec; ig_ss[i] += beta_mat[j, i]; end
-ig_ss .*= mean(CHi_ss .+ Xi_ss)
-
-M_init  = (MCi_ss ./ PMi_ss) .^ epsY_vec .* alpha_vec .* (CHi_ss .+ Xi_ss .+ ig_ss)
-L_init  = (MCi_ss ./ PL_ss)  .^ epsY_vec .* (1 .- alpha_vec .- alphaV_vec .- alphaK_vec) .* (CHi_ss .+ Xi_ss .+ ig_ss)
-Vi_init = (MCi_ss ./ PV_ss)  .^ epsY_vec .* alphaV_vec .* (CHi_ss .+ Xi_ss .+ ig_ss)
-Yi_init = A_vec .* (
-    alpha_vec .^ (1 ./ epsY_vec) .* max.(M_init, 1e-20) .^ ((epsY_vec .- 1) ./ epsY_vec)
-  .+ alphaV_vec .^ (1 ./ epsY_vec) .* max.(Vi_init, 1e-20) .^ ((epsY_vec .- 1) ./ epsY_vec)
-  .+ (1 .- alphaV_vec .- alpha_vec .- alphaK_vec) .^ (1 ./ epsY_vec) .* max.(L_init, 1e-20) .^ ((epsY_vec .- 1) ./ epsY_vec)
-) .^ (epsY_vec ./ (epsY_vec .- 1))
-
-inner_sol = nlsolve(
-    (F, x) -> steady_ntwsoe_system!(F, x, alpha_vec, alphaV_vec, beta_mat,
-        MCi_ss, PMi_ss, PL_ss, PV_ss, CHi_ss, Xi_ss, epsY_vec, epsM_vec, A_vec, pH_ss,
-        alphaK_vec, chiI_vec, NU_K),
-    [M_init; L_init; Vi_init; Yi_init; alphaK_vec .* Yi_init];
-    ftol=1e-10, show_trace=false, method=:trust_region)
-
-M_ss  = inner_sol.zero[1:nsec]
-L_ss  = inner_sol.zero[nsec+1:2*nsec]
-Vi_ss = inner_sol.zero[2*nsec+1:3*nsec]
-Yi_ss = inner_sol.zero[3*nsec+1:4*nsec]
-
-V_ss       = sum(Vi_ss); CF_ss = sum(CFi_ss)
-mkupV      = 1.0; IMP_tot_ss = mkupV * (V_ss + CF_ss)
-TB_ss      = PX_ss * X_ss - PV_ss * IMP_tot_ss
-# GDP = C + I + TB
-Kbar_ss    = inner_sol.zero[4*nsec+1:5*nsec]
-EInv_ss    = NU_K/(1+NU_K)*sum(MCi_ss .* Kbar_ss)
-GDP_ss     = C_ss + EInv_ss + TB_ss; N_ss = sum(L_ss)
-r_star_ss  = Rworld_ss; Bstar_ss = -TB_ss / (Q_ss * (1 - r_star_ss / Pistar_ss))
-bbar_val   = Q_ss * Bstar_ss / GDP_ss
-
-PO_ss     = Q_ss * POstar_ss_val
-PIV_ss_vec = [
-    (modalphaOil[i] * PO_ss^(1-epsilonV_oil_val)
-     + (1-modalphaOil[i]) * PV_ss^(1-epsilonV_oil_val))^(1/(1-epsilonV_oil_val))
-    for i in 1:nsec
-]
-
-CFg_total_ss = sum(CFg_ss); CFs_total_ss = sum(CFs_ss)
-
-@printf "  SS: GDP=%.4f  TB/GDP=%.4f  C=%.4f\n\n" GDP_ss (TB_ss/GDP_ss) C_ss
-
-
-# =========================================================================== #
-#  WRITE params_jl.mod AND RUN DYNARE                                          #
-# =========================================================================== #
-
-params_nt = (
-    nsec=nsec, sigma_i_val=sigma_i_val, sigma_L_agg_val=sigma_L_agg_val,
-    ilabcosts_val=ilabcosts_val, gamma_val=gamma, beta_val=beta_val,
-    phi_val=phi_val, rho_val=rho_val, rho_om1_val=rho_om1_val,
-    rho_tfp1_val=rho_tfp1_val, rho_tfp2_val=rho_tfp2_val,
-    rhoi_val=rhoi_val, rhoirule_val=rhoirule_val, ombar_val=ombar_val,
-    chii_b_val=chii_b_val, bbar_val=bbar_val,
-    epsilonX_val=epsilonX_val, omegaX_val=omegaX_val,
-    ystar_ss_val=ystar_ss_val, etastar_val=etastar_val,
-    epsilonV_val=epsilonV_val, kappaV_val=kappaV_val, sigmaH_val=sigmaH_val,
-    Pistar_ss_val=Pistar_ss, PVstar_ss_val=PVstar_ss,
-    Rworld_ss_val=Rworld_ss,
-    rho_pvstar_val=rho_pvstar_val, sigma_pvstar_val=sigma_pvstar_val,
-    rho_xi_val=rho_xi_val, sigma_xi_val=sigma_xi_val,
-    # Oil sector
-    modalphaOil=modalphaOil, epsilonV_oil_val=epsilonV_oil_val,
-    rho_postar_val=rho_postar_val, sigma_postar_val=sigma_postar_val,
-    POstar_ss_val=POstar_ss_val, shock_eps_postar_val=shock_eps_postar_val,
-    PIV_ss_vec=PIV_ss_vec,
-    # Steady state
-    w_ss=w_ss, C_ss=C_ss, GDP_ss=GDP_ss, N_ss=N_ss,
-    p_s_ss=p_s_ss, p_g_ss=p_g_ss, C_s_ss=C_s_ss, C_g_ss=C_g_ss,
-    Bstar_ss=Bstar_ss, Q_ss=Q_ss, TB_ss=TB_ss, PX_ss=PX_ss,
-    V_ss=V_ss, CF_ss=CF_ss, CFg_total_ss=CFg_total_ss, CFs_total_ss=CFs_total_ss,
-    IMP_ss_val=IMP_tot_ss, Ctot_ss_val=sum(gammag_vec .* (p_g_ss ./ P_ss) .* C_g_ss) + sum(gammas_vec .* (p_s_ss ./ P_ss) .* C_s_ss),
-    Ctotg_ss_val=sum(gammag_vec .* (p_g_ss ./ P_ss) .* C_g_ss),
-    Ctots_ss_val=sum(gammas_vec .* (p_s_ss ./ P_ss) .* C_s_ss),
-    VA_ss_val=sum(pH_ss .* Yi_ss .- PMi_ss .* M_ss .- PV_ss .* Vi_ss), M_tot_ss=sum(M_ss), Y_tot_ss=sum(pH_ss .* Yi_ss),
-    # Shock flags
-    shock_eps_i_val=shock_eps_i_val, shock_eps_pvstar_val=shock_eps_pvstar_val,
-    shock_eps_xi_val=shock_eps_xi_val,
-    shock_epsA_val=shock_epsA_val,
-    # Option-A
-    sigma_om_vec=sigma_om_vec, shock_eps_om_vec=shock_eps_om_vec,
-    # Sectoral vectors
-    modgammag=modgammag, modgammas=modgammas, modalpha=modalpha,
-    modalphaV=modalphaV, modepsY=modepsY, modepsM=modepsM,
-    modkappa=modkappa, goods=goods, services=services,
-    modcl=modcl, modclneg=modclneg, modcm=modcm,
-    modchiX=modchiX, modvarrho=modvarrho,
-    isigma_tfp_val=isigma_tfp_val, PL_ss=PL_ss,
-    CFg_ss=CFg_ss, CFs_ss=CFs_ss, CHg_ss=CHg_ss, CHs_ss=CHs_ss,
-    Vi_ss=Vi_ss, pH_ss=pH_ss, MCi_ss=MCi_ss, Yi_ss=Yi_ss,
-    L_ss=L_ss, C_gi_ss=C_gi_ss, C_si_ss=C_si_ss, P_ss=P_ss,
-    PMi_ss=PMi_ss, M_ss=M_ss, modbeta=modbeta,
-)
-
-params_mod_path = write_params_mod(MOD_DIR, params_nt)
-@printf "--- Wrote params_jl.mod ---\n\n"
-
-# Run Dynare subprocess
-dynare_script = joinpath(SCRIPT_DIR, "run_dynare_subprocess.jl")
-julia_exe     = joinpath(Sys.BINDIR, "julia")
-project_dir   = dirname(Base.active_project())
-
-@printf "--- Running Dynare.jl (subprocess) ---\n"
-dynare_out = IOBuffer()
-dynare_cmd = ignorestatus(`$julia_exe --project=$project_dir $dynare_script $MOD_DIR`)
-dynare_proc = run(pipeline(dynare_cmd, stdout=dynare_out, stderr=stderr), wait=true)
-
-dynare_stdout = String(take!(dynare_out))
-print(dynare_stdout)
-
-if !success(dynare_proc)
-    error("Dynare subprocess crashed (exit code $(dynare_proc.exitcode)). See stderr above.")
-end
-
-if !occursin("DYNARE_SUCCESS", dynare_stdout)
-    error("Dynare subprocess did not report success. See output above.")
-end
-
-@printf "\n--- Dynare completed ---\n\n"
-
 
 # =========================================================================== #
 #  READ DECISION RULES                                                         #
@@ -557,6 +223,11 @@ scale_factor = abs(_a_unit) > 1e-12 ? shock_pct / _a_unit : shock_pct / isigma_t
 @printf "  A_%d unit response = %.5f -> scale factor = %.4f\n\n" shock_sector _a_unit scale_factor
 
 n_irf = 40   # quarters
+
+# nT (the plotting horizon) MUST equal n_irf. It used to be set independently
+# in the reader block and silently disagreed for the four TFP scripts
+# (nT=80 vs n_irf=40), which is a BoundsError inside the figure code.
+nT = n_irf
 
 # State-space matrices
 A = ghx[state_rows, :]  # n_states × n_states
@@ -657,7 +328,7 @@ end
 # 5-way GE marginal-cost decomposition at h = 1, 2, 4
 alpha_L_vec = 1.0 .- modalpha .- modalphaV .- modalphaK
 # Rental IRFs feed the capital bar of the marginal-cost decomposition.
-rk_irf_mat = reduce(vcat, [get_irf("RK_$(i)")' for i in 1:nsec])
+rk_irf_mat = reduce(vcat, [get_irf_var("RK_$(i)")' for i in 1:nsec])
 ge_kwargs = (pv_irf=pv_irf, a_irf_mat=a_irf_mat)
 ge_h1 = ge_mc_components(:tfp, 1, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; modalphaK=modalphaK, rk_irf_mat=rk_irf_mat, ge_kwargs...)
 ge_h2 = ge_mc_components(:tfp, 2, ph_irf_mat, mc_irf_mat, w_irf, modalphaV, modalpha, alpha_L_vec, modbeta; modalphaK=modalphaK, rk_irf_mat=rk_irf_mat, ge_kwargs...)
@@ -709,10 +380,10 @@ ctx = (
     exposure_title = "Participación de Insumos desde Agricultura por Sector",
     share_vec = exposure_share, modalphaV = modalphaV, Yi_ss = Yi_ss,
     decomp_share_head = "Agric.", decomp_share_sub = "Insumo (\\%)",
-    decomp_caption = "Descomposición Sectorial de un Shock Negativo de 10\\% a la PTF en Agricultura",
+    decomp_caption = "Descomposición Sectorial de un Shock Negativo de $(round(abs(shock_pct)*100, digits=1))\\% a la PTF en Agricultura",
     decomp_notes = "La participación de insumos es la fracción de los insumos intermedios del sector \$i\$ provenientes de Agricultura (matriz IP de Chile 2021). El CM directo es el empuje de costo por productividad propia \$-\\hat A_i\$, distinto de cero solo para el sector afectado. La red es el costo adicional propagado por encadenamientos IP bajo la aproximación de Leontief de equilibrio parcial. Total = Directo + Red. Razón de amplificación = Total/Directo (mostrada solo para el sector afectado). La IRF de producto es la respuesta sectorial en el período de impacto. B\\,=\\,Bienes, S\\,=\\,Servicios.",
-    agg_caption = "Respuestas Agregadas a un Shock Negativo de 10\\% a la PTF en Agricultura",
-    agg_notes = "PIB, consumo, empleo y TCR en \\% de desviación del estado estacionario; inflación y tasa de política en pp anualizados; balanza comercial en pp del PIB. El shock es una reducción única de 10\\% en la productividad total de factores del sector Agricultura con persistencia \$\\rho = $(round(rho_tfp_agr,digits=3))\$ (vida media de medio trimestre). Impacto = respuesta en el trimestre 1. Mín/Máx = respuesta extrema en 40 trimestres.",
+    agg_caption = "Respuestas Agregadas a un Shock Negativo de $(round(abs(shock_pct)*100, digits=1))\\% a la PTF en Agricultura",
+    agg_notes = "PIB, consumo, empleo y TCR en \\% de desviación del estado estacionario; inflación y tasa de política en pp anualizados; balanza comercial en pp del PIB. El shock es una reducción única de $(round(abs(shock_pct)*100, digits=1))\\% en la productividad total de factores del sector Agricultura con persistencia \$\\rho = $(round(rho_tfp1_val[shock_sector],digits=3))\$. Impacto = respuesta en el trimestre 1. Mín/Máx = respuesta extrema en 40 trimestres.",
     get_irf = get_irf_var,
 )
 

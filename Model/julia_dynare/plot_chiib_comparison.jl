@@ -2,12 +2,12 @@
 plot_chiib_comparison.jl
 ========================
 Overlay oil-shock IRFs for different values of the debt-elastic risk-premium
-parameter chii_b (SOE closure sensitivity).
+parameter phi_b (SOE closure sensitivity).
 
 Prerequisite runs (each writes tables/<tag>_shock_irfs.csv):
-    julia --project=. oil_shock_analysis.jl                       # chii_b = 0.001 → tag "oil"
-    CHIIB_OVERRIDE=0.01 julia --project=. oil_shock_analysis.jl   # tag "oil_chiib0p01"
-    CHIIB_OVERRIDE=0.05 julia --project=. oil_shock_analysis.jl   # tag "oil_chiib0p05"
+    julia --project=. oil_shock_analysis.jl                       # phi_b = 0.001 → tag "oil"
+    PHIB_OVERRIDE=0.01 julia --project=. oil_shock_analysis.jl   # tag "oil_chiib0p01"
+    PHIB_OVERRIDE=0.05 julia --project=. oil_shock_analysis.jl   # tag "oil_chiib0p05"
 
 Then:
     julia --project=. plot_chiib_comparison.jl
@@ -22,7 +22,7 @@ const TAB = joinpath(JD, "tables")
 const OUT = joinpath(JD, "figures", "oil_shock")
 isdir(OUT) || mkpath(OUT)
 
-# (tag, chii_b, color)
+# (tag, phi_b, color)
 runs = [
     ("oil",           0.001, :black),
     ("oil_chiib0p01", 0.01,  :steelblue),
@@ -46,7 +46,7 @@ for (tag, cb, col) in runs
         df = CSV.read(f, DataFrame)
         push!(loaded, (cb, col, df))
     else
-        @printf "  [skip] %s not found — run oil_shock_analysis.jl with CHIIB_OVERRIDE=%g first\n" f cb
+        @printf "  [skip] %s not found — run oil_shock_analysis.jl with PHIB_OVERRIDE=%g first\n" f cb
     end
 end
 isempty(loaded) && error("No IRF csv files found in $(TAB).")
@@ -70,7 +70,7 @@ savefig(plt, outfile)
 @printf "\nSaved: %s\n" outfile
 
 # Console diagnostic: tail decay ratio (dominant eigenvalue proxy) per run
-@printf "\n%-12s %10s %10s %12s\n" "chii_b" "Q(h40)" "TB(h40)" "Q tail-ratio"
+@printf "\n%-12s %10s %10s %12s\n" "phi_b" "Q(h40)" "TB(h40)" "Q tail-ratio"
 for (cb, _, df) in loaded
     q  = sort(df[df.variable .== "Q",  :], :period).value
     tb = sort(df[df.variable .== "TB", :], :period).value

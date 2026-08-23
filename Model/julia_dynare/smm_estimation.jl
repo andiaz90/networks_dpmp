@@ -76,6 +76,7 @@ if isfile(sec_mom_file) && isfile(agg_mom_file)
     p_d          = Float64.(sec.std_PH)
     l_d          = Float64.(sec.std_L)
     corr_YPH_d   = hasproperty(sec, :corr_YPH) ? Float64.(sec.corr_YPH) : fill(0.0, NSEC)
+    ac_y_d       = hasproperty(sec, :autocorr_Y) ? Float64.(sec.autocorr_Y) : fill(NaN, NSEC)
     d_std_GDP    = agg_dict["std_GDP"]
     d_std_pi     = agg_dict["std_pi"]
     d_corr_GDPpi = agg_dict["corr_GDPpi"]
@@ -102,6 +103,30 @@ if isfile(sec_mom_file) && isfile(agg_mom_file)
         valid-window fix). Regenerate it before estimating:
             julia --project=. compute_data_moments.jl
         """)
+    haskey(agg_dict, "autocorr_GDP") || error("""
+        aggregate_moments.csv is STALE: autocorr_GDP not found.
+        The persistence moments (64-77) were added 2026-08-21. Regenerate:
+          rm Data/sectoral_moments.csv Data/aggregate_moments.csv
+          julia --project=. compute_data_moments.jl
+        """)
+    d_ac_GDP     = agg_dict["autocorr_GDP"]
+    d_ac_pi      = agg_dict["autocorr_pi"]
+    haskey(agg_dict, "rbar_YY") || error("""
+        aggregate_moments.csv is STALE: rbar_YY not found.
+        Moments 78-84 were added 2026-08-21. Regenerate:
+          rm Data/sectoral_moments.csv Data/aggregate_moments.csv
+          julia --project=. compute_data_moments.jl
+          python3 Data/build_reallocation_calibration.py
+        """)
+    d_rbar_YY    = agg_dict["rbar_YY"]
+    d_ratio_stdC = agg_dict["ratio_stdC"]
+    d_ratio_stdI = agg_dict["ratio_stdI"]
+    d_corr_CGDP  = agg_dict["corr_CGDP"]
+    d_corr_IGDP  = agg_dict["corr_IGDP"]
+    # 79-80: goods/services average sectoral employment volatility, already in
+    # the sectoral CSV (constant down each group's rows).
+    d_std_Lg     = hasproperty(sec, :std_Lg) ? first(skipmissing(filter(!isnan, Float64.(sec.std_Lg)))) : NaN
+    d_std_Ls     = hasproperty(sec, :std_Ls) ? first(skipmissing(filter(!isnan, Float64.(sec.std_Ls)))) : NaN
     d_corr_NGDP  = agg_dict["corr_NGDP"]
     d_corr_NAPL  = agg_dict["corr_NAPL"]
     # std(omG), moment 61 (added 2026-08-19): HP-filtered std of the nominal
@@ -162,7 +187,12 @@ end
 
 data_moments = [y_d; p_d; l_d; d_std_GDP; d_std_pi; d_corr_GDPpi;
                 d_std_TBGDP; d_std_Q; d_autocorr_Q; d_corr_GDPQ; 1.0; 1.0; 1.0; corr_YPH_d;
-                d_corr_NGDP; d_corr_NAPL; d_std_omG; d_std_pigap; d_corr_pigap_om]
+                d_corr_NGDP; d_corr_NAPL; d_std_omG; d_std_pigap; d_corr_pigap_om;
+                # 64-77: persistence (2026-08-21)
+                d_ac_GDP; d_ac_pi; ac_y_d;
+                # 78-84: literature-standard block
+                d_rbar_YY; d_std_Lg; d_std_Ls;
+                d_ratio_stdC; d_ratio_stdI; d_corr_CGDP; d_corr_IGDP]
 @assert length(data_moments) == length(MOMENT_NAMES) "data_moments ($(length(data_moments))) ≠ MOMENT_NAMES ($(length(MOMENT_NAMES)))"
 
 # GUARD: NaN anywhere in data_moments poisons the objective for ALL evaluations
@@ -391,6 +421,15 @@ function build_baseline(context::Dynare.Context,
         modKbar=[pvec("Kbar_$(i)") for i in 1:nsec],
         modchiI=[pvec("chiI_$(i)") for i in 1:nsec],
         nuK_val=pvec("nuK"),
+        # Exogenous government demand (2026-08-20). modGi is the solved SS level
+        # vector written by main_SOE_gap.jl; modgammaG and gshare_target let the
+        # estimation re-solve the steady state with the same government block.
+        modGi=[pvec("Gi_$(i)") for i in 1:nsec],
+        modgammaG=let g=[pvec("Gi_$(i)") for i in 1:nsec]
+            s = sum(g); s > 0 ? g ./ s : zeros(nsec)
+        end,
+        gshare_target=pvec("gshare_target"),
+        subsMC_val=let v=pvec("subsMC"); (isnan(v) || v <= 0) ? 1.0 : v end,
         modbeta=[pvec("beta_$(i)_$(j)") for i in 1:nsec, j in 1:nsec],
         modgammag=[pvec("gammag_$(i)") for i in 1:nsec],
         modgammas=[pvec("gammas_$(i)") for i in 1:nsec],
@@ -422,14 +461,29 @@ function default_theta0(context::Dynare.Context)
             (isempty(p) || idx > length(p)) ? 0.0 : p[idx]
         end
     end
-    # Option-A layout: 36 params (θ[36] = kappaw, added 2026-07-08)
-    [pv("ilabcosts"); pv("epsY_1"); pv("epsM_1"); log(pv("kappaV"));
-     pv("rho_om1"); pv("rho_tfp1");
-     [pv("isigma_tfp_$(i)") for i in 1:12];
-     [max(pv("sigma_om_$(i)"), 0.01) for i in 1:12];
-     pv("rho_pvstar"); pv("sigma_pvstar"); pv("rho_xi"); pv("sigma_xi");
-     pv("etastar");
-     let k = pv("kappaw"); k > 0 ? k : 115.0 end]   # start at calibrated value
+    # Option-A layout: 38 params.
+    #   θ[36] = kappaw                            (2026-07-08)
+    #   θ[37:38] = lambda_A, lambda_om            (2026-08-20, shock-mix scales)
+    # The λ entries have no counterpart in params_jl.mod — they multiply the
+    # measured shock vectors inside the objective rather than being written to
+    # the model — so they are seeded at 1.0 here, which reproduces the measured
+    # sizes exactly.
+    θ = [pv("ilabcosts"); pv("epsY_1"); pv("epsM_1"); log(pv("kappaV"));
+         pv("rho_om1"); pv("rho_tfp1");
+         [pv("isigma_tfp_$(i)") for i in 1:12];
+         [max(pv("sigma_om_$(i)"), 0.01) for i in 1:12];
+         pv("rho_pvstar"); pv("sigma_pvstar"); pv("rho_zeta"); pv("sigma_zeta");
+         pv("etastar");
+         let k = pv("kappaw"); k > 0 ? k : 115.0 end;
+         1.0; 1.0]
+    # Guard: this constructor and the θ layout in utils.jl must stay in sync.
+    # They are edited in different files, so a mismatch shows up as a
+    # BoundsError several hundred lines away from the cause.
+    length(θ) == N_THETA || error(
+        "default_theta0 built a $(length(θ))-vector but N_THETA=$(N_THETA). " *
+        "Update BOTH default_theta0 (smm_estimation.jl) and PARAM_LABELS / " *
+        "CSV_PARAM_NAMES / LB / UB (utils.jl) when changing the θ layout.")
+    return θ
 end
 
 
@@ -549,31 +603,53 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
     #   θ[6]    = rho_A
     #   θ[7:18] = isigma_tfp_1:12
     #   θ[19:30]= sigma_om_1:12
-    #   θ[31:35]= rho_pvstar, sigma_pvstar, rho_xi, sigma_xi, etastar
+    #   θ[31:35]= rho_pvstar, sigma_pvstar, rho_zeta, sigma_zeta, etastar
     #   θ[36]   = kappaw (Rotemberg wage stickiness; 0 = flexible)
     ilabcosts=θ[1]; epsY=θ[2]; epsM=θ[3]; kappaV=exp(θ[4])
     rho_om=θ[5]; rho_A=θ[6]
     isigma_tfp  = @view θ[7:18]
     sigma_om_vec= @view θ[19:30]
-    rho_pvstar=θ[31]; sigma_pvstar=θ[32]; rho_xi=θ[33]; sigma_xi=θ[34]
+    rho_pvstar=θ[31]; sigma_pvstar=θ[32]; rho_zeta=θ[33]; sigma_zeta=θ[34]
     etastar = length(θ) >= 35 ? θ[35] : baseline.etastar_val
     # kappaw (θ[36], added 2026-07-08): Rotemberg wage stickiness. Fallback to
     # the params_jl.mod value only for legacy 35-length θ vectors.
     kappaw = length(θ) >= 36 ? θ[36] :
              let v = get_param_val(context,"kappaw"); isnan(v) ? 115.0 : v end
 
-    # θ-REDUCTION: override the 28 pinned params with their measured/fixed values.
+    # SHOCK-MIX SCALES (θ[37:38], added 2026-08-20). These are FREE and multiply
+    # the PINNED, data-measured shock vectors. lambda = 1 reproduces the measured
+    # calibration exactly, so the pre-2026-08-20 model is nested at (1,1).
+    #
+    # Why they exist: with all 24 sectoral shock sizes pinned, nothing in the
+    # free parameter set could change the supply/demand mix, and the
+    # corr(Y_i,PH_i) block — 40% of the objective — was structurally
+    # unimprovable. Scaling preserves the measured cross-sectional pattern (what
+    # the rank-correlation moments discipline) and frees only the level and mix.
+    lambda_A  = length(θ) >= 37 ? θ[37] : 1.0
+    lambda_om = length(θ) >= 38 ? θ[38] : 1.0
+
+    # θ-REDUCTION: override the pinned params with their measured/fixed values.
+    # NOTE these are COPIES, not views: the λ scaling must not write back into
+    # SMM_PIN, or every subsequent evaluation would compound the last one's λ.
     if SMM_PIN[] !== nothing
         _p = SMM_PIN[]
-        epsY = _p[2]; epsM = _p[3]
-        isigma_tfp   = @view _p[7:18]
-        sigma_om_vec = @view _p[19:30]
+        # Take a value from SMM_PIN only if it is actually pinned. epsY is free
+        # as of 2026-08-21; reading it from _p regardless would have let CMA-ES
+        # search a parameter the model never received.
+        epsY = _FREE_EPSY ? θ[2] : _p[2]
+        epsM = _FREE_EPSM ? θ[3] : _p[3]
+        isigma_tfp   = _p[7:18]  .* lambda_A
+        sigma_om_vec = _p[19:30] .* lambda_om
         rho_pvstar   = _p[31]; sigma_pvstar = _p[32]
+    else
+        isigma_tfp   = isigma_tfp   .* lambda_A
+        sigma_om_vec = sigma_om_vec .* lambda_om
     end
+    (lambda_A <= 0 || lambda_om <= 0) && return NAN58, false
 
     (!(0<epsY<5)||!(0<epsM<2)||ilabcosts<=0||kappaV<=0||rho_om<0||rho_om>=1||
      any(<(0),sigma_om_vec)||rho_A<0||rho_A>=1||any(<(0),isigma_tfp)||rho_pvstar<0||rho_pvstar>=1||
-     sigma_pvstar<0||rho_xi<0||rho_xi>=1||sigma_xi<0||
+     sigma_pvstar<0||rho_zeta<0||rho_zeta>=1||sigma_zeta<0||
      !(0.1<etastar<8.0)||kappaw<0||kappaw>1e4) && return NAN58, false
 
     set_param!(context,"kappaw",kappaw)
@@ -581,8 +657,8 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
     set_param!(context,"rho_om1",rho_om)
     set_param!(context,"etastar",etastar)
     set_param!(context,"rho_tfp1",rho_A);      set_param!(context,"rho_pvstar",rho_pvstar)
-    set_param!(context,"sigma_pvstar",sigma_pvstar); set_param!(context,"rho_xi",rho_xi)
-    set_param!(context,"sigma_xi",sigma_xi)
+    set_param!(context,"sigma_pvstar",sigma_pvstar); set_param!(context,"rho_zeta",rho_zeta)
+    set_param!(context,"sigma_zeta",sigma_zeta)
     for i in 1:nsec
         set_param!(context,"isigma_tfp_$(i)",isigma_tfp[i])
         set_param!(context,"sigma_om_$(i)",sigma_om_vec[i])   # now EXISTS in the model (fixes C2)
@@ -629,7 +705,7 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
 
     # Σe: activate shocks by NAME (fixes C1). The diagonal positions were
     # resolved once in build_baseline from the model's own exogenous ordering
-    # (eps_i, eps_pvstar, eps_xi, epsA_1:12, eps_om_1:12; oil & labour-supply off),
+    # (eps_i, eps_pvstar, eps_zeta, epsA_1:12, eps_om_1:12; oil & labour-supply off),
     # so a change to the .mod shock list can never silently scramble Σe again.
     fill!(sc.Σe, 0.0)
     @inbounds for k in baseline.active_exo_idx
@@ -653,7 +729,11 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
     # HP-filtered covariance on the ~40 needed variables only (25× faster)
     needed_names = vcat(["Y_$(i)" for i in 1:nsec], ["PH_$(i)" for i in 1:nsec],
                         ["L_$(i)" for i in 1:nsec],
-                        ["GDP","GDP_vol","pi","Q","TB","N","om_g","pi_g","pi_s"])
+                        ["GDP","GDP_vol","pi","Q","TB","N","om_g","pi_g","pi_s",
+                         # 2026-08-21, for the great-ratio block 81-84. EInv is
+                         # NOMINAL investment expenditure, so real investment is
+                         # EInv/PI_inv and both are needed.
+                         "C","EInv","PI_inv"])
     ei          = sc.endo_idx
     needed_idx  = [get(ei, nm, 0) for nm in needed_names]
     valid_mask  = needed_idx .> 0
@@ -689,6 +769,13 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
         let d=sqrt(max(Γ_v[i1,i1],0.0)*max(Γ_v[i2,i2],0.0))
             d<1e-15 ? 0.0 : clamp(Γ_v[i1,i2]/d,-1.0,1.0)
         end
+    end
+
+    # First-order autocorrelation of any needed variable. Gamma1_v is the
+    # LAG-1 HP-filtered covariance, already computed alongside Gamma_v, so the
+    # persistence moments cost nothing extra.
+    @inline pac(vn) = let k=get(ei_sub,vn,0)
+        (k==0 || Γ_v[k,k] <= 1e-15) ? NaN : clamp(Γ1_v[k,k]/Γ_v[k,k], -1.0, 1.0)
     end
 
     i_Q  = get(ei_sub,"Q",0)
@@ -765,12 +852,66 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
             d < 1e-15 ? 0.0 : clamp(cov_go / d, -1.0, 1.0)
         end
 
-    # Return 63 moments: 12×std_Y + 12×std_PH + 12×std_L + 10×aggregate +
+    # ---- 78: average pairwise cross-sectoral output correlation ----------- #
+    # The network literature's cross-sectional summary statistic (FSW 2011 Table
+    # 7; Atalay 2017 eq. 18). Smooth in theta, unlike the rank correlations it
+    # replaces, and governed by exactly the input elasticities this paper is about.
+    rbar_YY = let acc = 0.0, np = 0
+        for i in 1:nsec, j in (i+1):nsec
+            c = xcorr("Y_$(i)", "Y_$(j)")
+            isnan(c) && continue
+            acc += c; np += 1
+        end
+        np > 0 ? acc / np : NaN
+    end
+
+    # ---- 79-80: goods / services average sectoral employment volatility ---- #
+    # Output-share weighted within each group, matching how d_std_Lg and
+    # d_std_Ls are built in compute_data_moments.jl section 9.
+    std_Lg_m, std_Ls_m = let Yss = baseline.Y_ss
+        gi = baseline.goods; si = baseline.services
+        wg = sum(Yss[gi]) > 0 ? Yss[gi] ./ sum(Yss[gi]) : fill(1/length(gi), length(gi))
+        ws = sum(Yss[si]) > 0 ? Yss[si] ./ sum(Yss[si]) : fill(1/length(si), length(si))
+        (sum(wg .* std_L[gi]), sum(ws .* std_L[si]))
+    end
+
+    # ---- 81-84: SOE great ratios ------------------------------------------ #
+    # Gamma_v holds LEVEL deviations, so convert to log-deviation (co)variances
+    # by dividing by steady states — the same conversion corr(N,GDP/N) uses.
+    # Real investment is EInv/PI_inv, so var(log I) = v_e + v_p - 2c_ep.
+    ratio_stdC_m, ratio_stdI_m, corr_CGDP_m, corr_IGDP_m =
+        let iC = get(ei_sub,"C",0), iE = get(ei_sub,"EInv",0),
+            iP = get(ei_sub,"PI_inv",0), iG = get(ei_sub,"GDP_vol",0)
+            if iC == 0 || iE == 0 || iP == 0 || iG == 0
+                (NaN, NaN, NaN, NaN)
+            else
+                sb(k) = max(abs(ys[needed_idx[k]]), 1e-12)
+                v_c = max(Γ_v[iC,iC],0.0)/sb(iC)^2
+                v_g = max(Γ_v[iG,iG],0.0)/sb(iG)^2
+                v_e = max(Γ_v[iE,iE],0.0)/sb(iE)^2
+                v_p = max(Γ_v[iP,iP],0.0)/sb(iP)^2
+                c_ep = Γ_v[iE,iP]/(sb(iE)*sb(iP))
+                v_i  = max(v_e + v_p - 2c_ep, 0.0)          # real investment
+                c_cg = Γ_v[iC,iG]/(sb(iC)*sb(iG))
+                c_ig = (Γ_v[iE,iG]/(sb(iE)*sb(iG))) - (Γ_v[iP,iG]/(sb(iP)*sb(iG)))
+                sg = sqrt(v_g)
+                (sg > 1e-12 ? sqrt(v_c)/sg : NaN,
+                 sg > 1e-12 ? sqrt(v_i)/sg : NaN,
+                 (v_c*v_g) > 1e-24 ? clamp(c_cg/sqrt(v_c*v_g), -1.0, 1.0) : 0.0,
+                 (v_i*v_g) > 1e-24 ? clamp(c_ig/sqrt(v_i*v_g), -1.0, 1.0) : 0.0)
+            end
+        end
+
+    # Return 77 moments: 12×std_Y + 12×std_PH + 12×std_L + 10×aggregate +
     # 12×corr(Y_i,PH_i) + corr(N,GDP) + corr(N,GDP/N) + std(omG)
     # + std(pi_g-pi_s) + corr(pi_g-pi_s, om_g)
+    # + autocorr(GDP) + autocorr(pi) + 12×autocorr(Y_i)      [64-77, 2026-08-21]
     return [std_Y;std_PH;std_L;pstd("GDP_vol");pstd("pi");xcorr("GDP_vol","pi");
             std_TBGDP;pstd("Q");acQ;xcorr("GDP_vol","Q");rY;rP;rL;corr_YPH;
-            corr_NGDP_m;corr_NAPL_m;std_omG;std_pigap;corr_pigap_om], true
+            corr_NGDP_m;corr_NAPL_m;std_omG;std_pigap;corr_pigap_om;
+            pac("GDP_vol");pac("pi");[pac("Y_$(i)") for i in 1:nsec];
+            rbar_YY; std_Lg_m; std_Ls_m;
+            ratio_stdC_m; ratio_stdI_m; corr_CGDP_m; corr_IGDP_m], true
 end
 
 
@@ -828,7 +969,12 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     baselines_th = [deepcopy(baseline) for _ in 1:length(contexts_th)]
 
     W  = build_weighting_matrix(data_moments)
-    @printf "  Weighting: proportional std devs + 5× rank correlations.\n\n"
+    # The old text here claimed "5× rank correlations"; the actual weight in
+    # build_weighting_matrix has been 2.0 since 2026-07-09. Report what the code
+    # does, and flag the labour rank moment being switched off (2026-08-21).
+    @printf "  Weighting: VA-share sectoral blocks + 2× rank correlations + 3× correlations.\n"
+    @printf "  Labour rank correlation (moment 46): weight=%.1f%s\n\n" W[46,46] (
+        W[46,46] == 0 ? "  [UNTARGETED via SMM_W_LABOR_RANK]" : "")
 
     # Initial θ — θ-REDUCTION (the only mode): pin 28 params via SMM_PIN (elasticities +
     # 24 measured sectoral shocks + external rho/sigma + etastar); estimate only the 7 transmission
@@ -836,7 +982,31 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     θ0 = default_theta0(context)
     θ0[2] = parse(Float64, get(ENV, "SMM_EPSY", "0.80"))   # epsY (Atalay eps_Q) — pinned
     θ0[3] = parse(Float64, get(ENV, "SMM_EPSM", "0.20"))   # epsM (Atalay eps_m) — pinned
-    _scf = joinpath(DATA_DIR, "sectoral_shock_calibration.csv")
+    # SHOCK_STAGE selects which sectoral shock calibration to load (2026-08-21):
+    #   1 (DEFAULT) — sectoral_shock_calibration_stage1.csv, the analytic split
+    #   2            — sectoral_shock_calibration.csv, model-inverted
+    #
+    # DEFAULT CHANGED TO 1 ON 2026-08-21. Stage 2 is retired from the baseline.
+    # Head to head on identical data, moments and weights:
+    #     Stage 2  obj = 14.752   8 sigmas at LB, 2 at UB — degenerate
+    #     Stage 1  obj = 11.462   all sigmas at measured values, 0.0055-0.0387
+    # Stage 1 is 22% better AND is the only one of the two that produces a shock
+    # vector defensible in print. lambda_A came back at 0.836, near 1, which is
+    # the sign the measured sizes were already close in scale.
+    # SHOCK_STAGE=2 still works, for the robustness appendix.
+    _stage_sel = get(ENV, "SHOCK_STAGE", "1")
+    _scf = _stage_sel == "1" ?
+        joinpath(DATA_DIR, "sectoral_shock_calibration_stage1.csv") :
+        joinpath(DATA_DIR, "sectoral_shock_calibration.csv")
+    if _stage_sel == "1" && !isfile(_scf)
+        error("""
+            SHOCK_STAGE=1 but $(basename(_scf)) does not exist.
+            It is written by calibrate_sectoral_shocks.jl as a backup of the
+            Stage-1 input, or you can regenerate it directly:
+              julia --project=. compute_sectoral_shocks.jl
+              cp Data/sectoral_shock_calibration.csv Data/sectoral_shock_calibration_stage1.csv
+            """)
+    end
     if isfile(_scf)
         _sc = CSV.read(_scf, DataFrame)
         θ0[7:18]  = Float64.(_sc.isigma_tfp_init)   # measured (may exceed old bounds — pinned, not searched)
@@ -849,20 +1019,80 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         haskey(_em, "sigma_pvstar") && (θ0[32] = _em["sigma_pvstar"])
     end
     θ0[35] = parse(Float64, get(ENV, "SMM_ETASTAR", "1.0"))  # η* export elasticity — now PINNED (paper Table 3 = 1; Feenstra ~1-1.5), was estimated & drifted to ~4.5
-    SMM_PIN[] = copy(θ0)                  # objective reads the pinned entries from here (now 29 pins incl. etastar)
-    # 8 FREE transmission params — interior seeds (never at a bound):
+    # λ = 1 means "use the measured shock sizes as they are". Seeding at 1 makes
+    # the first evaluation identical to the pre-2026-08-20 model, so the run
+    # starts from the known objective and can only improve from there.
+    θ0[37] = parse(Float64, get(ENV, "SMM_LAMBDA_A",  "1.0"))
+    θ0[38] = parse(Float64, get(ENV, "SMM_LAMBDA_OM", "1.0"))
+
+    # NEWLY PINNED (2026-08-21): log(kappaV) and rho_zeta. These MUST be set
+    # BEFORE the SMM_PIN snapshot below. For any index NOT in FREE_THETA the
+    # objective reads its value out of SMM_PIN — it never sees the later θ0
+    # assignments — so a pinned parameter seeded after the snapshot would
+    # silently take whatever default_theta0 happened to return. That ordering
+    # trap is why these two lines live here and not with the free seeds.
+    #
+    # The objective is flat in both (|d obj| = 1.8e-4 and 3.4e-4 in the
+    # pre-flight scan), so the chosen values are immaterial to the fit; they are
+    # interior and round so the paper can report them as calibrated, not
+    # estimated.
+    #
+    # kappaV is not merely weakly identified — it is STRUCTURALLY INERT, and it
+    # is worth knowing why before anyone tries to "fix" its identification. The
+    # import-pricing FOC (NK_SOE_lev_gap2.mod ~line 924) is
+    #     1 - eV + eV*Q*PVstar/PV - kV*(.) + beta*kV*(.) = 0
+    # Divide through by eV: the Rotemberg terms enter with weight kV/eV.
+    # params_jl.mod sets epsilonV = 1e13, so kV/eV = 1.3e-7 and the equation
+    # collapses to PV = Q*PVstar, the law of one price. Any kappaV in any
+    # plausible range is multiplied by ~1e-7 and cannot move a single moment.
+    # To carry the weight the DOMESTIC block does (epsilon = 10, kappa_i in
+    # 8..509) kappaV would have to be ~1e14-1e15.
+    #
+    # TWO THINGS FOR THE PAPER, both verified against the code 2026-08-21:
+    #  (1) The 1e13 in Table 3 is epsilonV, the import-variety elasticity, NOT
+    #      kappa_v. eV -> infinity is what delivers the competitive/flexible
+    #      import price, so the DESCRIPTION is right and the SYMBOL is wrong.
+    #      kappa_v's actual value in params_jl.mod is ~1.3e6, and it is inert.
+    #  (2) With eV = 1e13 the model has COMPLETE, INSTANTANEOUS exchange-rate
+    #      pass-through. The text describes incomplete pass-through and cites
+    #      Romero (2025 JIE) for it. Text and calibration contradict each other;
+    #      pick one. If incomplete pass-through is wanted, eV has to come down
+    #      to a normal markup (~10) and kappaV then becomes a real parameter.
+    θ0[4]  = log(parse(Float64, get(ENV, "SMM_KAPPAV", "1e6")))  # log(kappaV) — PINNED
+
+    SMM_PIN[] = copy(θ0)                  # objective reads the pinned entries from here
+    # FREE transmission params — interior seeds (never at a bound):
     θ0[1]  = 1.0        # ilabcosts
-    θ0[4]  = log(1e6)   # log(kappaV)
     θ0[5]  = 0.5        # rho_om
     θ0[6]  = 0.5        # rho_A
-    θ0[33] = 0.7        # rho_xi (persistent demand shock; data autocorr(Q)=0.72)
-    θ0[34] = 0.010      # sigma_xi (small: a persistent shock needs less innovation size)
-    # θ0[35] (etastar) pinned above — not seeded here
+    θ0[33] = 0.7        # rho_zeta (free again — see the FREE_THETA note in utils.jl)
+    θ0[34] = 0.030      # sigma_zeta (interior under the raised UB of 0.15)
+    # θ0[35] (etastar) and θ0[4] (kappaV) pinned above
     θ0[36] = 100.0      # kappaw
     θ0 = clamp.(θ0, LB, UB)              # pinned dims clamped so scaled space stays [0,1]; objective overrides exactly
-    @printf "  θ-reduction: 7 transmission params estimated, 29 pinned (etastar calibrated to 1).\n"
-    @printf "  pins: epsY=%.2f epsM=%.2f | 24 measured sectoral shocks | rho_pvstar=%.3f sigma_pvstar=%.3f\n" SMM_PIN[][2] SMM_PIN[][3] SMM_PIN[][31] SMM_PIN[][32]
-    @printf "  free seeds: sigma_xi=%.3f ilabcosts=%.2f kappaw=%.0f | pinned etastar=%.2f\n" θ0[34] θ0[1] θ0[36] θ0[35]
+    @printf "  θ-reduction: %d transmission params estimated, %d pinned (etastar calibrated to 1).\n" length(FREE_THETA) (N_THETA - length(FREE_THETA))
+    @printf "  shock-mix scales free: lambda_A, lambda_om (1.0 = measured sizes; the pinned-mix model is nested at 1,1).\n"
+    @printf "  pins: epsY=%s epsM=%.2f | 24 measured sectoral shocks | rho_pvstar=%.3f sigma_pvstar=%.3f\n" (
+        _FREE_EPSY ? @sprintf("FREE [%.2f,%.2f], seed %.2f", LB[2], UB[2], θ0[2]) : @sprintf("%.2f", SMM_PIN[][2])
+    ) SMM_PIN[][3] SMM_PIN[][31] SMM_PIN[][32]
+    _FREE_EPSY && @printf "  NOTE: epsY is free, so every evaluation recomputes the steady state — slower per eval.\n"
+    @printf "  pin (structurally inert given epsilonV=1e13): kappaV=%.1e\n" exp(SMM_PIN[][4])
+    @printf "  free seeds: sigma_zeta=%.3f ilabcosts=%.2f kappaw=%.0f | pinned etastar=%.2f\n" θ0[34] θ0[1] θ0[36] θ0[35]
+    # Shock-calibration provenance: an SMM run on Stage-1 shock sizes is not
+    # comparable to one on Stage-2 sizes, and the objective level differs. Say
+    # which one this is, in the log, every run.
+    let _f = _scf   # the file actually loaded above, not a second hardcoded path
+        if isfile(_f)
+            _sc = CSV.read(_f, DataFrame)
+            _stage = hasproperty(_sc, :stage) ? String(_sc.stage[1]) : "UNKNOWN (pre-2026-08-21 file)"
+            _src   = hasproperty(_sc, :moment_source) ? String(_sc.moment_source[1]) : "UNKNOWN"
+            @printf "  sectoral shocks: stage=%s | inverted from %s | SHOCK_STAGE=%s (%s)\n" _stage _src _stage_sel basename(_scf)
+            if _stage_sel == "2"
+                @printf "  NOTE: running on Stage-2 (model-inverted) shock sizes. The baseline is\n"
+                @printf "  Stage 1 (obj 11.46 vs 14.75); Stage 2 is kept for the robustness appendix.\n"
+            end
+        end
+    end
 
     # Pre-flight
     @printf "=== PRE-FLIGHT ===\n"
@@ -888,7 +1118,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         @printf "  Interior seeds failed pre-flight; retrying free seeds at known-solving values.\n"
         θ0[1]  = clamp(0.18,       LB[1],  UB[1])    # ilabcosts
         θ0[4]  = clamp(log(4.6e6), LB[4],  UB[4])    # log(kappaV)
-        θ0[34] = clamp(0.020,      LB[34], UB[34])   # sigma_xi (was 0.049; keep the fallback modest post-discipline)
+        θ0[34] = clamp(0.020,      LB[34], UB[34])   # sigma_zeta (was 0.049; keep the fallback modest post-discipline)
         # θ0[35] (etastar) stays at its pinned value (1.0) — no longer a free seed
         m_test, ok_test = _safe_moments(θ0)
     end
@@ -1012,7 +1242,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     @printf "--- CMA-ES ---\n"
     @printf "  %d FREE params (of %d; %d pinned) | %d moments | max %d evals | %d threads\n" length(_FREE) N_THETA (N_THETA-length(_FREE)) N_MOMENTS max_evals n_threads_active
     @printf "  free: %s\n" join(PARAM_LABELS[_FREE], ", ")
-    @printf "  %-6s  %-10s  %-54s  %-7s  %-8s  %-8s\n" "eval" "best_obj" "[Y    PH    L     Agg   Rank  CorrYP]" "fail" "ms/eval" "Klein%"
+    @printf "  %-6s  %-10s  %-70s  %-7s  %-8s  %-8s\n" "eval" "best_obj" "[Y  PH  L  Agg  Rank  CorrYP  NLab  Om  ACagg  ACsec]" "fail" "ms/eval" "Klein%"
     @printf "  %s\n" repeat("-",90)
 
     best_θ        = Ref(clamp.(θ0, LB, UB))   # stored in original parameter space
@@ -1033,7 +1263,7 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     mkpath(ESTIMATION_DIR)
     progress_log = joinpath(ESTIMATION_DIR, "smm_progress_log.csv")
     open(progress_log, "w") do io
-        println(io, "timestamp,elapsed_s,evals,best_obj,decomp_Y,decomp_PH,decomp_L,decomp_Agg,decomp_Rank,decomp_CorrYP,decomp_NLab,decomp_Om,fails,ms_per_eval,klein_hit_pct")
+        println(io, "timestamp,elapsed_s,evals,best_obj,decomp_Y,decomp_PH,decomp_L,decomp_Agg,decomp_Rank,decomp_CorrYP,decomp_NLab,decomp_Om,decomp_ACagg,decomp_ACsec,fails,ms_per_eval,klein_hit_pct")
     end
 
     # Wall-clock self-limit: set SMM_MAX_HOURS a bit under the SLURM --time so the
@@ -1112,13 +1342,19 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
                         dNL = _blk0(ψ_now, W, MOMENT_BLOCKS[7][1])
                         dOm = length(MOMENT_BLOCKS) >= 8 ?
                               _blk0(ψ_now, W, MOMENT_BLOCKS[8][1]) : 0.0
-                        @printf "  %-6d  %-10.4f  [Y=%.2f PH=%.2f L=%.2f Agg=%.2f Rk=%.2f CY=%.2f NL=%.2f Om=%.2f]  fail=%-5d  %.1fms  Klein=%d%%\n" n b_obj dY dPH dL dAg dRk dCY dNL dOm fail_count[] ms kpct
+                        # 10-11: the persistence blocks (2026-08-21). Guarded on
+                        # length so an older MOMENT_BLOCKS still prints.
+                        dACa = length(MOMENT_BLOCKS) >= 10 ?
+                               _blk0(ψ_now, W, MOMENT_BLOCKS[10][1]) : 0.0
+                        dACs = length(MOMENT_BLOCKS) >= 11 ?
+                               _blk0(ψ_now, W, MOMENT_BLOCKS[11][1]) : 0.0
+                        @printf "  %-6d  %-10.4f  [Y=%.2f PH=%.2f L=%.2f Agg=%.2f Rk=%.2f CY=%.2f NL=%.2f Om=%.2f ACa=%.2f ACs=%.2f]  fail=%-5d  %.1fms  Klein=%d%%\n" n b_obj dY dPH dL dAg dRk dCY dNL dOm dACa dACs fail_count[] ms kpct
                         flush(stdout)
                         # Append to the machine-readable progress log (best effort:
                         # a full disk or NFS hiccup must never kill the run).
                         try
                             open(progress_log, "a") do io
-                                @printf io "%s,%.1f,%d,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%.1f,%d\n" Dates.format(Dates.now(), "yyyy-mm-ddTHH:MM:SS") (t_now - t_start[]) n b_obj dY dPH dL dAg dRk dCY dNL dOm fail_count[] ms kpct
+                                @printf io "%s,%.1f,%d,%.6f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d,%.1f,%d\n" Dates.format(Dates.now(), "yyyy-mm-ddTHH:MM:SS") (t_now - t_start[]) n b_obj dY dPH dL dAg dRk dCY dNL dOm dACa dACs fail_count[] ms kpct
                             end
                         catch; end
                         last_printed[] = n
@@ -1236,15 +1472,22 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
 
     @printf "  Results: %s\n  Estimates: %s\n\n" joinpath(ESTIMATION_DIR,"smm_results.csv") joinpath(ESTIMATION_DIR,"smm_estimates.csv")
 
-    # Asymptotic inference: standard errors + overidentification J-test.
-    # Wrapped so a failure here never discards the point estimates above.
-    if isdefined(@__MODULE__, :compute_smm_inference)
-        try
-            compute_smm_inference(θ_hat, m_hat, context, baseline, endo_names)
-        catch err
-            @printf "  [warn] inference step failed: %s\n" sprint(showerror, err)
-        end
-    end
+    # INFERENCE IS DELIBERATELY NOT RUN (2026-08-21, Agustín's decision).
+    #
+    # The standard errors this used to produce were not reportable and were
+    # actively misleading:
+    #   * the moment Jacobian G at θ̂ is rank-deficient, so diag(V) came out at
+    #     ~0 and every t-statistic was Inf (see probe_free_dims.jl);
+    #   * without Data/moment_cov.csv the code fell back on delta-method
+    #     DIAGONAL variances for S, which ignores the (large) correlation
+    #     between 60 moments built from the same 60 quarters of data.
+    # Numbers that look like publication SEs but are neither are worse than no
+    # numbers at all, so the call site is removed rather than silenced.
+    #
+    # smm_inference.jl is kept on disk, unwired, so the machinery survives. To
+    # bring it back: supply a moving-block-bootstrap Data/moment_cov.csv, fix
+    # the rank deficiency (free parameters that actually move the moments), and
+    # restore the call here.
 
     @printf "  Re-run main_SOE_gap.jl (EXERCISE=0) to apply estimates.\n\n"
 

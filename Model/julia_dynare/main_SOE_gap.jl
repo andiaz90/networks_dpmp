@@ -222,9 +222,15 @@ if !isempty(path_sec_mom)
     p_d = Float64.(sec_mom.std_PH)
     l_d = Float64.(sec_mom.std_L)
     c_d = hasproperty(sec_mom, :corr_YPH) ? Float64.(sec_mom.corr_YPH) : fill(NaN, nsec)
+    ac_y_d = hasproperty(sec_mom, :autocorr_Y) ? Float64.(sec_mom.autocorr_Y) : fill(NaN, nsec)
+    # 79-80: constant down each group's rows, so take the first finite entry.
+    _first_fin(v) = (f = filter(isfinite, Float64.(v)); isempty(f) ? NaN : f[1])
+    d_std_Lg_tab = hasproperty(sec_mom, :std_Lg) ? _first_fin(sec_mom.std_Lg) : NaN
+    d_std_Ls_tab = hasproperty(sec_mom, :std_Ls) ? _first_fin(sec_mom.std_Ls) : NaN
 else
     @printf "  WARNING: sectoral_moments.csv not found — rank correlations will use zeros.\n"
     y_d = zeros(nsec); p_d = zeros(nsec); l_d = zeros(nsec); c_d = fill(NaN, nsec)
+    ac_y_d = fill(NaN, nsec); d_std_Lg_tab = NaN; d_std_Ls_tab = NaN
 end
 
 # ---- IO matrix ----
@@ -312,6 +318,51 @@ modchiI = let
     v
 end
 
+# GOVERNMENT CONSUMPTION (2026-08-20). Exogenous real demand by sector.
+#
+# Chile's government final consumption is 26.8% of total final consumption and
+# 16.3% of value added, concentrated almost entirely in the two sectors the model
+# fitted worst: administración pública (98.7% of its final demand, gamma_G = 0.40)
+# and servicios personales (53.4%, gamma_G = 0.57 — education and health).
+#
+# Without it, administración pública's ONLY demand was a 0.19% household-
+# consumption weight, which left the sector at 0.23% of model gross output against
+# 3.63% in the IO table — a factor of 16 — and made every sector-12 moment
+# meaningless.
+#
+# It is EXOGENOUS in real terms, not folded into the household CES: 27% of final
+# demand being price-elastic would distort the aggregate inflation response to an
+# oil shock, which is what this model is for. Financed lump sum, so it needs no
+# budget-constraint equation (Walras), exactly like Rotemberg profits.
+modgammaG, gshare_target = let
+    fg = joinpath(DATA_DIR, "government_calibration.csv")
+    fs = joinpath(DATA_DIR, "government_scale.csv")
+    (isfile(fg) && isfile(fs)) || error(
+        "missing government_calibration.csv / government_scale.csv — " *
+        "run: python3 Data/build_sector_calibration.py")
+    g = Float64.(CSV.read(fg, DataFrame).gamma_G)
+    abs(sum(g) - 1) < 1e-8 || error("gamma_G sums to $(sum(g)), expected 1")
+    sc = CSV.read(fs, DataFrame)
+    (g, Float64(sc.value[findfirst(==("gshare_va"), String.(sc.param))]))
+end
+@printf "  government   : G/VA target = %.4f, gamma_G on Adm.púb = %.3f, Serv.pers = %.3f\n" (
+    gshare_target) modgammaG[12] modgammaG[11]
+
+# MINING TECHNOLOGY SHOCK (2026-08-20). tfpY_i multiplies A_i inside sector i's
+# production function and its factor FOCs. It is 1 everywhere except MINING,
+# where it is 0 so that A_2 acts purely as a CAPACITY shock on the exogenous
+# output rule Y_2 = Y2_ss*exp(A_2). With A_2 in both places the two equations
+# implied CES(inputs) = Y2_ss, i.e. mining's inputs could not respond to its own
+# shock at all: std(L_2) = 0.008 against 0.045 in the data, and mining sat at the
+# BOTTOM of the model's employment-volatility ranking against 10th of 12 in the
+# data — 25% of the squared rank error in the labour rank-correlation moment.
+# Set MINING_TFP=1 to restore the old behaviour for a comparison run.
+modtfpY = ones(nsec)
+modtfpY[2] = parse(Float64, get(ENV, "MINING_TFP", "0.0"))
+@printf "  mining tech : tfpY_2 = %.1f (%s)\n" modtfpY[2] (
+    modtfpY[2] == 0 ? "A_2 is a CAPACITY shock; inputs must move to deliver output" :
+                      "A_2 in technology AND output rule — inputs cannot respond")
+
 # nu = 1/phi, the elasticity of capital services to the real rental (LPR eq. 6).
 # Read from Data/capital_calibration.csv — no env var and no default, so the
 # model cannot silently run with a different capital block than the calibration.
@@ -356,6 +407,34 @@ end
 
 beta_val = 0.986        # quarterly discount factor (~5.7% annual discount rate)
 epsilon  = 10.0         # variety elasticity (Ferrante et al. 2023)
+
+# MARKUP SUBSIDY — Luttini, Pastén & Rubbo (2024), their eq. (13):
+#     1 - tau*_i = (eps_i - 1)/eps_i
+# so that price equals marginal cost in the flexible-price steady state. LPR use
+# it so that "alpha indeed corresponds to the labor share in value added"
+# (Rubbo 2023, fn. 6, same device).
+#
+# WHY IT IS ON. Without it the model's steady-state factor shares of value added
+# were labour 0.336 and capital 0.490 — summing to 0.826, not 1. The missing
+# 17.4% is EXACTLY the monopoly rent: with eps = 10 the markup takes 1/eps of
+# gross output, and 0.1 * 2.876/1.658 = 0.1735. So the shares were not
+# mis-calibrated; the model simply had a profit share the national accounts do
+# not. Eliminating markups makes revenue equal cost, and each sector's labour
+# share of gross output becomes exactly its cost weight 1-alpha-alpha_V-alpha_K,
+# i.e. REM_i/GO_i as measured.
+#
+# subsMC is the (1 - tau) factor multiplying MC in the pricing condition, so the
+# steady-state markup is PH/MC = eps*subsMC/(eps-1):
+#     subsMC = 1                -> markup eps/(eps-1) = 1.111  (no subsidy)
+#     subsMC = (eps-1)/eps      -> markup 1                    (LPR)
+# Set MARKUP_SUBSIDY = false for a comparison run; everything nests.
+# NOTE: not `const` — this file's body runs inside _main(), where Julia rejects
+# `const` on a local variable ("unsupported const declaration on local variable").
+MARKUP_SUBSIDY = true
+subsMC_val = MARKUP_SUBSIDY ? (epsilon - 1) / epsilon : 1.0
+mc_over_ph = (epsilon - 1) / (epsilon * subsMC_val)
+@printf "  markups     : subsidy %s, steady-state markup PH/MC = %.4f\n" (
+    MARKUP_SUBSIDY ? "ON (LPR eq. 13)" : "off") (1 / mc_over_ph)
 gamma    = 2.0          # risk aversion / inverse IES
 psi      = parse(Float64, get(ENV, "SMM_PSI", "1.5"))  # inverse Frisch (XMAS posterior ≈1.5, García et al. WP833); env SMM_PSI
 chi      = 1.0          # labor disutility weight
@@ -431,7 +510,7 @@ epsilonV_val = 1e13      # import demand elasticity (very large)
 epsilonX_val = 1.0       # export demand elasticity
 omegaX_val   = 1.0       # export demand scale
 
-chii_b_val   = 0.0024    # debt-risk premium elasticity χ_b — XMAS posterior mean
+phi_b_val   = 0.0024    # debt-risk premium elasticity χ_b — XMAS posterior mean
                          # (García et al., BCCh; 100ψ = 0.24 [0.18, 0.30], Bayesian
                          # with Chile EMBIG observable; NFA/quarterly-GDP ratio,
                          # same units as here). Was 0.001 (hand-set) pre-2026-07-08.
@@ -440,7 +519,6 @@ kappaw_val   = 115.0     # Rotemberg wage adj. cost (≈4q Calvo at epsw=10);
                          # overridden by smm_estimates.csv when available;
                          # 0 = flexible wages (nests pre-2026-07 model)
 
-xi_rstar_val    = 0.2    # world rate shock persistence
 ystar_ss_val    = 1.0    # steady-state foreign output
 PVstar_ss       = 1.0    # steady-state foreign price (normalized)
 sigmaH_val      = 0.999  # Armington elasticity (home vs. foreign)
@@ -488,11 +566,24 @@ sigma_postar_val  = 0.02          # std dev of oil price innovation
 POstar_ss_val     = 1.0           # SS world oil price (normalized, same as PVstar_ss)
 # Copper sector: world copper price process (measured from the copper price series; pinned)
 rho_pc_val        = parse(Float64, get(ENV, "SMM_RHO_PC", "0.90"))     # AR(1) persistence of world copper price
-sigma_pc_val      = parse(Float64, get(ENV, "SMM_SIGMA_PC", "0.075"))  # copper-price innovation std (calibrate to std(PH_2)=0.167)
+# Copper-price innovation std. CALIBRATED to hit std(PH_2) = 0.167 in the data —
+# mining has no Phillips curve (PH_2 = Q*Pcstar), so this parameter alone governs
+# that moment, which is ~4% of the SMM objective.
+#
+# Raised 0.075 -> 0.110 on 2026-08-20: at 0.075 the model produced
+# std(PH_2) = 0.1125 against the 0.167 target, i.e. the parameter had simply
+# never been calibrated to the target its own comment names.
+#
+# ITERATE IF STILL OFF. Since ph2 = q + pc in logs,
+#     sigma_pc_new = sigma_pc_old * sqrt( (0.167^2 - var(Q)) / (model^2 - var(Q)) )
+# using std(Q) and std(PH_2) from the fit table this run prints. One or two
+# passes converge — it is a fixed point because a more volatile copper price
+# also moves Q through the terms of trade.
+sigma_pc_val      = parse(Float64, get(ENV, "SMM_SIGMA_PC", "0.110"))
 
-# Preference (xi) shock
-rho_xi_val   = 0.80
-sigma_xi_val = 0.005
+# Preference (zeta) shock
+rho_zeta_val   = 0.80
+sigma_zeta_val = 0.005
 
 
 # =========================================================================== #
@@ -538,7 +629,7 @@ end
 shock_eps_om_vec     = Float64.(sigma_om_vec .> 0)
 shock_eps_i_val      = Float64(sigma_i_val  > 0)
 shock_eps_pvstar_val = Float64(EXERCISE == 0 && sigma_pvstar_val > 0)
-shock_eps_xi_val     = Float64(EXERCISE == 0 && sigma_xi_val > 0)
+shock_eps_zeta_val     = Float64(EXERCISE == 0 && sigma_zeta_val > 0)
 shock_eps_omg_val    = Float64(EXERCISE == 0 && sigma_omg_val > 0)   # goods-share reallocation
 shock_eps_postar_val = Float64(EXERCISE == 0 && sigma_postar_val > 0 && any(modalphaOil .> 0))
 shock_eps_pc_val = Float64(EXERCISE == 0 && sigma_pc_val > 0)   # copper price shock active in baseline
@@ -603,6 +694,23 @@ if !isempty(_theta_file)
     end
     est    = Dict(String(r.param) => Float64(r.value) for r in eachrow(est_df))
 
+    # LEGACY NAME MIGRATION (2026-08-21). The preference shock was renamed
+    # xi -> zeta and the debt-elasticity chii_b -> phi_b so the code matches the
+    # paper's notation. Checkpoints written before that carry the OLD names.
+    # This matters because the reads below are `haskey(...) && assign`: without
+    # the alias a legacy file would silently leave the DEFAULT in place rather
+    # than error — the exact silent-default failure mode this codebase has been
+    # bitten by repeatedly. Migrate, and say so.
+    for (_old, _new) in ("rho_xi" => "rho_zeta", "sigma_xi" => "sigma_zeta")
+        if haskey(est, _old) && !haskey(est, _new)
+            est[_new] = est[_old]
+            @printf "  [migrate] %s in %s read as %s (pre-2026-08-21 name)\n" _old basename(_theta_file) _new
+        end
+    end
+    for _k in ("rho_zeta", "sigma_zeta")
+        haskey(est, _k) || @printf "  [warn] %s carries neither %s nor its legacy name — keeping the default.\n" basename(_theta_file) _k
+    end
+
     ilabcosts_val    = est["ilabcosts"]
     modepsY          = fill(est["epsY"], nsec)
     modepsM          = fill(est["epsM"], nsec)
@@ -614,11 +722,15 @@ if !isempty(_theta_file)
     sigma_om_vec     = [haskey(est, "sigma_om_$(i)") ? est["sigma_om_$(i)"] : 0.03 for i in 1:nsec]
     rho_pvstar_val   = est["rho_pvstar"]
     sigma_pvstar_val = est["sigma_pvstar"]
-    haskey(est, "rho_xi")   && (rho_xi_val   = est["rho_xi"])
-    haskey(est, "sigma_xi") && (sigma_xi_val = est["sigma_xi"])
+    haskey(est, "rho_zeta")   && (rho_zeta_val   = est["rho_zeta"])
+    haskey(est, "sigma_zeta") && (sigma_zeta_val = est["sigma_zeta"])
     # etastar (η*) is now CALIBRATED, not estimated — ignore any stale checkpoint value
     # and set it from SMM_ETASTAR (default 1.0; paper Table 3). See smm_estimation.jl.
     haskey(est, "kappaw")   && (kappaw_val   = est["kappaw"])   # θ[36], added 2026-07-08
+    # Shock-mix scales θ[37:38] (2026-08-20). Default 1.0 so a checkpoint written
+    # before they existed reproduces the measured shock sizes exactly.
+    lambda_A_val  = get(est, "lambda_A",  1.0)
+    lambda_om_val = get(est, "lambda_om", 1.0)
     shock_eps_om_vec = Float64.(sigma_om_vec .> 0)   # recompute flags from loaded values
     smm_param_source = basename(_theta_file)
 end
@@ -644,13 +756,13 @@ end
 # (period-2, zig-zag) IRFs. Clamp and warn — for a proper fit, re-estimate the
 # SMM under the new bounds rather than relying on this projection.
 for (nm, v) in (("rho_om", rho_om1_val), ("rho_A", rho_tfp1_val),
-                ("rho_pvstar", rho_pvstar_val), ("rho_xi", rho_xi_val))
+                ("rho_pvstar", rho_pvstar_val), ("rho_zeta", rho_zeta_val))
     (v < 0 || v >= 1) && @printf "  WARNING: loaded %s = %.4f outside [0,1) — clamped to [0,0.99]; re-estimate for a proper fit\n" nm v
 end
 rho_om1_val    = clamp(rho_om1_val,    0.0, 0.99)
 rho_tfp1_val   = clamp(rho_tfp1_val,   0.0, 0.99)
 rho_pvstar_val = clamp(rho_pvstar_val, 0.0, 0.99)
-rho_xi_val     = clamp(rho_xi_val,     0.0, 0.99)
+rho_zeta_val     = clamp(rho_zeta_val,     0.0, 0.99)
 
 # --- Redesign: fix production elasticities at Atalay (2017) complementarity
 # values (epsY ~ 0.80 = eps_Q, epsM ~ 0.10 = eps_m), overriding any stored
@@ -676,6 +788,29 @@ if isfile(joinpath(DATA_DIR, "sectoral_shock_calibration.csv"))
         @printf "  [redesign] WARNING sectoral_shock_calibration.csv has %d rows != nsec=%d; ignored\n" nrow(_sc) nsec
     end
 end
+# --- Shock-mix scales (theta[37:38], 2026-08-20) --------------------------- #
+# Applied AFTER the redesign override above, which rewrites both vectors from
+# sectoral_shock_calibration.csv — applying them earlier would silently discard
+# them. lambda = 1 leaves the measured sizes untouched.
+#
+# These are the estimator's only instrument on the supply/demand MIX. All 24
+# sectoral shock sizes are pinned at measured values, which fixed the mix as
+# well as the pattern, leaving corr(Y_i,PH_i) — 40% of the SMM objective —
+# with nothing acting on it.
+if !@isdefined(lambda_A_val);  lambda_A_val  = 1.0; end
+if !@isdefined(lambda_om_val); lambda_om_val = 1.0; end
+lambda_A_val  = parse(Float64, get(ENV, "SMM_LAMBDA_A",  string(lambda_A_val)))
+lambda_om_val = parse(Float64, get(ENV, "SMM_LAMBDA_OM", string(lambda_om_val)))
+if lambda_A_val != 1.0 || lambda_om_val != 1.0
+    isigma_tfp_val = isigma_tfp_val .* lambda_A_val
+    sigma_om_vec   = sigma_om_vec   .* lambda_om_val
+    shock_eps_om_vec = Float64.(sigma_om_vec .> 0)
+    @printf "  [shock mix] lambda_A = %.3f, lambda_om = %.3f  (demand/supply size ratio x%.2f)\n" (
+        lambda_A_val) (lambda_om_val) (lambda_om_val/lambda_A_val)
+else
+    @printf "  [shock mix] lambda_A = lambda_om = 1.000 (measured shock sizes, mix not rescaled)\n"
+end
+
 # ombar is the goods share of the CONSUMPTION WEIGHTS, so it must come from the
 # same source and valuation as spend_good/spend_serv: Cuadro 20, activity-based
 # at basic prices. consumption_calibration.csv owns it (written by
@@ -750,8 +885,8 @@ all(modcl .== 0) && @printf "  WARNING: cl = 0 — labour reallocation is fricti
 param_vals = [ilabcosts_val, modepsY[1], modepsM[1], kappaV_val,
               rho_om1_val, rho_tfp1_val, isigma_tfp_val[1], mean(sigma_om_vec),
               rho_pvstar_val, sigma_pvstar_val,
-              rho_xi_val, sigma_xi_val, etastar_val, kappaw_val]
-for (nm, vl) in zip(vcat(param_names, ["rho_xi", "sigma_xi", "etastar", "kappaw"]), param_vals)
+              rho_zeta_val, sigma_zeta_val, etastar_val, kappaw_val]
+for (nm, vl) in zip(vcat(param_names, ["rho_zeta", "sigma_zeta", "etastar", "kappaw"]), param_vals)
     @printf "  %-18s %g\n" nm vl
 end
 @printf "\n"
@@ -768,7 +903,8 @@ pHvec_guess = ones(nsec)
 w_guess     = 1.0
 Q_guess     = 1.0
 C_guess     = 1.0
-x_guess     = [pHvec_guess; w_guess; Q_guess; C_guess]
+# +1 unknown since 2026-08-20: the government-demand scale (see steady_ntwsoe.jl).
+x_guess     = [pHvec_guess; w_guess; Q_guess; C_guess; 0.20]
 
 # Pack calibration parameters for the SS function
 sigmaH    = sigmaH_val
@@ -825,17 +961,18 @@ end
 
 ss_result = nlsolve(
     (F, x) -> F .= steady_ntwsoe(
-        x, PVstar_ss, epsilon, varrho_val, sigmaH,
+        x, PVstar_ss, mc_over_ph, varrho_val, sigmaH,
         gammag_vec, gammas_vec, om_g, om_s, chiX_vec, omegaX, etastar, Ystar,
         alpha_vec, alphaV_vec, beta_mat, epsY_vec, epsM_vec,
-        alphaK_vec, modchiI, NU_K,
+        modgammaG, gshare_target, alphaK_vec, modchiI, NU_K,
         gamma, chi, psi, A_vec, tb_target
     ),
     x_guess;
     ftol = 1e-10,
-    show_trace = get(ENV, "SS_TRACE", "0") == "1",   # 1000-iter trace off by default (SS_TRACE=1 to debug)
+    show_trace = get(ENV, "SS_TRACE", "0") == "1",   # SS_TRACE=1 to debug
     method = :trust_region,
 )
+G_vec = modgammaG .* max(ss_result.zero[nsec+4], 1e-20)
 
 if !converged(ss_result)
     @warn "Outer steady-state solver did not converge (residual_norm=$(ss_result.residual_norm)). Proceeding anyway — results may be inaccurate."
@@ -862,7 +999,7 @@ chi0_val = chi * C_ss^gamma
 PL_ss   = fill(w_ss, nsec)
 PV_ss   = Q_ss * PVstar_ss
 
-MCi_ss  = (epsilon - 1) / epsilon .* pH_ss
+MCi_ss  = mc_over_ph .* pH_ss
 PMi_ss  = (beta_mat * (pH_ss .^ (1 .- epsM_vec))) .^ (1 ./ (1 .- epsM_vec))
 
 P_ss    = (varrho_val .^ sigmaH .* pH_ss .^ (1 - sigmaH)
@@ -1263,7 +1400,7 @@ params_nt = (
     rhoi_val       = rhoi_val,
     rhoirule_val   = rhoirule_val,
     ombar_val      = ombar_val,
-    chii_b_val     = chii_b_val,
+    phi_b_val     = phi_b_val,
     bbar_val       = bbar_val,
     epsilonX_val   = epsilonX_val,
     omegaX_val     = omegaX_val,
@@ -1277,8 +1414,8 @@ params_nt = (
     Rworld_ss_val  = Rworld_ss_val,
     rho_pvstar_val = rho_pvstar_val,
     sigma_pvstar_val=sigma_pvstar_val,
-    rho_xi_val     = rho_xi_val,
-    sigma_xi_val   = sigma_xi_val,
+    rho_zeta_val     = rho_zeta_val,
+    sigma_zeta_val   = sigma_zeta_val,
     kappaw_val     = kappaw_val,   # write_params_mod defaults to 115.0 if absent
     # Oil sector
     modalphaOil         = modalphaOil,
@@ -1324,7 +1461,7 @@ params_nt = (
     # Shock flags
     shock_eps_i_val      = shock_eps_i_val,
     shock_eps_pvstar_val = shock_eps_pvstar_val,
-    shock_eps_xi_val     = shock_eps_xi_val,
+    shock_eps_zeta_val     = shock_eps_zeta_val,
     rho_omg_val          = rho_omg_val,
     sigma_omg_val        = sigma_omg_val,
     shock_eps_omg_val    = shock_eps_omg_val,
@@ -1339,6 +1476,10 @@ params_nt = (
     modalphaV    = modalphaV,
     # Capital nest. Both are always written so the .mod always parses; with the
     # nest off they are alphaK = 0 and Kbar = 1, which zeroes the limb exactly.
+    modtfpY      = modtfpY,
+    modGi        = G_vec,
+    gshare_target = gshare_target,
+    subsMC_val   = subsMC_val,
     modalphaK    = modalphaK,
     modKbar      = Kbar_ss,
     modchiI      = modchiI,
@@ -1472,7 +1613,11 @@ ss_ok  = !any(isnan, ss_vec) && !any(isinf, ss_vec)
 sim_ok = !isempty(sim_matrix)
 
 @printf "  Steady state : %s  (%d variables)\n" (ss_ok ? "OK" : "FAILED") length(ss_vec)
-@printf "  Simulation   : %s  (%d periods)\n\n" (sim_ok ? "OK" : "no data") size(sim_matrix,1)
+if sim_ok
+    @printf "  Simulation   : OK  (%d periods)\n\n" size(sim_matrix, 1)
+else
+    @printf "  Simulation   : not run — IRFs and moments computed analytically\n\n"
+end
 
 # Build variable-name → index map
 endo_idx = Dict(nm => i for (i, nm) in enumerate(endo_names))
@@ -1504,13 +1649,23 @@ rho_y = 0.0; rho_p = 0.0; rho_l = 0.0
 corr_YPH_m   = fill(NaN, nsec)   # corr(Y_i,PH_i): supply vs demand identifier
 m_corr_NGDP  = NaN               # corr(N,GDP)
 m_corr_NAPL  = NaN               # corr(N,GDP/N)
+m_rbar_YY    = NaN               # moment 78: avg pairwise corr(Y_i,Y_j)
+m_std_Lg     = NaN               # moment 79
+m_std_Ls     = NaN               # moment 80
+m_ratio_stdC = NaN               # moment 81
+m_ratio_stdI = NaN               # moment 82
+m_corr_CGDP  = NaN               # moment 83
+m_corr_IGDP  = NaN               # moment 84
+m_ac_GDP     = NaN               # moment 64: autocorr(GDP)
+m_ac_pi      = NaN               # moment 65: autocorr(pi)
+ac_Y_m       = fill(NaN, nsec)   # moments 66-77: autocorr(Y_i)
 
 try
     n_exo   = size(ghu_jl, 2)
     n_state = length(state_rows)
 
     # Shock covariance: activate BY NAME, matching active_shock_indices() in
-    # smm_model_moments.jl exactly (eps_i, eps_pvstar, eps_xi, epsA_1:12,
+    # smm_model_moments.jl exactly (eps_i, eps_pvstar, eps_zeta, epsA_1:12,
     # eps_om_1:12 — epschi and eps_postar stay off). The previous hardcoded
     # index map was from the old 18-shock layout: it missed eps_pvstar and all
     # eps_om_i and wrongly activated epschi/eps_postar (fixed 2026-07-10).
@@ -1521,7 +1676,7 @@ try
     n_active = 0
     if isfile(exo_names_file)
         exo_names_jl = String.(CSV.read(exo_names_file, DataFrame).shock)
-        active_set = Set(vcat(["eps_i", "eps_pvstar", "eps_xi", "eps_pc", "eps_omg"],
+        active_set = Set(vcat(["eps_i", "eps_pvstar", "eps_zeta", "eps_pc", "eps_omg"],
                               ["epsA_$(i)"   for i in 1:nsec],
                               ["eps_om_$(i)" for i in 1:nsec]))
         for (k, nm) in enumerate(exo_names_jl)
@@ -1559,7 +1714,8 @@ try
         ["L_$(i)"  for i in 1:nsec],
         # GDP_vol = volume GDP for the aggregate moments; om_g = goods share
         # (moment 61, added 2026-08-19)
-        ["GDP", "GDP_vol", "pi", "Q", "TB", "N", "om_g", "pi_g", "pi_s"]
+        ["GDP", "GDP_vol", "pi", "Q", "TB", "N", "om_g", "pi_g", "pi_s",
+         "C", "EInv", "PI_inv"]   # 2026-08-21: great-ratio block 81-84
     )
     needed_idx  = [get(endo_idx, nm, 0) for nm in needed_names]
     valid_mask  = needed_idx .> 0
@@ -1666,6 +1822,56 @@ try
     m_autocorr_Q = (i_Q_sub > 0 && Γ_val[i_Q_sub, i_Q_sub] > 1e-15) ?
         Γ1_val[i_Q_sub, i_Q_sub] / Γ_val[i_Q_sub, i_Q_sub] : NaN
 
+    # Persistence moments 64-77 (2026-08-21). Same lag-1 HP covariance as above.
+    # This file recomputes the moment vector independently of smm_estimation.jl,
+    # so any moment added there must be added here too or the N_MOMENTS assert
+    # below fires.
+    _pac(vn) = let k = get(ei_sub, vn, 0)
+        (k == 0 || Γ_val[k,k] <= 1e-15) ? NaN :
+            clamp(Γ1_val[k,k] / Γ_val[k,k], -1.0, 1.0)
+    end
+    m_ac_GDP = _pac("GDP_vol")
+    m_ac_pi  = _pac("pi")
+    for i in 1:nsec
+        ac_Y_m[i] = _pac("Y_$(i)")
+    end
+
+    # Moments 78-84 (2026-08-21). Mirrors smm_estimation.jl; this file rebuilds
+    # the moment vector independently and asserts its length against N_MOMENTS.
+    let acc = 0.0, np = 0
+        for i in 1:nsec, j in (i+1):nsec
+            c = _xcorr_hp("Y_$(i)", "Y_$(j)")
+            isnan(c) && continue
+            acc += c; np += 1
+        end
+        m_rbar_YY = np > 0 ? acc / np : NaN
+    end
+    let gi = 1:5, si = 6:12, Yss = Yi_ss   # goods = 1-5, services = 6-12 (utils.jl convention)
+        wg = sum(Yss[gi]) > 0 ? Yss[gi] ./ sum(Yss[gi]) : fill(1/length(gi), length(gi))
+        ws = sum(Yss[si]) > 0 ? Yss[si] ./ sum(Yss[si]) : fill(1/length(si), length(si))
+        m_std_Lg = sum(wg .* std_L_m[gi])
+        m_std_Ls = sum(ws .* std_L_m[si])
+    end
+    let iC = get(ei_sub,"C",0), iE = get(ei_sub,"EInv",0),
+        iP = get(ei_sub,"PI_inv",0), iG = get(ei_sub,"GDP_vol",0)
+        if iC > 0 && iE > 0 && iP > 0 && iG > 0
+            sb(k) = max(abs(ss_vec[needed_idx[k]]), 1e-12)
+            v_c = max(Γ_val[iC,iC],0.0)/sb(iC)^2
+            v_g = max(Γ_val[iG,iG],0.0)/sb(iG)^2
+            v_e = max(Γ_val[iE,iE],0.0)/sb(iE)^2
+            v_p = max(Γ_val[iP,iP],0.0)/sb(iP)^2
+            c_ep = Γ_val[iE,iP]/(sb(iE)*sb(iP))
+            v_i  = max(v_e + v_p - 2c_ep, 0.0)
+            c_cg = Γ_val[iC,iG]/(sb(iC)*sb(iG))
+            c_ig = (Γ_val[iE,iG]/(sb(iE)*sb(iG))) - (Γ_val[iP,iG]/(sb(iP)*sb(iG)))
+            sg = sqrt(v_g)
+            m_ratio_stdC = sg > 1e-12 ? sqrt(v_c)/sg : NaN
+            m_ratio_stdI = sg > 1e-12 ? sqrt(v_i)/sg : NaN
+            m_corr_CGDP  = (v_c*v_g) > 1e-24 ? clamp(c_cg/sqrt(v_c*v_g), -1.0, 1.0) : 0.0
+            m_corr_IGDP  = (v_i*v_g) > 1e-24 ? clamp(c_ig/sqrt(v_i*v_g), -1.0, 1.0) : 0.0
+        end
+    end
+
     # Rank correlations (default 0.0, matching estimation)
     vy = isfinite.(std_Y_m)  .& isfinite.(y_d)
     vp = isfinite.(std_PH_m) .& isfinite.(p_d)
@@ -1717,6 +1923,13 @@ if isfile(agg_mom_path)
     d_std_omG    = get(agg_d, "std_omG",    NaN)
     d_std_pigap     = get(agg_d, "std_pigap",     NaN)
     d_corr_pigap_om = get(agg_d, "corr_pigap_om", NaN)
+    d_ac_GDP     = get(agg_d, "autocorr_GDP", NaN)
+    d_ac_pi      = get(agg_d, "autocorr_pi",  NaN)
+    d_rbar_YY    = get(agg_d, "rbar_YY",    NaN)
+    d_ratio_stdC = get(agg_d, "ratio_stdC", NaN)
+    d_ratio_stdI = get(agg_d, "ratio_stdI", NaN)
+    d_corr_CGDP  = get(agg_d, "corr_CGDP",  NaN)
+    d_corr_IGDP  = get(agg_d, "corr_IGDP",  NaN)
     isnan(d_std_omG) && @printf "  WARNING: std_omG missing from aggregate_moments.csv (moment 61).\n           Regenerate with: python3 Data/build_reallocation_calibration.py\n"
 end
 
@@ -1730,7 +1943,10 @@ data_vec = [y_d_tab; p_d_tab; l_d_tab;
             c_d;                        # corr(Y_i,PH_i), 12 sectors
             d_corr_NGDP; d_corr_NAPL;  # labor comovement
             d_std_omG;                 # moment 61: goods expenditure share
-            d_std_pigap; d_corr_pigap_om]   # 62-63: relative price (identifies cl)
+            d_std_pigap; d_corr_pigap_om;   # 62-63: relative price (identifies cl)
+            d_ac_GDP; d_ac_pi; ac_y_d;      # 64-77: persistence
+            d_rbar_YY; d_std_Lg_tab; d_std_Ls_tab;
+            d_ratio_stdC; d_ratio_stdI; d_corr_CGDP; d_corr_IGDP]   # 78-84
 
 model_vec = [std_Y_m; std_PH_m; std_L_m;
              m_std_GDP; m_std_pi; m_corr_GDPpi; m_std_TBGDP;
@@ -1739,7 +1955,10 @@ model_vec = [std_Y_m; std_PH_m; std_L_m;
              corr_YPH_m;
              m_corr_NGDP; m_corr_NAPL;
              m_std_omG;
-             m_std_pigap; m_corr_pigap_om]
+             m_std_pigap; m_corr_pigap_om;
+             m_ac_GDP; m_ac_pi; ac_Y_m;
+             m_rbar_YY; m_std_Lg; m_std_Ls;
+             m_ratio_stdC; m_ratio_stdI; m_corr_CGDP; m_corr_IGDP]
 
 @assert length(data_vec)  == N_MOMENTS "data_vec has $(length(data_vec)) ≠ N_MOMENTS=$N_MOMENTS"
 @assert length(model_vec) == N_MOMENTS "model_vec has $(length(model_vec)) ≠ N_MOMENTS=$N_MOMENTS"
@@ -1796,12 +2015,21 @@ model_vec_final = something(smm_model_vec, model_vec)
 model_source    = smm_model_vec !== nothing ? "SMM (Klein)" : "Dynare (QZ)"
 
 # ---- Parameter report (θ actually used in this run, with bounds) ---------- #
+# NOTE isigma_tfp_val and sigma_om_vec are ALREADY scaled by lambda at this
+# point, so the table shows the shock sizes actually in effect, and lambda is
+# reported separately as theta[37:38].
 θ_report = [ilabcosts_val; modepsY[1]; modepsM[1]; log(kappaV_val);
             rho_om1_val; rho_tfp1_val;
             Float64.(isigma_tfp_val);
             Float64.(sigma_om_vec);
-            rho_pvstar_val; sigma_pvstar_val; rho_xi_val; sigma_xi_val;
-            etastar_val; kappaw_val]
+            rho_pvstar_val; sigma_pvstar_val; rho_zeta_val; sigma_zeta_val;
+            etastar_val; kappaw_val;
+            lambda_A_val; lambda_om_val]
+length(θ_report) == N_THETA || error(
+    "θ_report has $(length(θ_report)) entries but N_THETA=$(N_THETA). " *
+    "Changing the θ layout needs edits in THREE places: PARAM_LABELS / " *
+    "CSV_PARAM_NAMES / LB / UB (utils.jl), default_theta0 (smm_estimation.jl), " *
+    "and θ_report (main_SOE_gap.jl).")
 @printf "\n--- Parameters in effect (%s) ---\n" smm_param_source
 print_param_table(θ_report)
 
@@ -1844,7 +2072,8 @@ CSV.write(joinpath(TABLES_DIR, "moment_fit_$(tag).csv"), df_mom)
 @printf "\n--- Dynare results ---\n"
 @printf "  Steady state  : %s\n" (ss_ok ? "OK" : "FAILED")
 @printf "  Blanchard-Kahn: %s\n" (rc_lyap_ok ? "OK" : "NOT CHECKED")
-@printf "  Simulation    : %s\n" (sim_ok ? "OK" : "no data (ARM gees workaround)")
+@printf "  Simulation    : %s\n" (sim_ok ? "OK" :
+    "not run (by design — moments and IRFs are analytical, not simulated)")
 (rho_y == 0 || rho_p == 0 || rho_l == 0) &&
     @printf "  (0 = model std devs are uniform across sectors for this exercise)\n"
 @printf "\n"
@@ -1943,6 +2172,67 @@ end
 # =========================================================================== #
 #  DONE                                                                        #
 # =========================================================================== #
+
+# =========================================================================== #
+#  OIL-SHOCK ANALYSIS  ->  figures/oil_shock/                                  #
+# =========================================================================== #
+# The oil shock is the paper's headline exercise, so it should never be a step
+# someone forgets to run after changing the model. oil_shock_analysis.jl is a
+# standalone SCRIPT with its own top-level `using` statements, so it cannot be
+# `include`d from inside _main() — it runs as a SUBPROCESS, the same pattern
+# this file already uses for Dynare itself.
+#
+# It re-reads params_jl.mod, which this run has just written, so it always
+# describes the model that was actually built. Cost: it re-solves the steady
+# state and calls Dynare again, a few minutes. Set RUN_OIL=0 to skip.
+#
+# A failure here is reported but does NOT abort: every table and figure above is
+# already on disk by this point, and losing them to a plotting error would be
+# worse than an incomplete oil folder.
+# ON by default. oil_shock_analysis.jl rebuilds the calibration itself rather
+# than reading this run's params_jl.mod, which on 2026-08-20 meant it had
+# silently drifted into a DIFFERENT model: epsY pinned at 0.5 against 0.80 here,
+# no copper block, and — because write_params_mod defaulted missing fields — no
+# markup subsidy, no government consumption and mining TFP still on. It also
+# died mid-write, truncating params_jl.mod.
+#
+# Both halves are now closed: write_params_mod ERRORS on a missing model-defining
+# field instead of defaulting it, and the guard below always restores
+# params_jl.mod so a failed oil run can never invalidate this one.
+#
+# Set RUN_OIL=0 to skip (it re-solves the SS and calls Dynare again, a few
+# minutes). The duplication itself is still worth removing: the oil script should
+# read params_jl.mod and dynare_irfs.csv rather than rebuilding the model.
+if get(ENV, "RUN_OIL", "1") != "0"
+    oil_script = joinpath(SCRIPT_DIR, "oil_shock_analysis.jl")
+    if isfile(oil_script)
+        @printf "\n%s\n  OIL SHOCK ANALYSIS (subprocess) -> figures/oil_shock/\n%s\n" repeat("=",60) repeat("=",60)
+        @printf "  Script : %s\n" oil_script
+        _t0 = time()
+        # No params_jl.mod backup is needed any more. As of 2026-08-20 the oil
+        # script READS mod/params_jl.mod and the Dynare decision rules this run
+        # just wrote; it no longer rebuilds the calibration, never writes
+        # params_jl.mod, and never re-solves the model. It also refuses to run
+        # if the decision rules on disk are older than params_jl.mod.
+        _ok = try
+            _p = run(pipeline(ignorestatus(
+                    `$julia_exe --project=$project_dir $oil_script`),
+                    stdout=stdout, stderr=stderr), wait=true)
+            success(_p)
+        catch e
+            @printf "  [oil] subprocess threw: %s\n" sprint(showerror, e)
+            false
+        end
+        if _ok
+            @printf "  Oil-shock analysis complete (%.0fs) -> %s\n" (time()-_t0) joinpath(SCRIPT_DIR,"figures","oil_shock")
+        else
+            @printf "  WARNING: oil_shock_analysis.jl did not complete. Everything above is saved;\n"
+            @printf "           re-run it on its own with:  julia --project=. oil_shock_analysis.jl\n"
+        end
+    else
+        @printf "  [oil] %s not found — skipped.\n" oil_script
+    end
+end
 
 @printf "%s\n" repeat("=", 60)
 @printf "  Done: %s\n" exercise_labels[EXERCISE+1]

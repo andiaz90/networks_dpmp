@@ -282,7 +282,11 @@ DYNARE_VERBOSE && @info "Computing IRFs analytically from decision rule (bypasse
 irf_rows = NamedTuple{(:variable, :shock, :period, :value), Tuple{String,String,Int,Float64}}[]
 
 try
-    n_irf    = 150         # horizon matches stoch_simul(irf=150)
+    # IRF horizon. The .mod now runs stoch_simul(irf=0, periods=0) — Dynare is
+    # asked for the decision rule and nothing else — so this number is OURS and
+    # no longer has to match anything in the .mod. Downstream users take what
+    # they need: figs_SOE_gap.jl plots 40q, the shock scripts use 40 or 80.
+    n_irf    = 150
     n_endo_  = size(g1_1, 1)
     n_states = size(g1_1, 2)
     n_shocks = size(g1_2, 2)

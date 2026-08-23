@@ -157,7 +157,7 @@ end
 # =========================================================================== #
 #  KLEIN RESULT CACHE (PER-THREAD)                                             #
 # =========================================================================== #
-# Shock-amplitude params (sigma_om, isigma_tfp_i, sigma_pvstar, sigma_xi)
+# Shock-amplitude params (sigma_om, isigma_tfp_i, sigma_pvstar, sigma_zeta)
 # enter the model as LINEAR coefficients in the model equations and hence
 # in g1_2.  When ONLY shock amplitudes change (structural params are
 # unchanged), g1_1 is identical and g1_2 scales proportionally.  We cache
@@ -166,9 +166,43 @@ end
 #
 # Structural params that DO require Klein re-solve (θ indices, Option-A layout):
 #   1=ilabcosts, 2=epsY, 3=epsM, 4=log(kappaV), 5=rho_om, 6=rho_A,
-#   31=rho_pvstar, 33=rho_xi, 36=kappaw (wage Rotemberg cost enters the wage-PC
+#   31=rho_pvstar, 33=rho_zeta, 36=kappaw (wage Rotemberg cost enters the wage-PC
 #   Jacobian directly — a stale cache here would silently freeze kappaw)
-const _KLEIN_STRUCT_IDX = [1, 2, 3, 4, 5, 6, 31, 33, 36]
+#
+# 2026-08-21 — THE ABOVE REASONING WAS HALF RIGHT, AND THE HALF THAT WAS WRONG
+# SILENTLY FROZE THE SHOCK SIZES.
+#
+# It is true that g1_1 (the decision rule T) is invariant to shock standard
+# deviations. It is NOT true that this makes the cache safe, because
+# _resolve_cached! returns T *and R* from the same cache, and R is where the
+# sigmas live. In NK_SOE_lev_gap2.mod the shock sizes are parameters INSIDE the
+# equations:
+#
+#     om_@{i}    = rho_om1*om_@{i}(-1) + sigma_om_@{i}*eps_om_@{i};        (:820)
+#     exp(A_@{i}) = ... + isigma_tfp_@{i}*epsA_@{i};                       (:830)
+#
+# and the moment code sets Sigma_e to the IDENTITY on active shocks. So every
+# sigma reaches the moments through R, and R alone.
+#
+# With sigmas excluded from the cache key, any evaluation that changes ONLY
+# shock sizes hit the cache and returned the previous R — i.e. the previous
+# shock sizes. Symptom observed 2026-08-21: calibrate_sectoral_shocks.jl, whose
+# whole job is to vary theta[7:30] and nothing else, reported a byte-identical
+# rescale ratio across all four iterations while the shock sizes moved by a
+# factor of 0.6. It could never converge, because the model never saw the update.
+#
+# CMA-ES mostly escaped this because its candidates perturb several structural
+# parameters at once, so the key almost always missed — and the pre-flight
+# sensitivity scan escaped it by accident, because each perturbation leaves the
+# cache keyed on the PREVIOUS parameter's perturbed value, forcing a miss on the
+# next one. Neither is a defence; both are luck.
+#
+# Every element of theta affects T or R, so the only correct key is the whole
+# vector. The cache now serves its remaining honest purpose — skipping a
+# re-solve when the identical theta is evaluated twice, which happens on the
+# decomposition re-evaluation and on repeated candidates. Measured cost is nil:
+# the Klein cache hit rate was already 0-2% during estimation.
+const _KLEIN_STRUCT_IDX = collect(1:38)
 const _KLEIN_THRESH     = 1e-5   # re-solve if any structural param moves > this
 
 const _KLEIN_CACHE_T    = [Ref{Matrix{Float64}}(zeros(0,0)) for _ in 1:_N_THREADS]
@@ -520,7 +554,7 @@ end
     active_shock_indices(context, nsec) -> Vector{Int}
 
 Diagonal positions in Σe to switch on during SMM estimation, resolved by name:
-monetary (eps_i), import price (eps_pvstar), aggregate demand (eps_xi), world copper
+monetary (eps_i), import price (eps_pvstar), aggregate demand (eps_zeta), world copper
 price (eps_pc), the 12
 sectoral TFP shocks (epsA_i) and the 12 sectoral demand shocks (eps_om_i).
 Deliberately EXCLUDES eps_postar (oil — off during estimation) and epschi
@@ -531,7 +565,7 @@ function active_shock_indices(context, nsec::Int)
     # eps_pc = world copper price; eps_omg = goods/services demand reallocation
     # (FGI 2023 omega_t, added 2026-08-19). MUST match the active_set in
     # main_SOE_gap.jl — the two are separate literals and have drifted before.
-    active = Set{String}(["eps_i", "eps_pvstar", "eps_xi", "eps_pc", "eps_omg"])
+    active = Set{String}(["eps_i", "eps_pvstar", "eps_zeta", "eps_pc", "eps_omg"])
     for i in 1:nsec
         push!(active, "epsA_$(i)")
         push!(active, "eps_om_$(i)")
@@ -602,7 +636,7 @@ function resolve_first_order!(context)
     #
     # Consequence: the SMM objective was EXACTLY CONSTANT in all 7 free
     # parameters. A full-range probe confirmed zero spread for every one of
-    # them, including sigma_xi = 0 (which removes a shock worth 10.4% of
+    # them, including sigma_zeta = 0 (which removes a shock worth 10.4% of
     # employment variance) and kappaw 0->400. That is why CMA-ES terminated
     # after ~126 evaluations with best_obj never improving, why every Jacobian
     # column was zero (std err 0.0, t = Inf), and why the July run behaved
@@ -888,7 +922,8 @@ function recompute_ss!(context, epsY, epsM, baseline, endo_names; etastar=nothin
     get_ss(nm) = let idx = findfirst(==(nm), endo_names)
                      idx === nothing ? 1.0 : ss_vec[idx] end
 
-    f_outer! = (F, x) -> F .= steady_ntwsoe(x, baseline.PVstar_ss, baseline.epsilon_val,
+    f_outer! = (F, x) -> F .= steady_ntwsoe(x, baseline.PVstar_ss,
+                                      (baseline.epsilon_val-1)/(baseline.epsilon_val*_sub),
                                       baseline.modvarrho, baseline.sigmaH_val,
                                       baseline.modgammag, baseline.modgammas,
                                       baseline.ombar_val, 1-baseline.ombar_val,
@@ -896,12 +931,16 @@ function recompute_ss!(context, epsY, epsM, baseline, endo_names; etastar=nothin
                                       eta_for_ss, baseline.ystar_ss_val,
                                       baseline.modalpha, baseline.modalphaV,
                                       baseline.modbeta, modepsY, modepsM,
+                                      baseline.modgammaG, baseline.gshare_target,
                                       baseline.modalphaK, baseline.modchiI,
                                       baseline.nuK_val,
                                       baseline.gamma_val, baseline.chi_val,
                                       baseline.psi_val, ones(nsec), baseline.tb_target)
 
-    x0 = [[get_ss("PH_$(i)") for i in 1:nsec]; get_ss("w"); get_ss("Q"); get_ss("C")]
+    # +1 unknown since 2026-08-20: the government-demand scale. Seeded from the
+    # solved Gi_ss in params_jl.mod so the warm start stays warm.
+    _g0 = sum(baseline.modGi) > 0 ? sum(baseline.modGi) : 0.20
+    x0 = [[get_ss("PH_$(i)") for i in 1:nsec]; get_ss("w"); get_ss("Q"); get_ss("C"); _g0]
     res = nlsolve(f_outer!, x0; ftol=1e-12, method=:trust_region, show_trace=false)
     if !converged(res)
         # Multi-start: the trust-region solver is sensitive to the warm guess
@@ -921,7 +960,10 @@ function recompute_ss!(context, epsY, epsM, baseline, endo_names; etastar=nothin
     pH_ss = res.zero[1:nsec]; w_ss = res.zero[nsec+1]
     Q_ss = res.zero[nsec+2];  C_ss = res.zero[nsec+3]
     PL_ss = fill(w_ss, nsec); PV_ss = Q_ss * baseline.PVstar_ss
-    MCi_ss = (baseline.epsilon_val-1)/baseline.epsilon_val .* pH_ss
+    # LPR markup subsidy: MC/PH = (eps-1)/(eps*subsMC). subsMC = 1 is the
+    # no-subsidy case, so a params file predating the subsidy still works.
+    _sub = hasproperty(baseline, :subsMC_val) && baseline.subsMC_val > 0 ? baseline.subsMC_val : 1.0
+    MCi_ss = (baseline.epsilon_val-1)/(baseline.epsilon_val*_sub) .* pH_ss
     PMi_ss = (baseline.modbeta * (pH_ss .^ (1 .- modepsM))) .^ (1 ./ (1 .- modepsM))
     P_ss = (baseline.modvarrho .^ baseline.sigmaH_val .* pH_ss .^ (1-baseline.sigmaH_val)
            .+ (1 .- baseline.modvarrho) .^ baseline.sigmaH_val .* PV_ss .^ (1-baseline.sigmaH_val)) .^ (1/(1-baseline.sigmaH_val))
@@ -993,184 +1035,12 @@ end
 
 
 # =========================================================================== #
-#  MOMENT NAMES + duplicate moment fn — DISABLED                               #
+#  NOTE: this file holds INFRASTRUCTURE ONLY.                                  #
 #  ------------------------------------------------------------------------   #
-#  The canonical MOMENT_NAMES (58 entries) and the canonical, optimised        #
-#  smm_model_moments(...) live in smm_estimation.jl, which run_smm_estimation  #
-#  includes AFTER this file and therefore silently overrode the two            #
-#  definitions below.  Keeping two divergent copies (this one had only 46      #
-#  MOMENT_NAMES with a stale "mean goods expenditure share" entry, and a       #
-#  slower local_dlyap path) was a constant source of drift.  The block is      #
-#  commented out — NOT deleted — so the history/derivation stays readable.     #
-#  All the infrastructure ABOVE (Klein solver, recompute_ss!, param access,    #
-#  caches) is still live and used by the canonical moment fn.                  #
+#  The canonical MOMENT_NAMES and smm_model_moments(...) live in               #
+#  smm_estimation.jl. A second, divergent copy of both used to sit here,       #
+#  block-commented since the 2026-07 cleanup; deleted 2026-08-21 (recover      #
+#  from git if the derivation is ever needed). Everything ABOVE — the Klein    #
+#  solver, recompute_ss!, param access, the caches — is live and used by the   #
+#  canonical moment function.                                                  #
 # =========================================================================== #
-#=
-const MOMENT_NAMES = vcat(
-    ["std(Y_$(i))"  for i in 1:12], ["std(PH_$(i))" for i in 1:12], ["std(L_$(i))"  for i in 1:12],
-    ["std(GDP)", "std(pi)", "corr(GDP,pi)", "mean goods expenditure share",
-     "std(Q)", "autocorr(Q)", "corr(GDP,Q)",
-     "rank corr: output (model vs data)", "rank corr: prices (model vs data)", "rank corr: labor  (model vs data)"])
-
-
-# =========================================================================== #
-#  MAIN MOMENT FUNCTION                                                        #
-# =========================================================================== #
-
-function smm_model_moments(θ, context, baseline, endo_names)
-    nsec = baseline.nsec; NAN58 = fill(NaN, 58)
-    # Option-A parameter layout (35 params):
-    #   θ[1]    = ilabcosts
-    #   θ[2]    = epsY
-    #   θ[3]    = epsM
-    #   θ[4]    = log(kappaV)
-    #   θ[5]    = rho_om   (common persistence for all 12 sectoral demand shocks)
-    #   θ[6]    = rho_A    (common TFP persistence)
-    #   θ[7:18] = isigma_tfp_1:12
-    #   θ[19:30]= sigma_om_1:12  (sectoral demand shock std devs)
-    #   θ[31]   = rho_pvstar
-    #   θ[32]   = sigma_pvstar
-    #   θ[33]   = rho_xi
-    #   θ[34]   = sigma_xi
-    #   θ[35]   = etastar
-    ilabcosts=θ[1]; epsY=θ[2]; epsM=θ[3]; kappaV=exp(θ[4])
-    rho_om=θ[5]; rho_A=θ[6]; isigma_tfp=θ[7:18]
-    sigma_om_vec=θ[19:30]
-    rho_pvstar=θ[31]; sigma_pvstar=θ[32]; rho_xi=θ[33]; sigma_xi=θ[34]
-    etastar = length(θ) >= 35 ? θ[35] : baseline.etastar_val
-
-    (!(0<epsY<5)||!(0<epsM<2)||ilabcosts<=0||kappaV<=0||rho_om<0||rho_om>=1||
-     any(sigma_om_vec.<0)||rho_A<0||rho_A>=1||any(isigma_tfp.<0)||rho_pvstar<0||rho_pvstar>=1||
-     sigma_pvstar<0||rho_xi<0||rho_xi>=1||sigma_xi<0||
-     !(0.1<etastar<8.0)) && return NAN58, false
-
-    set_param!(context,"ilabcosts",ilabcosts); set_param!(context,"kappaV",kappaV)
-    set_param!(context,"rho_om1",rho_om)
-    set_param!(context,"rho_tfp1",rho_A);      set_param!(context,"rho_pvstar",rho_pvstar)
-    set_param!(context,"sigma_pvstar",sigma_pvstar); set_param!(context,"rho_xi",rho_xi)
-    set_param!(context,"sigma_xi",sigma_xi)
-    set_param!(context,"etastar",etastar)
-    for i in 1:nsec
-        set_param!(context,"isigma_tfp_$(i)",isigma_tfp[i])
-        set_param!(context,"sigma_om_$(i)",sigma_om_vec[i])
-    end
-
-    epsY_prev    = get_param_val(context,"epsY_1"); epsM_prev = get_param_val(context,"epsM_1")
-    etastar_prev = get_param_val(context,"etastar")
-    need_ss = abs(epsY-epsY_prev)>1e-8 || abs(epsM-epsM_prev)>1e-8 ||
-              abs(etastar - (isnan(etastar_prev) ? baseline.etastar_val : etastar_prev)) > 1e-8
-    for i in 1:nsec; set_param!(context,"epsY_$(i)",epsY); set_param!(context,"epsM_$(i)",epsM); end
-    if need_ss; ok=recompute_ss!(context,epsY,epsM,baseline,endo_names;etastar=etastar); !ok&&return NAN58,false; end
-
-    success, T, R = _resolve_cached!(context, θ)
-    !success && return NAN58, false
-
-    # Build normalized Sigma_e for all active shocks.
-    # Each active shock has unit variance; amplitude scaling is handled by
-    # parameters in the model equations (sigma_om_i * eps_om_i, etc.).
-    #
-    # varexo order (from NK_SOE_lev_gap2_smm.mod, Option-A layout):
-    #   1 = eps_i    2 = epschi(inactive)    3 = eps_pvstar
-    #   4:15 = epsA_1:12    16 = eps_xi    17:28 = eps_om_1:12
-    n_exo = size(R, 2)   # should be 28 after Option-A mod recompile
-    Σe = zeros(n_exo, n_exo)
-    Σe[1, 1]  = 1.0                        # eps_i    (monetary policy)
-    # Σe[2, 2] = 0.0                       # epschi   (labor supply, inactive)
-    Σe[3, 3]  = 1.0                        # eps_pvstar (import price)
-    for i in 4:min(15, n_exo)
-        Σe[i, i] = 1.0                     # epsA_1 through epsA_12 (sectoral TFP)
-    end
-    if n_exo >= 16; Σe[16, 16] = 1.0; end # eps_xi   (aggregate demand)
-    for i in 17:min(28, n_exo)
-        Σe[i, i] = 1.0                     # eps_om_1 through eps_om_12 (sectoral demand)
-    end
-
-    sr = context.models[1].i_bkwrd_b
-    A_state = T[sr, :]       # n_state × n_state  (state transition)
-    B_state = R[sr, :]       # n_state × n_exo    (state shock impact)
-    B_Σ_Bt  = B_state * Σe * B_state'
-    B_Σ_Bt  = (B_Σ_Bt + B_Σ_Bt') / 2
-
-    # Solve state covariance via Lyapunov: P = A·P·A' + B·Σ·B'
-    P = local_dlyap(A_state, B_Σ_Bt)
-    (any(diag(P) .< -1e-10) || any(isnan.(P))) && return NAN58, false
-    P = (P + P') / 2
-
-    # Build endo_name → row index map
-    ys = context.results.model_results[1].trends.endogenous_steady_state
-    ei = Dict(nm => i for (i,nm) in enumerate(endo_names))
-
-    # Pre-extract only the ~39 rows of T and R we need for moments.
-    # This reduces the HP filter inner loop from 491×491 to 39×39 — 25× faster.
-    needed_names = vcat(
-        ["Y_$(i)"  for i in 1:nsec],
-        ["PH_$(i)" for i in 1:nsec],
-        ["L_$(i)"  for i in 1:nsec],
-        ["GDP", "pi", "Q", "TB"]
-    )
-    needed_idx = [get(ei, nm, 0) for nm in needed_names]   # 0 if missing
-    valid_mask = needed_idx .> 0
-    needed_idx_valid = needed_idx[valid_mask]
-
-    T_sub = Matrix{Float64}(T[needed_idx_valid, :])   # n_needed × n_state
-    R_sub = Matrix{Float64}(R[needed_idx_valid, :])   # n_needed × n_exo
-    R_sub_Σe_Rsub = R_sub * Σe * R_sub'
-    R_sub_Σe_Rsub = (R_sub_Σe_Rsub + R_sub_Σe_Rsub') / 2
-
-    # Pre-compute HP filter weights once and run a single frequency loop
-    w_var, w_lag1 = build_hp_weights(1600.0, 256)
-    Γ_sub, Γ1_sub = hp_filtered_cov_fast(
-        Matrix{Float64}(A_state), B_Σ_Bt, T_sub, R_sub_Σe_Rsub, w_var, w_lag1)
-
-    # Map sub-matrix results back to needed_names ordering (including missing vars)
-    n_needed = length(needed_names)
-    Γ_val  = zeros(n_needed, n_needed)
-    Γ1_val = zeros(n_needed, n_needed)
-    sub_positions = findall(valid_mask)
-    for (si, pi) in enumerate(sub_positions), (sj, pj) in enumerate(sub_positions)
-        Γ_val[pi, pj]  = Γ_sub[si, sj]
-        Γ1_val[pi, pj] = Γ1_sub[si, sj]
-    end
-
-    # Local name→position in needed_names (faster than repeated findfirst)
-    ei_sub = Dict(nm => i for (i, nm) in enumerate(needed_names))
-
-    pstd(vn) = let idx = get(ei_sub, vn, 0)
-        idx == 0 && return 0.0
-        sqrt(max(Γ_val[idx, idx], 0.0)) / max(abs(ys[needed_idx[idx]]), 1e-12)
-    end
-    xcorr(v1, v2) = let i1 = get(ei_sub, v1, 0), i2 = get(ei_sub, v2, 0)
-        (i1 == 0 || i2 == 0) && return NaN
-        d = sqrt(max(Γ_val[i1,i1], 0.0) * max(Γ_val[i2,i2], 0.0))
-        d < 1e-15 ? 0.0 : clamp(Γ_val[i1,i2] / d, -1.0, 1.0)
-    end
-
-    i_Q_sub  = get(ei_sub, "Q",  0)
-    i_TB_sub = get(ei_sub, "TB", 0)
-    acQ = (i_Q_sub > 0 && Γ_val[i_Q_sub, i_Q_sub] > 1e-15) ?
-          Γ1_val[i_Q_sub, i_Q_sub] / Γ_val[i_Q_sub, i_Q_sub] : NaN
-
-    GDP_ss = baseline.GDP_ss > 0 ? baseline.GDP_ss : 1.0
-    std_TBGDP = (i_TB_sub > 0) ? sqrt(max(Γ_val[i_TB_sub, i_TB_sub], 0.0)) / GDP_ss : 0.0
-
-    std_Y  = [pstd("Y_$(i)")  for i in 1:nsec]
-    std_PH = [pstd("PH_$(i)") for i in 1:nsec]
-    std_L  = [pstd("L_$(i)")  for i in 1:nsec]
-
-    # corr(Y_i, PH_i): negative under TFP shocks, positive under demand shocks
-    # Key identifier for supply vs demand decomposition per sector
-    corr_YPH = [xcorr("Y_$(i)", "PH_$(i)") for i in 1:nsec]
-
-    dY=baseline.data_std_Y; dPH=baseline.data_std_PH; dL=baseline.data_std_L
-    vy=isfinite.(std_Y).&isfinite.(dY)
-    vp=isfinite.(std_PH).&isfinite.(dPH)
-    vl=isfinite.(std_L).&isfinite.(dL)
-    rY=sum(vy)>=3 ? safe_spearman(std_Y[vy],dY[vy]) : 0.0
-    rP=sum(vp)>=3 ? safe_spearman(std_PH[vp],dPH[vp]) : 0.0
-    rL=sum(vl)>=3 ? safe_spearman(std_L[vl],dL[vl]) : 0.0
-
-    # Return 58 moments: 12×std_Y + 12×std_PH + 12×std_L + 10×aggregate + 12×corr(Y_i,PH_i)
-    return [std_Y;std_PH;std_L;pstd("GDP");pstd("pi");xcorr("GDP","pi");
-            std_TBGDP;pstd("Q");acQ;xcorr("GDP","Q");rY;rP;rL;corr_YPH], true
-end
-=#

@@ -29,6 +29,24 @@ when the IO workbooks or the convention change:
 | ν = 1/φ = 0.4288 | `Data/capital_calibration.csv`, row `nu_K` |
 | K̄_i (endowment) | solved in calibration, written to `params_jl.mod` |
 
+## Where the output goes
+
+| path | what |
+|---|---|
+| `mod/dynare_irfs.csv` | **raw IRF data** — every variable × every shock × 40 quarters (~83 MB) |
+| `mod/dynare_ss.csv`, `dynare_endogenous_variance.csv` | steady state, unconditional variances |
+| `figures/irfs/` | aggregate and sectoral IRF panels, one per shock |
+| `figures/exercises/` | output-gap and shock-comparison plots |
+| **`figures/oil_shock/`** | **oil-shock decompositions — the paper's headline exercise** |
+| `figures/{agr,min,mfg,agrmin}_shock/` | the other sectoral shock exercises |
+| `tables/` | `moment_fit_baseline.txt`, `steady_state_baseline.csv`, `gdp_va_shares_baseline.csv`, `vae_baseline.csv`, the `.tex` decomposition tables |
+| `estimation_results/` | SMM θ, checkpoint, fit table, standard errors |
+
+Since 2026-08-20 `main_SOE_gap.jl` runs `oil_shock_analysis.jl` itself, as a
+subprocess at the end, so `figures/oil_shock/` is always in step with the model
+just built. `RUN_OIL=0` skips it. A failure there is reported but does not abort —
+everything else is already on disk by that point.
+
 ## The problem it solves
 
 With three CES limbs (materials, imported inputs, labour) and constant returns,

@@ -277,7 +277,7 @@ end
 # =========================================================================== #
 #  4.  plot_shock_effects()  ←  plot_shock_effects.m                          #
 #                                                                              #
-#  Comparison plot for preference (eps_om/eps_xi) and monetary (eps_i) shocks#
+#  Comparison plot for preference (eps_om/eps_zeta) and monetary (eps_i) shocks#
 #  4×4 grid (15 panels) with two shocks overlaid per panel.                  #
 # =========================================================================== #
 
@@ -287,11 +287,11 @@ function plot_shock_effects(df_irf, EXERCISE, FIGURES_DIR, tag; nT=40)
 
     # Select shock pair based on exercise
     if EXERCISE == 1
-        shock_a = "eps_om"; shock_b = "eps_xi"
-        label_a = "Goods-services pref."; label_b = "Preference (xi)"
+        shock_a = "eps_om"; shock_b = "eps_zeta"
+        label_a = "Goods-services pref."; label_b = "Preference (zeta)"
     elseif EXERCISE == 3
-        shock_a = "eps_i"; shock_b = "eps_xi"
-        label_a = "Monetary policy"; label_b = "Preference (xi)"
+        shock_a = "eps_i"; shock_b = "eps_zeta"
+        label_a = "Monetary policy"; label_b = "Preference (zeta)"
     else   # Baseline: compare TFP vs preference
         shock_a = "epsA_3"; shock_b = "eps_pvstar"
         label_a = "Manufacturing TFP"; label_b = "Import price"
@@ -425,7 +425,7 @@ function run_all_plots(;
         s = filter(x -> contains(x,"epsA_3"), all_shocks)
         isempty(s) ? first(all_shocks) : first(s)
     elseif EXERCISE == 1
-        s = filter(x -> contains(x,"eps_om") || contains(x,"eps_xi"), all_shocks)
+        s = filter(x -> contains(x,"eps_om") || contains(x,"eps_zeta"), all_shocks)
         isempty(s) ? first(all_shocks) : first(s)
     elseif EXERCISE == 3
         s = filter(x -> contains(x,"eps_i"), all_shocks)

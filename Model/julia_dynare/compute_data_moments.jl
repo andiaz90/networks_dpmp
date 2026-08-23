@@ -68,6 +68,25 @@ if isfile(OUT_SECTORAL) && isfile(OUT_AGGREGATE)
         @goto recompute
     end
 
+    # STALENESS CHECK (2026-08-21): files written before section 9c have no
+    # idiosyncratic columns, so compute_sectoral_shocks.jl would silently fall
+    # back to TOTAL volatility — the very double-counting 9c exists to remove.
+    if !(hasproperty(sec, :std_Y_idio) && hasproperty(sec, :corr_YPH_idio))
+        @printf "\n%s\n  Existing CSV moment files are STALE (pre-2026-08-21:\n" repeat("=",61)
+        @printf "  no std_Y_idio/corr_YPH_idio common-factor columns).\n"
+        @printf "  Recomputing from raw sources and overwriting...\n%s\n" repeat("=",61)
+        @goto recompute
+    end
+    # Same date: files written before the COVID exclusion and the common
+    # sectoral window carry moments computed on a different sample. They are
+    # not comparable with anything produced now, so never load them.
+    if !("covid_excluded" in _agg_keys)
+        @printf "\n%s\n  Existing CSV moment files are STALE (pre-2026-08-21: no\n" repeat("=",61)
+        @printf "  covid_excluded flag, so they predate the COVID exclusion and the\n"
+        @printf "  common sectoral window fix). Recomputing and overwriting...\n%s\n" repeat("=",61)
+        @goto recompute
+    end
+
     @printf "\n%s\n  CSV moment files already exist (current format) — loading directly.\n" repeat("=",61)
     @printf "  (Delete and re-run to recompute from raw Excel/CSV sources.)\n"
     @printf "%s\n\n" repeat("=",61)
@@ -208,6 +227,91 @@ function monthly_to_quarterly(Y_m::Matrix{<:Real},
     yr_out = [yq[1] for yq in uq]
     qt_out = [yq[2] for yq in uq]
     return Y_q, yr_out, qt_out
+end
+
+# =========================================================================== #
+#  COVID EXCLUSION  (2026-08-21)                                              #
+# =========================================================================== #
+#
+# WHY. Under the Ley de Protección al Empleo (21.227, April 2020) workers whose
+# contracts were SUSPENDED stayed on the AFC (Seguro de Cesantía) register and
+# drew unemployment-insurance funds. They are legally employed and counted, but
+# they were not working. So AFC headcount barely fell in exactly the sectors
+# whose output collapsed:
+#
+#     sector             2020Q2 vs 2019Q4, log pp
+#                          output      AFC employment
+#     Personal services    -20.6            -4.5
+#     Trade / hotels       -24.6           -10.5
+#     Transport / comms    -18.1            -5.7
+#
+# Feeding that into an SMM objective asks the model to reproduce a comovement
+# that is an artefact of a furlough scheme, not of labour demand. No setting of
+# c or kappa_w can deliver it, and trying corrupts both. The pandemic quarters
+# also dominate the aggregate second moments through one enormous common shock.
+#
+# WHAT WE DO. Filter the FULL series — the HP trend is estimated on every
+# observation, so the cycle is well defined through the pandemic — then drop
+# 2020Q1-2021Q2 when forming the moments. This is the standard treatment and is
+# what Data/diagnose_sectoral_employment.py already did for its diagnostics.
+#
+# Set COVID_EXCLUDE=0 to keep the pandemic in, for the robustness table.
+
+COVID_EXCLUDE = get(ENV, "COVID_EXCLUDE", "1") != "0"
+COVID_FIRST   = (2020, 1)     # inclusive
+COVID_LAST    = (2021, 2)     # inclusive
+
+_qidx(y, q) = 4y + q
+
+"""
+    covid_keep(n) -> BitVector
+
+Mask of length `n` for a quarterly series that ENDS at SAMPLE_END, false on the
+excluded pandemic quarters. Every series here is clipped at SAMPLE_END by
+`align_sample`, which masks rather than pads, so the END is what they share —
+count backwards from it rather than assuming a common start.
+"""
+function covid_keep(n::Integer)
+    keep = trues(n)
+    COVID_EXCLUDE || return keep
+    qend = _qidx(SAMPLE_END.year, SAMPLE_END.q)
+    lo, hi = _qidx(COVID_FIRST...), _qidx(COVID_LAST...)
+    for t in 1:n
+        qt = qend - (n - t)
+        (lo <= qt <= hi) && (keep[t] = false)
+    end
+    return keep
+end
+
+"Std of a cyclical series with the pandemic quarters dropped."
+mstd(x::AbstractVector{<:Real}) = std(x[covid_keep(length(x))])
+
+"""
+    mac1(x) -> Float64
+
+First-order autocorrelation of a cyclical series, pandemic quarters dropped.
+
+A (t, t+1) PAIR is kept only if BOTH quarters survive the mask. Deleting the
+excluded quarters and then correlating x[1:end-1] with x[2:end] would splice
+2019Q4 onto 2021Q3 and count that as a one-quarter transition, which biases the
+estimate toward zero exactly where the series has its largest movements.
+"""
+function mac1(x::AbstractVector{<:Real})
+    k    = covid_keep(length(x)) .& isfinite.(x)
+    pair = k[1:end-1] .& k[2:end]
+    sum(pair) < 3 && return NaN
+    return cor(x[1:end-1][pair], x[2:end][pair])
+end
+
+"""
+Correlation of two cyclical series with the pandemic quarters dropped. The two
+must already be the same length and calendar-aligned (the callers truncate to a
+common tail first).
+"""
+function mcor(a::AbstractVector{<:Real}, b::AbstractVector{<:Real})
+    length(a) == length(b) || error("mcor: lengths $(length(a)) and $(length(b)) differ — align the tails before calling.")
+    k = covid_keep(length(a))
+    return complete_cor(a[k], b[k])
 end
 
 """
@@ -479,18 +583,103 @@ nT = size(L_sample, 1)
 @printf "  Common sample: %d quarters (L), %d quarters (P)\n" nT size(P_sample,1)
 
 
+# --------------------------------------------------------------------------- #
+#  4b. SECTORAL MOMENTS ON ONE COMMON WINDOW  (2026-08-21 — BUG FIX)           #
+# --------------------------------------------------------------------------- #
+#
+# THE BUG. align_sample clips each series to SAMPLE_START..SAMPLE_END, but the
+# series do not all START there. The seasonally-adjusted output vintage
+# (pib_sectorial_bc_sa.csv) begins 2013Q1, while employment and the deflators
+# begin 2006Q1. The result, in every sectoral_moments.csv written before today:
+#
+#     std_Y     2013Q1-2023Q4   (44 quarters)
+#     corr_YPH  2013Q1-2023Q4   (44 quarters)
+#     std_PH    2006Q1-2023Q4   (72 quarters)   <- different sample
+#     std_L     2006Q1-2023Q4   (72 quarters)   <- different sample
+#
+# That is fatal for moments 44-46, the cross-sectional RANK correlations, which
+# compare the ordering of std_L (or std_PH) against the ordering of std_Y. Two
+# orderings measured over different decades are not comparable, and the model
+# produces both from a single stationary distribution. It also makes the level
+# blocks internally inconsistent.
+#
+# HOW MUCH IT MATTERED. The rank correlation between data std_L and data std_Y:
+#     mismatched (72q vs 44q):  -0.231
+#     aligned    (44q vs 44q):  +0.000
+# The -0.231 was an artefact. It comes almost entirely from the sectors with the
+# strongest AFC coverage phase-in over 2006-2012 — Mining (std_L 0.045 -> 0.017
+# once the early years are dropped), Finance (0.046 -> 0.015), Public Admin
+# (0.043 -> 0.028). The Seguro de Cesantia covers only contracts signed after
+# October 2002, so its sectoral counts grow mechanically through the early
+# sample at very different rates by sector (Utilities +142% log, Mining +116%,
+# vs Agriculture +21%). HP(1600) removes a smooth trend but not that.
+#
+# FIX. Restrict every sectoral series to the window where ALL THREE are
+# observed, before any filtering. Set SECTORAL_COMMON_WINDOW=0 to reproduce the
+# old (mismatched) behaviour for comparison.
+
+SECTORAL_COMMON_WINDOW = get(ENV, "SECTORAL_COMMON_WINDOW", "1") != "0"
+
+if SECTORAL_COMMON_WINDOW && !isempty(Y_qrt)
+    # CAREFUL: align_sample MASKS rows rather than padding them, so a series
+    # that starts late simply comes back SHORTER. Row t is therefore NOT the
+    # same calendar quarter across L_sample (72 rows), P_sample (72) and
+    # Y_qrt (44). What they share is the END: every one is clipped at
+    # SAMPLE_END. So take the last nc rows of each — the same convention the
+    # aggregate block already uses via `end-nmin+1:end`.
+    nc = minimum((size(L_sample,1), size(P_sample,1), size(Y_qrt,1)))
+
+    # Within that tail window, drop any leading rows where some sector is still
+    # unobserved (a few deflator series start later than the output vintage).
+    good = trues(nc)
+    for i in 1:NSEC, M in (L_sample, P_sample, Y_qrt)
+        col = M[end-nc+1:end, i]
+        good .&= .!(isnan.(col) .| (col .<= 0))
+    end
+    w1 = findfirst(good); w2 = findlast(good)
+
+    if w1 === nothing || w2 === nothing || (w2 - w1 + 1) < 20
+        @printf "  WARNING: common sectoral window has < 20 quarters — leaving series on their own samples.\n"
+        @printf "  Rank moments 44–46 are then NOT comparable; treat them as untargeted.\n"
+    else
+        L_sample = L_sample[end-nc+1:end, :][w1:w2, :]
+        P_sample = P_sample[end-nc+1:end, :][w1:w2, :]
+        Y_qrt    = Y_qrt[   end-nc+1:end, :][w1:w2, :]
+        # GDP_sample comes from the same align_sample call as Y_qrt, so it is
+        # already the same length; keep it in step.
+        if length(GDP_sample) >= nc
+            GDP_sample = GDP_sample[end-nc+1:end][w1:w2]
+        end
+        nT = size(L_sample, 1)
+        @printf "  Sectoral common window: %d quarters (tail-aligned at %dQ%d), all of Y/PH/L observed for all %d sectors.\n" nT SAMPLE_END.year SAMPLE_END.q NSEC
+        @printf "  std_Y, std_PH, std_L and corr_YPH are now ALL computed on this window.\n"
+    end
+else
+    @printf "  SECTORAL_COMMON_WINDOW=0 — sectoral series left on their own samples (rank moments 44–46 not comparable).\n"
+end
+
+
 # =========================================================================== #
 #  5. HP-FILTER AND COMPUTE SECTORAL STD DEVS                                 #
 # =========================================================================== #
 
 @printf "\n--- 5. HP filtering and computing std devs ---\n"
 
+if COVID_EXCLUDE
+    _k = covid_keep(nT)
+    @printf "  COVID EXCLUSION: %dQ%d–%dQ%d dropped from every moment (%d of %d sectoral quarters kept).\n" (
+        COVID_FIRST[1]) (COVID_FIRST[2]) (COVID_LAST[1]) (COVID_LAST[2]) sum(_k) nT
+    @printf "  Series are HP-filtered on the FULL sample; only the moment sums skip those quarters.\n"
+else
+    @printf "  COVID_EXCLUDE=0 — pandemic quarters retained.\n"
+end
+
 # Employment std devs
 l_d = fill(NaN, NSEC)
 for i in 1:NSEC
     x = log.(L_sample[:, i])
     any(isnan.(x) .| isinf.(x)) && (@printf "  WARNING: sector %d employment has missing values, skipping.\n" i; continue)
-    l_d[i] = std(hp_cycle(x, LAMBDA))
+    l_d[i] = mstd(hp_cycle(x, LAMBDA))
 end
 
 # Price deflator std devs
@@ -502,14 +691,28 @@ for i in 1:NSEC
         @printf "  WARNING: sector %d price has too few valid obs, skipping.\n" i
         continue
     end
-    p_d[i] = std(hp_cycle(fillmissing_linear(x), LAMBDA))
+    p_d[i] = mstd(hp_cycle(fillmissing_linear(x), LAMBDA))
 end
 
 @printf "  Employment std devs (%%): %s\n" join([@sprintf("%.3f", v*100) for v in l_d], "  ")
 @printf "  Price      std devs (%%): %s\n" join([@sprintf("%.3f", v*100) for v in p_d], "  ")
 
-# Sectoral output std devs
-y_d = fill(NaN, NSEC)
+# Sectoral output std devs, and their first-order autocorrelations.
+#
+# PERSISTENCE MOMENTS (2026-08-21). Before today the 63-moment vector contained
+# exactly ONE autocorrelation, autocorr(Q), while the estimation had three free
+# persistence parameters (rho_A, rho_om, rho_zeta). They were identified only
+# indirectly, through the way the HP filter reweights variance across
+# frequencies, which is why rho_A ran to its upper bound of 0.99: nothing in the
+# objective pushed back against maximum persistence. autocorr(GDP), autocorr(pi)
+# and these twelve sectoral autocorrelations discipline it directly.
+#
+# The sectoral spread is also informative in its own right. In the data it runs
+# from ~0.11 (Agriculture) to ~0.89 (Finance), which a single COMMON rho_A
+# cannot generate; targeting these twelve is what makes that restriction
+# testable rather than assumed.
+y_d  = fill(NaN, NSEC)
+ac_y = fill(NaN, NSEC)
 if !isempty(Y_qrt)
     for i in 1:NSEC
         x   = Y_qrt[:, i]
@@ -526,7 +729,8 @@ if !isempty(Y_qrt)
         # gaps only.
         i1 = findfirst(!, bad); i2 = findlast(!, bad)
         x_log = log.(fillmissing_linear(x[i1:i2]))
-        y_d[i] = std(hp_cycle(x_log, LAMBDA))
+        y_d[i]  = mstd(hp_cycle(x_log, LAMBDA))
+        ac_y[i] = mac1(hp_cycle(x_log, LAMBDA))
         (i1 > 1 || i2 < length(x)) &&
             @printf "  NOTE: sector %d output std computed on valid window (obs %d–%d of %d).\n" i i1 i2 length(x)
     end
@@ -539,7 +743,8 @@ end
 pi_series = Pa_sample[2:end] ./ Pa_sample[1:end-1]
 pi_series[pi_series .<= 0] .= NaN
 pi_hp    = hp_cycle(fillmissing_linear(log.(pi_series)), LAMBDA)
-d_std_pi = std(pi_hp)
+d_std_pi = mstd(pi_hp)
+d_ac_pi  = mac1(pi_hp)
 @printf "  std(pi) = %.5f\n" d_std_pi
 
 
@@ -550,26 +755,30 @@ d_std_pi = std(pi_hp)
 @printf "\n--- 6. Aggregate moments ---\n"
 
 d_std_GDP    = NaN
+d_ac_GDP     = NaN
 d_corr_GDPpi = NaN
 GDP_hp       = Float64[]
 
 if !isempty(GDP_sample) && sum(GDP_sample .> 0) >= 20
     GDP_hp       = hp_cycle(fillmissing_linear(log.(GDP_sample)), LAMBDA)
-    d_std_GDP    = std(GDP_hp)
+    d_std_GDP    = mstd(GDP_hp)
+    d_ac_GDP     = mac1(GDP_hp)
     nmin         = min(length(GDP_hp)-1, length(pi_hp))
-    d_corr_GDPpi = complete_cor(GDP_hp[end-nmin+1:end], pi_hp[end-nmin+1:end])
+    d_corr_GDPpi = mcor(GDP_hp[end-nmin+1:end], pi_hp[end-nmin+1:end])
     @printf "  std(GDP)      = %.5f  (BCCh pib_sectorial_bc)\n" d_std_GDP
     @printf "  corr(GDP, pi) = %.4f\n" d_corr_GDPpi
 elseif !isempty(Y_qrt)
     GDP_real     = vec(sum(Y_qrt, dims=2))
     GDP_hp       = hp_cycle(log.(GDP_real), LAMBDA)
-    d_std_GDP    = std(GDP_hp)
+    d_std_GDP    = mstd(GDP_hp)
+    d_ac_GDP     = mac1(GDP_hp)
     nmin         = min(length(GDP_hp)-1, length(pi_hp))
-    d_corr_GDPpi = complete_cor(GDP_hp[end-nmin+1:end], pi_hp[end-nmin+1:end])
+    d_corr_GDPpi = mcor(GDP_hp[end-nmin+1:end], pi_hp[end-nmin+1:end])
     @printf "  std(GDP)      = %.5f  (sum of sectoral VA)\n" d_std_GDP
     @printf "  corr(GDP, pi) = %.4f\n" d_corr_GDPpi
 else
     d_std_GDP    = 0.021
+    d_ac_GDP     = 0.75
     d_corr_GDPpi = -0.15
     @printf "  std(GDP) / corr: using defaults (no output data).\n"
 end
@@ -589,8 +798,8 @@ if !isempty(GDP_sample) && size(L_sample, 1) >= 20 && sum(GDP_sample .> 0) >= 20
     n_hp     = hp_cycle(n_log, LAMBDA)
     g_hp     = hp_cycle(g_log, LAMBDA)
     apl_hp   = hp_cycle(g_log .- n_log, LAMBDA)
-    d_corr_NGDP = complete_cor(n_hp, g_hp)
-    d_corr_NAPL = complete_cor(n_hp, apl_hp)
+    d_corr_NGDP = mcor(n_hp, g_hp)
+    d_corr_NAPL = mcor(n_hp, apl_hp)
     @printf "  corr(N, GDP)   = %.4f  (%d quarters)\n" d_corr_NGDP nmin_n
     @printf "  corr(N, GDP/N) = %.4f\n" d_corr_NAPL
 else
@@ -675,9 +884,16 @@ if isfile(fname_reer)
 
         if sum(!isnan, reer_s) >= 20
             reer_hp      = hp_cycle(log.(reer_s), LAMBDA)   # log-transform: std in fraction units
-            d_std_Q      = std(reer_hp)
-            tmp          = reer_hp[isfinite.(reer_hp)]
-            d_autocorr_Q = length(tmp) > 2 ? cor(tmp[1:end-1], tmp[2:end]) : NaN
+            d_std_Q      = mstd(reer_hp)
+            # autocorr with the pandemic out: keep a (t,t+1) PAIR only if BOTH
+            # quarters survive the mask, rather than deleting the excluded
+            # quarters and splicing 2019Q4 onto 2021Q3 as a spurious transition.
+            let k = covid_keep(length(reer_hp)),
+                ok = isfinite.(reer_hp),
+                pair = (k .& ok)[1:end-1] .& (k .& ok)[2:end]
+                d_autocorr_Q = sum(pair) > 2 ?
+                    cor(reer_hp[1:end-1][pair], reer_hp[2:end][pair]) : NaN
+            end
             reer_hp_aligned = reer_hp
             @printf "  std(Q)      = %.5f  (BIS REER, %d quarterly obs)\n" d_std_Q sum(!isnan, reer_s)
             @printf "  autocorr(Q) = %.4f  (AR(1) of HP-filtered log REER)\n" d_autocorr_Q
@@ -773,7 +989,7 @@ if isfile(fname_ccnn)
             tb_gdp_series = (X_tb[ok_tb] .- M_tb[ok_tb]) ./ G_tb[ok_tb]
             d_TBGDP     = mean(tb_gdp_series)
             # HP-filter the TB/GDP ratio (level, not log — can be negative) and take std dev
-            d_std_TBGDP = std(hp_cycle(tb_gdp_series, LAMBDA))
+            d_std_TBGDP = mstd(hp_cycle(tb_gdp_series, LAMBDA))
             @printf "  TB/GDP      = %.4f  (BCCh CCNN, %d quarterly obs)\n" d_TBGDP sum(ok_tb)
             @printf "  std(TB/GDP) = %.5f  (HP-filtered)\n" d_std_TBGDP
         else
@@ -796,7 +1012,7 @@ isnan(d_std_TBGDP) && (d_std_TBGDP = 0.025; @printf "  std(TB/GDP): using fallba
 
 if !isempty(reer_hp_aligned) && !isempty(GDP_hp)
     nr = min(length(reer_hp_aligned), length(GDP_hp))
-    nr >= 20 && (d_corr_GDPQ = complete_cor(GDP_hp[end-nr+1:end], reer_hp_aligned[end-nr+1:end]))
+    nr >= 20 && (d_corr_GDPQ = mcor(GDP_hp[end-nr+1:end], reer_hp_aligned[end-nr+1:end]))
     @printf "  corr(GDP,Q)  = %.4f\n" d_corr_GDPQ
 end
 isnan(d_corr_GDPQ) && (d_corr_GDPQ = -0.15; @printf "  corr(GDP,Q): using fallback %.4f\n" d_corr_GDPQ)
@@ -808,6 +1024,89 @@ isnan(d_corr_GDPQ) && (d_corr_GDPQ = -0.15; @printf "  corr(GDP,Q): using fallba
 
 d_omG = 0.57   # from BCCh CCNN calibration (ombar_val)
 @printf "\n  omG = %.2f  (from SS calibration)\n" d_omG
+
+
+# =========================================================================== #
+#  7c. SOE GREAT RATIOS: consumption and investment  (moments 81-84)          #
+# =========================================================================== #
+#
+# WHY (2026-08-21). Until now nothing in the 77-moment objective disciplined
+# the COMPOSITION of demand — there was no consumption or investment moment at
+# all, only GDP. That is a gap relative to every small-open-economy paper we
+# compare to: Garcia-Cicco, Pancrazi & Uribe (2010 AER) Table 4 and the Central
+# Bank's own XMAS Table 5 both report, for each of C and I, the triple
+# {standard deviation, correlation with output, first-order autocorrelation}.
+# With no such moment the model is free to get the level of GDP volatility right
+# through any mix of C and I, and the aggregate block misbehaves accordingly.
+#
+# We target the two volatility RATIOS rather than the levels. std(C)/std(GDP)
+# and std(I)/std(GDP) are the scale-free, conventionally reported objects, and
+# they cannot be traded off against the overall shock scale the way levels can.
+#
+# SOURCE: datos_CCNN_mayo2025.xlsx, sheet "Real trimestral" — chained-volume
+# quarterly national accounts. Column 3 is household consumption (2.1 Consumo de
+# hogares e IPSFL), column 8 gross fixed capital formation (4. Formacion bruta
+# de capital fijo), column 11 real GDP (7. Producto Interno Bruto). Note this is
+# a DIFFERENT sheet from the nominal one used for the trade balance above.
+
+@printf "\n--- 7c. Great ratios (real C and I, CCNN) ---\n"
+
+d_ratio_stdC = NaN; d_ratio_stdI = NaN
+d_corr_CGDP  = NaN; d_corr_IGDP  = NaN
+
+if isfile(fname_ccnn)
+    try
+        ws_r = XLSX.readxlsx(fname_ccnn)["Real trimestral"]
+        last_r = 4
+        while !ismissing(ws_r[last_r + 1, 1]) && last_r < 500
+            last_r += 1
+        end
+        n_r = last_r - 3
+        yr_r = zeros(Int, n_r); qt_r = zeros(Int, n_r)
+        C_r  = fill(NaN, n_r);  I_r = fill(NaN, n_r);  G_r = fill(NaN, n_r)
+        for t in 1:n_r
+            dv = ws_r[t + 3, 1]
+            if dv isa Dates.Date || dv isa Dates.DateTime
+                yr_r[t] = Dates.year(dv); qt_r[t] = ceil(Int, Dates.month(dv) / 3)
+            else
+                ss = strip(string(dv))
+                length(ss) >= 7 && (yr_r[t] = something(tryparse(Int, ss[1:4]), 0);
+                                    qt_r[t] = ceil(Int, something(tryparse(Int, ss[6:7]), 0) / 3))
+            end
+            _num(c) = let v = ws_r[t + 3, c]
+                v === missing ? NaN : (v isa Number ? Float64(v) : something(tryparse(Float64, strip(string(v))), NaN))
+            end
+            C_r[t] = _num(3); I_r[t] = _num(8); G_r[t] = _num(11)
+        end
+
+        CIG, _, _ = align_sample(hcat(C_r, I_r, G_r), yr_r, qt_r,
+                                 SAMPLE_START.year, SAMPLE_START.q,
+                                 SAMPLE_END.year,   SAMPLE_END.q)
+        ok_r = vec(all(x -> isfinite(x) && x > 0, CIG, dims=2))
+        if sum(ok_r) >= 20
+            r1 = findfirst(ok_r); r2 = findlast(ok_r)
+            c_hp = hp_cycle(log.(CIG[r1:r2, 1]), LAMBDA)
+            i_hp = hp_cycle(log.(CIG[r1:r2, 2]), LAMBDA)
+            g_hp = hp_cycle(log.(CIG[r1:r2, 3]), LAMBDA)
+            sg = mstd(g_hp)
+            d_ratio_stdC = sg > 1e-10 ? mstd(c_hp) / sg : NaN
+            d_ratio_stdI = sg > 1e-10 ? mstd(i_hp) / sg : NaN
+            d_corr_CGDP  = mcor(c_hp, g_hp)
+            d_corr_IGDP  = mcor(i_hp, g_hp)
+            @printf "  Real CCNN sample: %d quarters (%dQ%d-%dQ%d)\n" (r2 - r1 + 1) yr_r[1] qt_r[1] SAMPLE_END.year SAMPLE_END.q
+            @printf "  std(C)/std(GDP) = %.4f    corr(C,GDP) = %.4f\n" d_ratio_stdC d_corr_CGDP
+            @printf "  std(I)/std(GDP) = %.4f    corr(I,GDP) = %.4f\n" d_ratio_stdI d_corr_IGDP
+            @printf "  (this GDP is the CCNN expenditure-side volume measure, used only to\n"
+            @printf "   normalise these four moments; std(GDP) itself stays on the BCCh series)\n"
+        else
+            @printf "  WARNING: fewer than 20 valid quarters in 'Real trimestral' — great ratios NaN.\n"
+        end
+    catch e
+        @printf "  WARNING: could not read 'Real trimestral' (%s) — great ratios NaN.\n" sprint(showerror, e)
+    end
+else
+    @printf "  %s not found — great ratios NaN.\n" basename(fname_ccnn)
+end
 
 
 # =========================================================================== #
@@ -904,7 +1203,7 @@ if !isempty(Y_qrt) && size(Y_qrt, 1) >= 20 && size(P_sample, 1) >= 20
         i1 = findfirst(!, bad); i2 = findlast(!, bad)
         y_hp = hp_cycle(fillmissing_linear(log.(xY[i1:i2])), LAMBDA)
         p_hp = hp_cycle(fillmissing_linear(log.(xP[i1:i2])), LAMBDA)
-        corr_YPH_d[i] = complete_cor(y_hp, p_hp)
+        corr_YPH_d[i] = mcor(y_hp, p_hp)
     end
     @printf "  %-4s  %-20s  %10s\n" "Sec" "Name" "corr(Y,PH)"
     @printf "  %s\n" repeat("-", 38)
@@ -914,6 +1213,167 @@ if !isempty(Y_qrt) && size(Y_qrt, 1) >= 20 && size(P_sample, 1) >= 20
     end
 else
     @printf "  WARNING: Y_qrt unavailable — corr_YPH_d set to NaN (will use 0 in estimation).\n"
+end
+
+
+# =========================================================================== #
+#  9c. IDIOSYNCRATIC SECTORAL MOMENTS — COMMON-FACTOR REMOVAL                 #
+#      (2026-08-21; refinement 1 of compute_sectoral_shocks.jl's footer)      #
+# =========================================================================== #
+#
+# WHY. std_Y / corr_YPH above are TOTAL sectoral volatility: the idiosyncratic
+# sector-specific component PLUS the common factor (aggregate demand, external
+# / terms-of-trade, monetary). compute_sectoral_shocks.jl inverts the SIZE of
+# the sector-specific TFP and taste shocks from these numbers. Using the TOTAL
+# double-counts, because the model ALSO has aggregate and external shocks that
+# generate the common factor on top of the sectoral ones. That is what
+# lambda_A = 0.59 in the 2026-08-21 estimation run was silently undoing.
+#
+# METHOD (Foerster, Sarte & Watson 2011 JPE, sec. III). Stack the HP-filtered
+# sectoral output and price cycles into one T x 2N panel, standardise each
+# column, take the first NFAC principal components, and project every series
+# on them. The residual is the idiosyncratic component.
+#
+#   * The factors are estimated JOINTLY from [Y_panel P_panel] rather than
+#     separately from each. The SAME factor is then removed from Y_i and P_i,
+#     so corr(resid_Y_i, resid_P_i) is still a well-defined supply/demand
+#     diagnostic. Removing a Y-factor from Y and a different P-factor from P
+#     would contaminate exactly the correlation the inversion depends on.
+#   * NFAC = 1 by default (set FACTOR_NFAC to override). One factor absorbs
+#     ~33% of the panel variance; a second takes it to ~51% but starts to
+#     soak up genuinely sectoral variation, which is what we are trying to
+#     keep. Treat NFAC = 2 as the robustness check, not the baseline.
+#
+# OUTPUT. Three NEW columns in sectoral_moments.csv — std_Y_idio, std_PH_idio,
+# corr_YPH_idio. The existing std_Y / std_PH / corr_YPH columns are UNCHANGED
+# and remain the SMM targets: the model must reproduce TOTAL volatility, since
+# it has both shock types. Only the shock INVERSION uses the _idio columns.
+
+# NOTE: no `const` — this whole file body sits inside _main(), and `const` on a
+# local is a syntax error in Julia. Same reason LAMBDA and SAMPLE_START above
+# are plain assignments.
+FACTOR_NFAC = parse(Int, get(ENV, "FACTOR_NFAC", "1"))
+
+@printf "\n--- 9c. Idiosyncratic moments (common-factor removal, NFAC=%d) ---\n" FACTOR_NFAC
+
+std_Y_idio    = fill(NaN, NSEC)
+std_PH_idio   = fill(NaN, NSEC)
+corr_YPH_idio = fill(NaN, NSEC)
+d_rbar_YY     = NaN   # moment 78: average pairwise cross-sectoral output correlation
+
+"""
+    common_factors(panel, k) -> (F, varshare)
+
+First `k` principal components of `panel` (T x N), computed on the
+column-standardised data. Returns the T x k factor scores and the share of
+total panel variance carried by each component.
+"""
+function common_factors(panel::AbstractMatrix{<:Real}, k::Int)
+    T, N = size(panel)
+    Z = similar(Matrix{Float64}(panel))
+    for j in 1:N
+        col = @view panel[:, j]
+        s   = std(col)
+        Z[:, j] = s > 1e-12 ? (col .- mean(col)) ./ s : zeros(T)
+    end
+    U, S, _ = svd(Z)
+    F = U[:, 1:k] .* S[1:k]'
+    return F, (S .^ 2) ./ sum(S .^ 2)
+end
+
+"""
+    project_out(x, F) -> residual
+
+Residual from an OLS regression of `x` on a constant and the factors `F`.
+"""
+function project_out(x::AbstractVector{<:Real}, F::AbstractMatrix{<:Real})
+    X = hcat(ones(length(x)), F)
+    return x .- X * (X \ collect(float.(x)))
+end
+
+if !isempty(Y_qrt) && size(Y_qrt, 1) >= 20 && size(P_sample, 1) >= 20
+    nT_Y = size(Y_qrt, 1); nT_P = size(P_sample, 1)
+    nT_c = min(nT_Y, nT_P)
+    Yc = Y_qrt[end-nT_c+1:end, :]
+    Pc = P_sample[end-nT_c+1:end, :]
+
+    # A factor model needs a BALANCED panel, so restrict to the window where
+    # every sector has valid Y and P. Sectors 8 (Finance) and 10 (Business
+    # services) are the binding constraint; the SA output vintage starts
+    # 2013Q1, so in practice this is the whole output sample.
+    ok = trues(nT_c)
+    for i in 1:NSEC
+        ok .&= .!((Yc[:, i] .<= 0) .| isnan.(Yc[:, i]) .|
+                  (Pc[:, i] .<= 0) .| isnan.(Pc[:, i]))
+    end
+    t1 = findfirst(ok); t2 = findlast(ok)
+    nbal = (t1 === nothing || t2 === nothing) ? 0 : sum(ok[t1:t2])
+
+    if nbal < 20 || nbal < t2 - t1 + 1
+        @printf "  WARNING: no contiguous balanced window (%d usable obs) — _idio columns left NaN.\n" nbal
+        @printf "  → compute_sectoral_shocks.jl will fall back to TOTAL moments and warn.\n"
+    else
+        y_pan = hcat([hp_cycle(log.(Yc[t1:t2, i]), LAMBDA) for i in 1:NSEC]...)
+        p_pan = hcat([hp_cycle(log.(Pc[t1:t2, i]), LAMBDA) for i in 1:NSEC]...)
+        @printf "  Balanced panel: %d quarters x %d sectors (x2 blocks).\n" (t2 - t1 + 1) NSEC
+
+        F, vshare = common_factors(hcat(y_pan, p_pan), FACTOR_NFAC)
+        pc_txt = join([@sprintf("%.0f%%", 100 * vshare[k]) for k in 1:FACTOR_NFAC], ", ")
+        @printf "  Variance share of retained PCs: %s  (cumulative %.0f%%)\n" pc_txt (100 * sum(vshare[1:FACTOR_NFAC]))
+
+        std_Y_tot_pan  = [mstd(y_pan[:, i])                       for i in 1:NSEC]
+        corr_tot_pan   = [mcor(y_pan[:, i], p_pan[:, i])  for i in 1:NSEC]
+        for i in 1:NSEC
+            ry = project_out(y_pan[:, i], F)
+            rp = project_out(p_pan[:, i], F)
+            std_Y_idio[i]    = mstd(ry)
+            std_PH_idio[i]   = mstd(rp)
+            corr_YPH_idio[i] = mcor(ry, rp)
+        end
+
+        @printf "\n  %-4s %-18s %9s %9s %7s %10s %11s\n" "Sec" "Name" "std_Y" "std_Y_id" "share" "corr_YPH" "corr_id"
+        @printf "  %s\n" repeat("-", 74)
+        for i in 1:NSEC
+            shr = std_Y_tot_pan[i] > 0 ? std_Y_idio[i] / std_Y_tot_pan[i] : NaN
+            @printf "  %-2d   %-18s %9.5f %9.5f %6.2f %10.4f %11.4f\n" i SECTOR_NAMES[i] std_Y_tot_pan[i] std_Y_idio[i] shr corr_tot_pan[i] corr_YPH_idio[i]
+        end
+        @printf "  %s\n" repeat("-", 74)
+        # AVERAGE PAIRWISE CROSS-SECTORAL OUTPUT CORRELATION (moment 78, 2026-08-21)
+        #
+        # rbar = mean over i<j of corr(Y_i, Y_j). This is THE cross-sectional
+        # summary statistic of the production-network literature — Foerster,
+        # Sarte & Watson (2011 JPE) Table 7 and Atalay (2017) eq. 18 both use it —
+        # and it is what the input substitution elasticities govern: with
+        # complementary inputs a sector-specific shock propagates and rbar is
+        # high; with substitutable inputs buyers reallocate and rbar collapses.
+        #
+        # It replaces the three Spearman rank correlations in the objective. Those
+        # have no precedent (the word "Spearman" does not appear in FSW, Atalay,
+        # Rubbo, FGI, Baqaee-Farhi, Luttini-Pasten-Rubbo, GCPU, SGU or XMAS) and
+        # they are step functions of theta, so locally flat and globally cliffed —
+        # a bad object for CMA-ES. rbar is smooth, structural and standard.
+        #
+        # Computed on the TOTAL cycles, not the idiosyncratic residuals: the model
+        # counterpart is corr(Y_i,Y_j) with every shock on, and removing a common
+        # factor would drive it mechanically toward zero on the data side only.
+        let np = 0, acc = 0.0
+            for i in 1:NSEC, j in (i+1):NSEC
+                c = complete_cor(y_pan[:, i], y_pan[:, j])
+                isnan(c) && continue
+                acc += c; np += 1
+            end
+            d_rbar_YY = np > 0 ? acc / np : NaN
+            @printf "\n  Average pairwise cross-sectoral output correlation: rbar = %.4f  (%d pairs)\n" d_rbar_YY np
+        end
+
+        nflip = count(i -> !isnan(corr_tot_pan[i]) && !isnan(corr_YPH_idio[i]) &&
+                           corr_tot_pan[i] * corr_YPH_idio[i] < 0, 1:NSEC)
+        @printf "  %d of %d sectors change the SIGN of corr(Y,PH) once the common factor is out.\n" nflip NSEC
+        @printf "  (A positive total correlation driven by the common demand factor is NOT\n"
+        @printf "   evidence of a sector-specific demand shock — that is the whole point.)\n"
+    end
+else
+    @printf "  Y_qrt unavailable — _idio columns left NaN.\n"
 end
 
 
@@ -1011,6 +1471,13 @@ df_sec = DataFrame(
     std_PH   = p_d,
     std_L    = l_d,
     corr_YPH = corr_YPH_d,   # key identifier for supply vs demand decomposition (Option-A)
+    # --- Idiosyncratic (common factor projected out) — section 9c ----------
+    # These are the INVERSION inputs, not SMM targets. See 9c and the header of
+    # compute_sectoral_shocks.jl.
+    std_Y_idio    = std_Y_idio,
+    std_PH_idio   = std_PH_idio,
+    corr_YPH_idio = corr_YPH_idio,
+    autocorr_Y    = ac_y,     # persistence moments (66-77) — see section 5
     std_Yg   = [i in GOODS    ? d_std_Yg  : NaN for i in 1:NSEC],
     std_PHg  = [i in GOODS    ? d_std_PHg : NaN for i in 1:NSEC],
     std_Lg   = [i in GOODS    ? d_std_Lg  : NaN for i in 1:NSEC],
@@ -1026,15 +1493,86 @@ df_agg = DataFrame(
               "omG",       "std_Q",     "autocorr_Q",
               "corr_GDPQ", "TBGDP",     "std_TBGDP",
               "corr_NGDP", "corr_NAPL",
+              "autocorr_GDP", "autocorr_pi",
+              "rbar_YY", "ratio_stdC", "ratio_stdI", "corr_CGDP", "corr_IGDP",
               "sample_start_year", "sample_start_q",
-              "sample_end_year",   "sample_end_q"],
+              "sample_end_year",   "sample_end_q",
+              # Sample provenance (2026-08-21). Written so the estimation log,
+              # and the paper's data section, can state the effective sample
+              # without anyone having to re-derive it from the raw files.
+              "covid_excluded", "covid_first_year", "covid_first_q",
+              "covid_last_year", "covid_last_q",
+              "sectoral_common_window", "n_sectoral_quarters"],
     value  = [d_std_GDP,   d_std_pi,    d_corr_GDPpi,
               d_omG,       d_std_Q,     d_autocorr_Q,
               d_corr_GDPQ, d_TBGDP,    d_std_TBGDP,
               d_corr_NGDP, d_corr_NAPL,
+              d_ac_GDP,    d_ac_pi,
+              d_rbar_YY, d_ratio_stdC, d_ratio_stdI, d_corr_CGDP, d_corr_IGDP,
               Float64(SAMPLE_START.year), Float64(SAMPLE_START.q),
-              Float64(SAMPLE_END.year),   Float64(SAMPLE_END.q)],
+              Float64(SAMPLE_END.year),   Float64(SAMPLE_END.q),
+              COVID_EXCLUDE ? 1.0 : 0.0,
+              Float64(COVID_FIRST[1]), Float64(COVID_FIRST[2]),
+              Float64(COVID_LAST[1]),  Float64(COVID_LAST[2]),
+              SECTORAL_COMMON_WINDOW ? 1.0 : 0.0,
+              Float64(sum(covid_keep(nT)))],
 )
+
+# --- 2b. CARRY FORWARD the moments this script does not compute ----------- #
+#
+# Moments 61-63 — std_omG, std_pigap, corr_pigap_om — and the LEVEL omG are
+# produced by Data/build_reallocation_calibration.py, not here. Until today this
+# script simply overwrote aggregate_moments.csv without them, so deleting the
+# file and regenerating it silently dropped three targeted moments and replaced
+# omG with a hardcoded 0.57.
+#
+# That is not a hypothetical: it happened on 2026-08-21. The estimator caught
+# std_omG and refused to run, but main_SOE_gap.jl ran anyway and printed a fit
+# table in which std(pi_g - pi_s) was 26% of the objective — entirely because
+# the data value was missing (0.0) and that moment carries inverse-squared-data
+# weighting, so w = 1/0.01^2 = 10,000 against a model value of 0.024.
+#
+# So: preserve whatever the reallocation script last wrote, and say loudly when
+# there is nothing to preserve.
+let prior = Dict{String,Float64}()
+    if isfile(OUT_AGGREGATE)
+        try
+            _old = CSV.read(OUT_AGGREGATE, DataFrame)
+            for r in eachrow(_old)
+                prior[String(r.moment)] = Float64(r.value)
+            end
+        catch e
+            @printf "  WARNING: could not read the existing %s (%s) — reallocation moments not carried forward.\n" basename(OUT_AGGREGATE) sprint(showerror, e)
+        end
+    end
+
+    carried  = String[]
+    missing_ = String[]
+    for k in ("omG", "std_omG", "std_pigap", "corr_pigap_om")
+        if haskey(prior, k) && isfinite(prior[k])
+            if k in df_agg.moment
+                df_agg[findfirst(==(k), df_agg.moment), :value] = prior[k]
+            else
+                push!(df_agg, (k, prior[k]))
+            end
+            push!(carried, k)
+        else
+            push!(missing_, k)
+        end
+    end
+
+    isempty(carried) || @printf "\n  Carried forward from the previous aggregate_moments.csv: %s\n" join(carried, ", ")
+    if !isempty(missing_)
+        @printf "\n  %s\n" repeat("!", 72)
+        @printf "  MISSING moments this script does not compute: %s\n" join(missing_, ", ")
+        @printf "  These are moments 61-63 (and the omG level). They come from a separate\n"
+        @printf "  script. The SMM estimator will REFUSE to run without them, and any fit\n"
+        @printf "  table built meanwhile will be badly distorted. Run now:\n\n"
+        @printf "      python3 Data/build_reallocation_calibration.py\n\n"
+        @printf "  It preserves every other row, so it is safe to run straight after this.\n"
+        @printf "  %s\n" repeat("!", 72)
+    end
+end
 CSV.write(OUT_AGGREGATE, df_agg)
 
 @printf "\nMoments saved to:\n  %s\n  %s\n" OUT_SECTORAL OUT_AGGREGATE

@@ -6,13 +6,16 @@
 @#include "definition_block_lab.mod" 
 
 // Define variables
-var chi xi Zc Lab_costs Price_costs w VA C Ctot Ctotg Ctots M C_g C_s p_g p_s N pi pi_g pi_s pi_w r om_g om_s vi Y
+var chi zeta Zc Lab_costs Price_costs w VA C Ctot Ctotg Ctots M C_g C_s p_g p_s N pi pi_g pi_s pi_w r om_g om_s vi Y
 PV r_star Rworld pi_e Bstar Pipstar Q TB PX X Ystar V PVstar GDP IMP mkupV CFs CFg X_cu GDP_vol
 POstar PO VOil VNon Pcstar
 // LPR semi-fixed capital: PI_inv is the investment deflator (their P^I_f, which
 // eq. 6 mistypes as P_f); EInv is nominal investment expenditure, the fraction
 // nu/(1+nu) of capital income that buys goods.
 PI_inv EInv PI_inv_f EInv_f
+// Gnom: nominal government consumption, sum_i PH_i * Gi_i. Real quantities are
+// fixed, so this moves only with sectoral prices.
+Gnom Gnom_f
 // Sectoral demand (taste) shocks om_1..om_nsec and basket normalizers norm_g, norm_s.
 // At steady state om_i = 0 and norm_g = norm_s = 1, so the SS is unchanged.
 om_1 om_2 om_3 om_4 om_5 om_6 om_7 om_8 om_9 om_10 om_11 om_12 norm_g norm_s
@@ -114,12 +117,12 @@ var Ygap Ngap GDPgap
 // sectoral TFP, aggregate demand, and 12 sectoral demand (taste) shocks.
 // Canonical order (used to map Sigma_e by NAME in the SMM code):
 //   1=eps_i 2=epschi 3=eps_pvstar 4=eps_postar 5..16=epsA_1..12
-//   17=eps_xi 18..29=eps_om_1..12
+//   17=eps_zeta 18..29=eps_om_1..12
 varexo eps_i epschi eps_pvstar eps_postar eps_pc
     @#for i in 1:nsec
         epsA_@{i}
     @#endfor
-    eps_xi
+    eps_zeta
     @#for i in 1:nsec
         eps_om_@{i}
     @#endfor
@@ -133,8 +136,8 @@ varexo eps_i epschi eps_pvstar eps_postar eps_pc
 
 parameters gamma psi chi0 beta phi epsilon rho rho_om1 rho_tfp1 rho_tfp2 ombar
 rhoi rhoirule ilabcosts sigma_i sigma_L_agg Rworld_ss
-bbar chii_b omegaX epsilonX ystar_ss etastar kappaV epsilonV sigmaH Pistar_ss PVstar_ss
-rho_pvstar sigma_pvstar rho_xi sigma_xi
+bbar phi_b omegaX epsilonX ystar_ss etastar kappaV epsilonV sigmaH Pistar_ss PVstar_ss
+rho_pvstar sigma_pvstar rho_zeta sigma_zeta
 // Sticky wages (Rotemberg wage PC): epsw = labor variety elasticity,
 // kappaw = wage adjustment cost (kappaw = 0 nests flexible wages w = MRS)
 epsw kappaw
@@ -145,9 +148,22 @@ rho_pc sigma_pc Pcstar_ss shock_eps_pc Y2_ss X_cu_ss phi_cu Pi_cu_ss PH2_ss
 // nuK = 1/phi = elasticity of capital services to the real rental (LPR eq. 6).
 // Calibrated to 0.4288 from the Chilean accounts; see Data/capital_calibration.csv.
 nuK PIinv_ss
+// G/GDP target — written for the estimator's benefit; no equation uses it.
+gshare_target
+// subsMC = (1 - tau*) — Luttini, Pastén & Rubbo (2024) eq. 13. It multiplies MC
+// in the sectoral pricing condition, so the steady-state markup is
+// PH/MC = eps*subsMC/(eps-1):
+//    subsMC = 1            -> markup eps/(eps-1), the pre-2026-08-20 model
+//    subsMC = (eps-1)/eps  -> markup 1, price = marginal cost (LPR)
+// With the subsidy, revenue equals total cost, so each sector's factor COST
+// shares are its factor REVENUE shares and the model's labour share of value
+// added becomes the measured REM_i/GO_i. Without it the shares summed to 0.826,
+// the missing 17.4% being exactly the eps = 10 monopoly rent. The subsidy is
+// financed lump sum, so like the government block it needs no extra equation.
+subsMC
 Ctot_ss Ctotg_ss Ctots_ss VA_ss M_tot_ss Y_ss IMP_ss
 // Shock activation parameters (set by params_jl.mod; 0=off, 1=on)
-shock_eps_i shock_eps_pvstar shock_eps_xi
+shock_eps_i shock_eps_pvstar shock_eps_zeta
 // Sectoral demand (Option-A): 12 demand-shock std devs + 12 activation flags
 sigma_om_1 sigma_om_2 sigma_om_3 sigma_om_4 sigma_om_5 sigma_om_6
 sigma_om_7 sigma_om_8 sigma_om_9 sigma_om_10 sigma_om_11 sigma_om_12
@@ -195,6 +211,34 @@ Bstar_ss Q_ss TB_ss PX_ss V_ss CF_ss CFg_total_ss CFs_total_ss
         PL_ss@{i}
         shock_epsA_@{i}
         alphaOilShare_@{i}
+        // Gi_i: EXOGENOUS real government consumption of sector i's output
+        // (2026-08-20). Chile's government final consumption is 26.8% of total
+        // final consumption and 16.3% of value added, concentrated in
+        // administración pública (98.7% of its final demand) and servicios
+        // personales (53.4%, education and health). Omitting it left
+        // administración pública at 0.23% of model gross output against 3.63%
+        // in the IO table. Held exogenous rather than folded into the household
+        // CES so that 27% of final demand is price-INELASTIC, which matters for
+        // the aggregate inflation response to an oil shock. Financed lump sum,
+        // so no budget-constraint equation is needed (Walras).
+        Gi_@{i}
+        // tfpY_i: 1 for every sector EXCEPT mining, where it is 0 (2026-08-20).
+        //
+        // Mining output is exogenous, Y_2 = Y2_ss*exp(A_2). With exp(A_2) ALSO
+        // multiplying the production function, the two together imply
+        // CES(inputs) = Y2_ss — a constant — so mining's input bundle was
+        // invariant to its own shock and std(L_2) came out at 0.008 against
+        // 0.045 in the data, the single largest inversion in the labour
+        // rank-correlation moment. Setting tfpY_2 = 0 removes A_2 from mining's
+        // TECHNOLOGY while leaving it in mining's OUTPUT rule, which
+        // reinterprets A_2 as a CAPACITY shock (ore grade, strikes, mine
+        // openings) that inputs must move to deliver. That is also the more
+        // natural reading of copper.
+        //
+        // Safe: mining has no Phillips curve — PH_2 = Q*Pcstar is the world
+        // copper price — so MC_2 feeds nothing and only input demands change.
+        // tfpY_i = 1 everywhere reproduces the pre-2026-08-20 model exactly.
+        tfpY_@{i}
         PIV_ss@{i}
         // Sectoral SS values used in initval block
         PH_ss@{i}
@@ -324,12 +368,12 @@ p_s_f = (1
 Zc   = C   - chi0*chi*N^(1+psi)/(1+psi);
 Zc_f = C_f - chi0*chi*N_f^(1+psi)/(1+psi);
 
-//% Household Euler Equation (with preference/demand shock xi)
-//% xi > 1: more impatient, want to consume now -> demand shock -> positive GDP-pi comovement
-xi*Zc^(-gamma) = beta*xi(+1)*(Zc(+1)^-gamma)*r/pi(+1);
+//% Household Euler Equation (with preference/demand shock zeta)
+//% zeta > 1: more impatient, want to consume now -> demand shock -> positive GDP-pi comovement
+zeta*Zc^(-gamma) = beta*zeta(+1)*(Zc(+1)^-gamma)*r/pi(+1);
 
 //% Household Euler Equation flex-price (same preference shock applies)
-xi*Zc_f^(-gamma) = beta*xi(+1)*(Zc_f(+1)^-gamma)*r_f;
+zeta*Zc_f^(-gamma) = beta*zeta(+1)*(Zc_f(+1)^-gamma)*r_f;
 
 //% Relative Inflation: Goods vs Services
 pi_g*C_g/C_g(-1)*(exp(om_s)/exp(om_s(-1))) = pi_s*C_s/C_s(-1)*(exp(om_g)/exp(om_g(-1)));
@@ -478,6 +522,19 @@ PI_inv_f = 1
 @#endfor
 ;
 
+//% Nominal government consumption. Gi_i are constants, so this is a pure
+//% price index of the government basket.
+Gnom = 0
+@#for i in 1:nsec
+    + PH_@{i}*Gi_@{i}
+@#endfor
+;
+Gnom_f = 0
+@#for i in 1:nsec
+    + PH_f_@{i}*Gi_@{i}
+@#endfor
+;
+
 //% Nominal investment expenditure = capital income / (1+phi) = nu/(1+nu) * R K
 //% (LPR eq. 9). The complement, nu-free share 1/(1+nu), is retailer profit
 //% rebated to households (their eq. 8) and needs no equation: with no explicit
@@ -495,8 +552,8 @@ EInv_f = (nuK/(1+nuK))*(0
 
 //% GDP. LPR Definition 1: "Nominal GDP is the sum of consumption and investment
 //% expenditures." Here TB carries the external block as before.
-GDP = C + EInv + TB;
-GDP_f = C_f + EInv_f + TB_f;
+GDP = C + Gnom + EInv + TB;
+GDP_f = C_f + Gnom_f + EInv_f + TB_f;
 //% Volume (real) GDP: strips the copper terms-of-trade revaluation, matching the data's
 //% chained-volume GDP rather than a terms-of-trade-inclusive income measure.
 GDP_vol = GDP - (PH_2 - PH2_ss)*X_cu;
@@ -553,26 +610,26 @@ Price_costs = (
     //% Production Function
     //% Four CES limbs: domestic materials M, imported inputs V, capital services
     //% Kbar*U (weight alphaK), and labour L with the residual weight.
-        Y_@{i} = exp(A_@{i})*((alpha_@{i})^(1/epsY_@{i})*(M_@{i})^((epsY_@{i}-1)/epsY_@{i})
+        Y_@{i} = exp(tfpY_@{i}*A_@{i})*((alpha_@{i})^(1/epsY_@{i})*(M_@{i})^((epsY_@{i}-1)/epsY_@{i})
                                + (alphaV_@{i})^(1/epsY_@{i})*(V_@{i})^((epsY_@{i}-1)/epsY_@{i})
                                + (alphaK_@{i})^(1/epsY_@{i})*(Kbar_@{i}*U_@{i})^((epsY_@{i}-1)/epsY_@{i})
                                + (1-alpha_@{i}-alphaV_@{i}-alphaK_@{i})^(1/epsY_@{i})*(L_@{i})^((epsY_@{i}-1)/epsY_@{i}))^(epsY_@{i}/(epsY_@{i}-1));
 
     //% Production Function
-        Y_f_@{i} = exp(A_@{i})*((alpha_@{i})^(1/epsY_@{i})*(M_f_@{i})^((epsY_@{i}-1)/epsY_@{i})
+        Y_f_@{i} = exp(tfpY_@{i}*A_@{i})*((alpha_@{i})^(1/epsY_@{i})*(M_f_@{i})^((epsY_@{i}-1)/epsY_@{i})
                                + (alphaV_@{i})^(1/epsY_@{i})*(V_f_@{i})^((epsY_@{i}-1)/epsY_@{i})
                                + (alphaK_@{i})^(1/epsY_@{i})*(Kbar_@{i}*U_f_@{i})^((epsY_@{i}-1)/epsY_@{i})
                                + (1-alpha_@{i}-alphaV_@{i}-alphaK_@{i})^(1/epsY_@{i})*(L_f_@{i})^((epsY_@{i}-1)/epsY_@{i}))^(epsY_@{i}/(epsY_@{i}-1));
 
     //% Intermediates Demand
-        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*(alpha_@{i}*Y_@{i}/M_@{i})^(1/epsY_@{i}) = PM_@{i};
+        exp(tfpY_@{i}*A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*(alpha_@{i}*Y_@{i}/M_@{i})^(1/epsY_@{i}) = PM_@{i};
     //% Intermediates Demand
-        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_f_@{i}*(alpha_@{i}*Y_f_@{i}/M_f_@{i})^(1/epsY_@{i}) = PM_f_@{i};
+        exp(tfpY_@{i}*A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_f_@{i}*(alpha_@{i}*Y_f_@{i}/M_f_@{i})^(1/epsY_@{i}) = PM_f_@{i};
 
     //% Demand for imports (composite intermediate imports V_@{i} at sector-specific price PIV_@{i})
-        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*(alphaV_@{i}*Y_@{i}/V_@{i})^(1/epsY_@{i}) = PIV_@{i};
+        exp(tfpY_@{i}*A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*(alphaV_@{i}*Y_@{i}/V_@{i})^(1/epsY_@{i}) = PIV_@{i};
     //% Demand for imports (flex-price)
-        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_f_@{i}*(alphaV_@{i}*Y_f_@{i}/V_f_@{i})^(1/epsY_@{i}) = PIV_f_@{i};
+        exp(tfpY_@{i}*A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_f_@{i}*(alphaV_@{i}*Y_f_@{i}/V_f_@{i})^(1/epsY_@{i}) = PIV_f_@{i};
 
     //% Sector-specific composite import price index (CES between oil and non-oil imports)
     //% PIV^(1-eps) = alphaOil * PO^(1-eps) + (1-alphaOil) * PV^(1-eps)
@@ -589,8 +646,8 @@ Price_costs = (
     //% Rental from the capital FOC. Unlike the pure fixed factor, RK now feeds
     //% back into the model through the supply curve, so it is no longer a purely
     //% recursive definition.
-        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*(alphaK_@{i}*Y_@{i}/(Kbar_@{i}*U_@{i}))^(1/epsY_@{i}) = RK_@{i};
-        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_f_@{i}*(alphaK_@{i}*Y_f_@{i}/(Kbar_@{i}*U_f_@{i}))^(1/epsY_@{i}) = RK_f_@{i};
+        exp(tfpY_@{i}*A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*(alphaK_@{i}*Y_@{i}/(Kbar_@{i}*U_@{i}))^(1/epsY_@{i}) = RK_@{i};
+        exp(tfpY_@{i}*A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_f_@{i}*(alphaK_@{i}*Y_f_@{i}/(Kbar_@{i}*U_f_@{i}))^(1/epsY_@{i}) = RK_f_@{i};
 
     //% Capital supply curve. LPR write U^phi = R Kbar / P^I; we invert to
     //% U = (R/P^I)^{1/phi} and write it in deviation form so that U = 1 at the
@@ -604,9 +661,9 @@ Price_costs = (
     //% output: decreasing returns in the variable factors. Effective RTS is
     //% 1 - alphaK in the phi -> infinity limit and rises with nuK; at nuK =
     //% 0.4288 it is 0.53 in mining, 0.39 in housing, 0.88 in manufactura.
-        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*((1-alpha_@{i}-alphaV_@{i}-alphaK_@{i})*Y_@{i}/L_@{i})^(1/epsY_@{i}) = PL_@{i};
+        exp(tfpY_@{i}*A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_@{i}*((1-alpha_@{i}-alphaV_@{i}-alphaK_@{i})*Y_@{i}/L_@{i})^(1/epsY_@{i}) = PL_@{i};
     //% Labor Demand
-        exp(A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_f_@{i}*((1-alpha_@{i}-alphaV_@{i}-alphaK_@{i})*Y_f_@{i}/L_f_@{i})^(1/epsY_@{i}) = PL_f_@{i};
+        exp(tfpY_@{i}*A_@{i})^((epsY_@{i}-1)/epsY_@{i})*MC_f_@{i}*((1-alpha_@{i}-alphaV_@{i}-alphaK_@{i})*Y_f_@{i}/L_f_@{i})^(1/epsY_@{i}) = PL_f_@{i};
 
 
     //% Market Clearing in Each Sector
@@ -614,7 +671,7 @@ Price_costs = (
         //% Mining (copper): output is exogenous (own supply/TFP shock A_2), capacity-bound.
         Y_@{i} = Y2_ss*exp(A_@{i});
         //% Copper exports = production minus domestic use (residual), sold at world price PH_2=Q*Pcstar.
-        X_cu = Y_@{i} - CHs_@{i} - CHg_@{i} - chiI_@{i}*EInv/PH_@{i}
+        X_cu = Y_@{i} - CHs_@{i} - CHg_@{i} - chiI_@{i}*EInv/PH_@{i} - Gi_@{i}
         @#for j in 1:nsec
             - beta_@{j}_@{i}*(PM_@{j}/PH_@{i})^epsM_@{j}*M_@{j}
         @#endfor
@@ -623,6 +680,8 @@ Price_costs = (
         Y_@{i} = CHs_@{i} + CHg_@{i} + chiX_@{i}*X*PX/PH_@{i}
         //% Investment demand (LPR eq. 9): chiI_i share of nu/(1+nu) of capital income.
         + chiI_@{i}*EInv/PH_@{i}
+        //% Exogenous government demand.
+        + Gi_@{i}
         @#for j in 1:nsec
             + beta_@{j}_@{i}*(PM_@{j}/PH_@{i})^epsM_@{j}*M_@{j}
         @#endfor
@@ -631,7 +690,7 @@ Price_costs = (
     //% Market Clearing in Each Sector
 @#if i == 2
         Y_f_@{i} = Y2_ss*exp(A_@{i});
-        X_cu_f = Y_f_@{i} - CHs_f_@{i} - CHg_f_@{i} - chiI_@{i}*EInv_f/PH_f_@{i}
+        X_cu_f = Y_f_@{i} - CHs_f_@{i} - CHg_f_@{i} - chiI_@{i}*EInv_f/PH_f_@{i} - Gi_@{i}
         @#for j in 1:nsec
             - beta_@{j}_@{i}*(PM_f_@{j}/PH_f_@{i})^epsM_@{j}*M_f_@{j}
         @#endfor
@@ -639,6 +698,7 @@ Price_costs = (
 @#else
         Y_f_@{i} = CHs_f_@{i} + CHg_f_@{i} + chiX_@{i}*X_f*PX_f/PH_f_@{i}
         + chiI_@{i}*EInv_f/PH_f_@{i}
+        + Gi_@{i}
         @#for j in 1:nsec
             + beta_@{j}_@{i}*(PM_f_@{j}/PH_f_@{i})^epsM_@{j}*M_f_@{j}
         @#endfor
@@ -672,13 +732,13 @@ Price_costs = (
     PH_@{i} = Q*Pcstar;
     PH_f_@{i} = Q_f*Pcstar;
 @#else
-    1 - epsilon + epsilon*MC_@{i}/PH_@{i}
+    1 - epsilon + epsilon*subsMC*MC_@{i}/PH_@{i}
     - kappa_@{i}*(pi*PH_@{i}/PH_@{i}(-1)-1)*pi*PH_@{i}/PH_@{i}(-1)
     + beta*(Zc(+1)/Zc)^(-gamma)*kappa_@{i}*(pi(+1)*PH_@{i}(+1)/PH_@{i}-1)
     *(pi(+1)*PH_@{i}(+1)/PH_@{i})*Y_@{i}(+1)/Y_@{i} =0;
 
     //% Rotemberg Pricing FOC
-    1 - epsilon + epsilon*MC_f_@{i}/PH_f_@{i}=0; 
+    1 - epsilon + epsilon*subsMC*MC_f_@{i}/PH_f_@{i}=0; 
 @#endif
 
 
@@ -763,28 +823,68 @@ norm_s = (0
 chi = (1-rho) + rho*chi(-1) + sigma_L_agg*epschi;
 
 //% Preference/demand shock (AR(1), SS = 1)
-xi = (1-rho_xi) + rho_xi*xi(-1) + sigma_xi*eps_xi;
+zeta = (1-rho_zeta) + rho_zeta*zeta(-1) + sigma_zeta*eps_zeta;
 
 @#for i in 1:nsec
     //% TFP
     exp(A_@{i}) = (1+rho_tfp2-rho_tfp1_@{i}) + rho_tfp1_@{i}*exp(A_@{i}(-1)) - rho_tfp2*exp(A_@{i}(-2)) + isigma_tfp_@{i}*epsA_@{i};
 @#endfor
 
-//% Small open economy equations (GHH marginal utility Zc^(-gamma))
-Zc^(-gamma) = beta*(Zc(+1)^-gamma)*r_star*pi_e(+1)/pi(+1);
+//% ------------------------------------------------------------------------ //
+//% FOREIGN-BOND EULER (UIP).  zeta ADDED 2026-08-21 — see note.
+//% ------------------------------------------------------------------------ //
+//% The preference shock zeta MUST appear here, exactly as it does in the
+//% domestic Euler above. These are the FOCs of the SAME household over two
+//% assets held simultaneously in the SAME portfolio, so both are evaluated at
+//% the same marginal utility zeta_t*Zc_t^(-gamma). Writing zeta in one and not the
+//% other is not a preference — it is an asset-specific wedge.
+//%
+//% This follows García, Guarda, Kirchner & Tranamil (XMAS, BCCh DTBC 833,
+//% 2019), where the preference shock (their varrho_t) enters the domestic-bond
+//% FOC (7), the foreign-bond FOC (8) and the capital FOC (9) symmetrically, in
+//% the shifted-discount-factor form beta*varrho(+1)/varrho. Dividing our
+//% equations through by zeta gives exactly that form. Same convention in
+//% Ramses II eqs. (2.32)-(2.35), Justiniano-Preston (JIE 2010) eq. (11) and
+//% Medina-Soto (DTBC 457) eq. (3); Gali-Monacelli (2005, p.714) give the
+//% general argument — both asset-pricing equations share one SDF, so anything
+//% in the SDF cancels from UIP to first order.
+//%
+//% WHAT THE OLD (asymmetric) VERSION WAS. Log-linearising the old pair and
+//% subtracting gives
+//%      r_hat - rstar_hat - E[d e_hat] = (1 - rho_zeta) * zeta_hat,
+//% i.e. a symmetric preference shock PLUS an exogenous UIP wedge of size
+//% (1-rho_zeta)*zeta_hat that nobody chose. At rho_zeta = 0.88 that was 12% of the
+//% shock leaking into the exchange rate. A demand shock and a country-premium
+//% shock have opposite Backus-Smith signatures (Itskhoki-Mukhin 2021 JPE), so
+//% this contaminated any RER variance decomposition.
+//%
+//% NOTE ON NOTATION FOR THE PAPER: XMAS calls the preference shock varrho_t
+//% and uses zeta_t for the COUNTRY PREMIUM. Our zeta is the preference shock. Do
+//% not carry XMAS's symbols across verbatim.
+//%
+//% STEADY STATE IS UNCHANGED: zeta = 1 at the steady state and enters
+//% multiplicatively on both sides. No re-calibration is needed. The DYNAMICS
+//% change, so any stored theta is invalid — re-run the SMM.
+//%
+//% If a genuine UIP shock is wanted later, it belongs in the Schmitt-Grohe &
+//% Uribe premium below as exp(-phi_b*(...) + nu_t), and must be called a
+//% country risk-premium shock — not a preference shock.
 
-//% Small open economy equations
-Zc_f^(-gamma) = beta*(Zc_f(+1)^-gamma)*r_star_f*pi_e_f(+1);
+//% Small open economy equations (GHH marginal utility Zc^(-gamma))
+zeta*Zc^(-gamma) = beta*zeta(+1)*(Zc(+1)^-gamma)*r_star*pi_e(+1)/pi(+1);
+
+//% Small open economy equations — flexible-price counterpart
+zeta*Zc_f^(-gamma) = beta*zeta(+1)*(Zc_f(+1)^-gamma)*r_star_f*pi_e_f(+1);
 
 
 //% Debt-elastic premium on the debt STOCK at constant SS prices (Schmitt-Grohé
 //% & Uribe 2003 closure). Using the contemporaneous valuation ratio Q*Bstar/GDP
 //% (XMAS-style) creates a first-order depreciation->premium feedback loop when
-//% bbar is large, so chii_b is no longer innocuous for impact IRFs.
+//% bbar is large, so phi_b is no longer innocuous for impact IRFs.
 //% Steady state is unchanged: premium term is zero at SS under both forms.
-r_star = Rworld*exp(-chii_b*(bbar-Q_ss*Bstar/GDP_ss));
+r_star = Rworld*exp(-phi_b*(bbar-Q_ss*Bstar/GDP_ss));
 
-r_star_f = Rworld*exp(-chii_b*(bbar-Q_ss*Bstar_f/GDP_ss));
+r_star_f = Rworld*exp(-phi_b*(bbar-Q_ss*Bstar_f/GDP_ss));
 
 Rworld = Pistar_ss/beta;  // Rworld must satisfy Euler equation in steady state
 
@@ -930,12 +1030,12 @@ end;
 
 initval;
 eps_pvstar = 0;
-eps_xi = 0;
+eps_zeta = 0;
 pi_g = 1;
 pi_s = 1;
 pi = pi_ss;
 chi = 1;
-xi = 1;
+zeta = 1;
 r = r_ss;
 r_f = r_ss;
 vi = 0;
@@ -1099,9 +1199,16 @@ EInv = (nuK/(1+nuK))*(0
 );
 EInv_f = EInv;
 
-GDP = C+EInv+TB;
-GDP_f = C_f+EInv_f+TB_f;
-GDP_vol = C+EInv+TB;
+Gnom = 0
+@#for i in 1:nsec
+    + PH_ss@{i}*Gi_@{i}
+@#endfor
+;
+Gnom_f = Gnom;
+
+GDP = C+Gnom+EInv+TB;
+GDP_f = C_f+Gnom_f+EInv_f+TB_f;
+GDP_vol = C+Gnom+EInv+TB;
 GDP_vol_f = C_f+TB_f;
 
 Lab_costs_f = 0;
@@ -1173,7 +1280,7 @@ var epschi=0.0;
 var eps_pvstar=shock_eps_pvstar;
 var eps_postar=shock_eps_postar;
 var eps_pc=shock_eps_pc;
-var eps_xi=shock_eps_xi;
+var eps_zeta=shock_eps_zeta;
 @#for z in 1:nsec
    var epsA_@{z}=shock_epsA_@{z};
 @#endfor
@@ -1187,7 +1294,25 @@ end;
 
 check;
 
-// Run stochastic simulation (add periods to produce oo_.endo_simul)
-stoch_simul(order=1, irf=150, periods=200, nograph);
+// SOLVE ONLY — no simulation, no Dynare IRFs (2026-08-21).
+//
+// All we need from Dynare is the first-order decision rule (g1_1, g1_2), the
+// steady state, Sigma_e and the state rows; run_dynare_subprocess.jl writes
+// those to CSV and everything downstream is computed from them:
+//   * IRFs analytically, y_1 = g_u[:,k], x_h = A x_{h-1}, y_h = g_x x_{h-1}
+//     — for a first-order solution this IS the IRF, not an approximation;
+//   * second moments analytically (local_dlyap + the spectral integral with
+//     the HP gain, utils.jl) — exact, and free of the Monte Carlo noise that
+//     would make the rank-correlation moments non-smooth in theta.
+// So `periods` and `irf` only bought work we discard.
+//
+// It also keeps us off the code path that fails on Apple Silicon: Dynare's
+// stoch_simul IRF step calls LAPACK gees() with a select function, which is
+// unavailable on aarch64. That is why the analytical route exists.
+//
+// If a Dynare version ever objects to irf=0/periods=0 here, the previous line
+// was:  stoch_simul(order=1, irf=150, periods=200, nograph);
+// Restoring it is harmless — the extra output was simply never read.
+stoch_simul(order=1, irf=0, periods=0, nograph);
 
 //@#include "solution_block.mod" 

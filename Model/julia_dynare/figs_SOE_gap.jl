@@ -94,7 +94,7 @@ function generate_figures(;
         s = filter(x -> contains(x, "epsA_3"), all_shocks)
         isempty(s) ? first(all_shocks) : first(s)
     elseif EXERCISE == 1
-        s = filter(x -> contains(x, "eps_om") || contains(x, "eps_xi"), all_shocks)
+        s = filter(x -> contains(x, "eps_om") || contains(x, "eps_zeta"), all_shocks)
         isempty(s) ? first(all_shocks) : first(s)
     elseif EXERCISE == 3
         s = filter(x -> contains(x, "eps_i"), all_shocks)
@@ -212,7 +212,7 @@ function generate_figures(;
         elseif shk == "epschi";      "Labor-supply shock"
         elseif shk == "eps_pvstar";  "Import-price shock"
         elseif shk == "eps_postar";  "Oil-price shock"
-        elseif shk == "eps_xi";      "Aggregate demand (preference) shock"
+        elseif shk == "eps_zeta";      "Aggregate demand (preference) shock"
         elseif startswith(shk, "epsA_")
             i = tryparse(Int, replace(shk, "epsA_" => ""))
             (i !== nothing && 1 <= i <= length(names_vec)) ? "TFP shock: $(names_vec[i])" : "TFP shock ($shk)"
@@ -224,10 +224,20 @@ function generate_figures(;
         end
     end
 
-    # 4a. Aggregate IRFs — one PDF per shock with 2×2 layout
+    # 4a. Aggregate IRFs — one PNG per shock.
+    # The layout is DERIVED from length(agg_vars), not hardcoded. It used to be
+    # (2,2), which silently broke on 2026-08-20 when EInv (investment) became a
+    # fifth aggregate: five series into four slots made Plots draw the last panel
+    # over the figure title. agg_vars feeds both the table above and this loop,
+    # so anything added there must widen the grid here too — deriving it removes
+    # the coupling.
+    _nagg  = length(agg_vars)
+    _ncol  = _nagg <= 4 ? 2 : 3
+    _nrow  = ceil(Int, _nagg / _ncol)
     for shock in all_shocks
         irfs = [get_irf(df_irf, vn, shock; n_periods=n_periods) for vn in agg_vars]
-        p = Plots.plot(layout=(2,2), size=(900,600), titlefontsize=9,
+        p = Plots.plot(layout=(_nrow,_ncol), size=(300*_ncol + 100, 300*_nrow),
+                       titlefontsize=9,
                        plot_title="$shock — $(shock_desc(shock))")
         for (k, (irf, lbl)) in enumerate(zip(irfs, agg_labels))
             Plots.plot!(p, periods, irf, subplot=k, label="",

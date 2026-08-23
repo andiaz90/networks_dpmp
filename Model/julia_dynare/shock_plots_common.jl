@@ -35,6 +35,139 @@ using LinearAlgebra
 using Logging
 
 # =========================================================================== #
+#  READ THE MODEL FROM main_SOE_gap.jl's ARTEFACTS                             #
+# =========================================================================== #
+#
+# Every *_shock_analysis.jl script used to rebuild the entire calibration and
+# steady state itself, overwrite mod/params_jl.mod, and re-run Dynare. Five
+# copies of the same 400 lines, each drifting independently: by 2026-08-20 the
+# oil script had epsY 0.5 vs 0.80, ombar 0.57 vs 0.2601, etastar 3.5 vs 1.0,
+# kappaw 115 vs 355, no government block, no markup subsidy and mining TFP back
+# on — a different economy from the paper's tables, reported without complaint.
+#
+# There is now ONE model. main_SOE_gap.jl solves the steady state, writes
+# mod/params_jl.mod and runs Dynare; the shock scripts read BOTH artefacts back.
+# IRFs are linear and shock-specific, so the relevant ghu column of main's
+# decision rule IS that shock's impulse response — no second solve is needed.
+#
+# The rule this enforces: a shock script may SELECT and SCALE a shock. It may
+# not change a parameter. Anything that changes a parameter is a different
+# model and belongs in main_SOE_gap.jl.
+# =========================================================================== #
+
+"""
+    read_model_params(mod_dir, data_dir; nsec=12) -> NamedTuple
+
+Parse `mod/params_jl.mod` and return every calibration object the shock scripts
+need, plus the sector display names. Errors — rather than defaulting — if a
+parameter is absent, if Dynare has not been run, or if the decision rules on
+disk are OLDER than params_jl.mod (which would mean they were solved from a
+different parameterisation).
+
+Returns, among others: `modalpha`, `modalphaV`, `modalphaK`, `modepsY`,
+`modepsM`, `modkappa`, `modalphaOil`, `modbeta`, `goods`, `services`,
+`isigma_tfp_val`, `rho_tfp1_val` (ALWAYS an nsec-vector), the steady-state
+vectors (`pH_ss`, `MCi_ss`, `Yi_ss`, `L_ss`, `M_ss`, `Vi_ss`, `PMi_ss`, `P_ss`,
+`C_gi_ss`, `C_si_ss`, `PIV_ss_vec`) and scalars (`Q_ss`, `GDP_ss`, `TB_ss`,
+`C_ss`, `w_ss`, `N_ss`, `PV_ss`).
+"""
+function read_model_params(mod_dir::AbstractString, data_dir::AbstractString; nsec::Int=12)
+    CSVm = getfield(Main, :CSV); DFm = getfield(Main, :DataFrame)
+
+    pfile = joinpath(mod_dir, "params_jl.mod")
+    isfile(pfile) || error("""
+        mod/params_jl.mod not found. The shock scripts read the model from the
+        artefacts main_SOE_gap.jl writes; run that first:
+            julia --project=. main_SOE_gap.jl
+        """)
+
+    PAR = Dict{String,Float64}()
+    for m in eachmatch(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^;]+);", read(pfile, String))
+        v = tryparse(Float64, strip(m.captures[2]))
+        v === nothing || !isfinite(v) || (PAR[m.captures[1]] = v)
+    end
+    isempty(PAR) && error("Parsed no parameters from mod/params_jl.mod — empty or truncated. Re-run main_SOE_gap.jl.")
+
+    pget(nm) = get(() -> error("""
+        mod/params_jl.mod has no parameter `$(nm)` (or it is not finite).
+        Either the model changed and the caller was not updated, or
+        params_jl.mod is stale. Re-run main_SOE_gap.jl.
+        """), PAR, nm)
+    pvecx(stem) = [pget("$(stem)$(i)")  for i in 1:nsec]   # PH_ss1, Y_ss1, ...
+    pvecu(stem) = [pget("$(stem)_$(i)") for i in 1:nsec]   # alpha_1, epsY_1, ...
+
+    # Decision rules must have been solved FROM these parameters.
+    g1 = joinpath(mod_dir, "dynare_g1_1.csv")
+    isfile(g1) || error("""
+        mod/dynare_g1_1.csv not found — Dynare has not been run on this model.
+        Run:  julia --project=. main_SOE_gap.jl
+        """)
+    if mtime(g1) < mtime(pfile) - 1.0
+        error("""
+        mod/dynare_g1_1.csv is OLDER than mod/params_jl.mod, so the decision
+        rules on disk were solved from a DIFFERENT parameterisation than the one
+        just read. Refusing to plot that. Re-run:
+            julia --project=. main_SOE_gap.jl
+        """)
+    end
+
+    cal = isfile(joinpath(data_dir, "sector_calibration.csv")) ?
+        joinpath(data_dir, "sector_calibration.csv") :
+        joinpath(@__DIR__, "sector_calibration.csv")
+    names_vec = String.(CSVm.read(cal, DFm).name)
+    length(names_vec) == nsec ||
+        error("sector_calibration.csv has $(length(names_vec)) sectors, expected $(nsec).")
+
+    epsilon    = pget("epsilon")
+    subsMC_val = pget("subsMC")
+
+    return (
+        nsec = nsec, PAR = PAR, pget = pget, names_vec = names_vec,
+        params_file = pfile, g1_file = g1,
+        # --- structural scalars --- #
+        epsilon = epsilon, beta_val = pget("beta"), gamma = pget("gamma"),
+        psi = pget("psi"), subsMC_val = subsMC_val,
+        mc_over_ph = (epsilon - 1) / (epsilon * subsMC_val),
+        etastar_val = pget("etastar"), kappaw_val = pget("kappaw"),
+        phi_b_val = pget("phi_b"), ombar_val = pget("ombar"),
+        # --- sectoral technology / preferences --- #
+        modalpha = pvecu("alpha"), modalphaV = pvecu("alphaV"),
+        modalphaK = pvecu("alphaK"), modepsY = pvecu("epsY"),
+        modepsM = pvecu("epsM"), modkappa = pvecu("kappa"),
+        modalphaOil = pvecu("alphaOilShare"), modcl = pvecu("cl"),
+        goods = pvecu("dummyg") .> 0.5, services = pvecu("dummys") .> 0.5,
+        modbeta = [pget("beta_$(i)_$(j)") for i in 1:nsec, j in 1:nsec],
+        # --- shock processes --- #
+        # rho_tfp1_val is ALWAYS a vector: min/mfg used to treat it as a scalar
+        # and agr/agrmin as a vector, for the same object.
+        isigma_tfp_val = pvecu("isigma_tfp"), rho_tfp1_val = pvecu("rho_tfp1"),
+        sigma_om_vec = pvecu("sigma_om"),
+        rho_postar_val = pget("rho_postar"), sigma_postar_val = pget("sigma_postar"),
+        epsilonV_oil_val = pget("epsilonV_oil"),
+        shock_eps_postar_val = pget("shock_eps_postar"),
+        # --- steady state --- #
+        pH_ss = pvecx("PH_ss"), MCi_ss = pvecx("MC_ss"), Yi_ss = pvecx("Y_ss"),
+        L_ss = pvecx("L_ss"), M_ss = pvecx("Mi_ss"), Vi_ss = pvecx("Vi_ss"),
+        PMi_ss = pvecx("PMi_ss"), P_ss = pvecx("P_ss"),
+        C_gi_ss = pvecx("Cgi_ss"), C_si_ss = pvecx("Csi_ss"),
+        PIV_ss_vec = pvecx("PIV_ss"), PL_ss = pvecx("PL_ss"),
+        Q_ss = pget("Q_ss"), GDP_ss = pget("GDP_ss"), TB_ss = pget("TB_ss"),
+        C_ss = pget("C_ss"), w_ss = pget("w_ss"), N_ss = pget("N_ss"),
+        PV_ss = pget("Q_ss") * pget("PVstar_ss"),
+        epsY_baseline = pget("epsY_1"),
+    )
+end
+
+"Print the provenance banner every shock script shows before it plots anything."
+function report_model_source(MP)
+    @printf "  Model read from mod/params_jl.mod (%s)\n" Libc.strftime("%Y-%m-%d %H:%M", mtime(MP.params_file))
+    @printf "  Decision rules   mod/dynare_g1_1.csv (%s)\n" Libc.strftime("%Y-%m-%d %H:%M", mtime(MP.g1_file))
+    @printf "  εY = %.3f  εM = %.3f  subsMC = %.4f (markup PH/MC = %.4f)  ψ = %.2f\n" MP.epsY_baseline MP.modepsM[1] MP.subsMC_val (1/MP.mc_over_ph) MP.psi
+    @printf "  SS: GDP=%.4f  C=%.4f  TB/GDP=%.4f  N=%.4f\n\n" MP.GDP_ss MP.C_ss (MP.TB_ss/MP.GDP_ss) MP.N_ss
+end
+
+
+# =========================================================================== #
 #  EXOGENOUS-SHOCK COLUMN LOOKUP (name -> ghu column)                          #
 # =========================================================================== #
 # ghu / g1_3 columns follow the exogenous DECLARATION order, which is exactly the
@@ -104,6 +237,7 @@ function standard_fignames(tag::AbstractString)
         :affected_inflation => "irf_affected_vs_other_inflation_$(tag)_shock.png",
         :sec_MC           => "irf_sectoral_MC_$(tag)_shock.png",
         :labor_agg        => "irf_labor_aggregate_$(tag)_shock.png",
+        :labor_sec        => "irf_labor_sectoral_$(tag)_shock.png",
         :sec_L            => "irf_sectoral_L_$(tag)_shock.png",
         :gdpgap_agg       => "irf_gdpgap_aggregate_$(tag)_shock.png",
         :sec_Ygap         => "irf_sectoral_Ygap_$(tag)_shock.png",
@@ -142,6 +276,7 @@ function oil_fignames()
         :affected_inflation => "irf_affected_vs_other_inflation_oil.png",
         :sec_MC           => "irf_sectoral_MC_oil_shock.png",
         :labor_agg        => "irf_labor_aggregate_oil_shock.png",
+        :labor_sec        => "irf_labor_sectoral_oil_shock.png",
         :sec_L            => "irf_sectoral_L_oil_shock.png",
         :gdpgap_agg       => "irf_gdpgap_aggregate_oil_shock.png",
         :sec_Ygap         => "irf_sectoral_Ygap_oil_shock.png",
@@ -614,6 +749,120 @@ end
 
 
 # =========================================================================== #
+#  SECTORAL LABOUR-MARKET FIGURE                                               #
+# =========================================================================== #
+
+"""
+    real_wage_irf(ctx) -> Vector
+
+Real (CPI-deflated) wage IRF, in % deviation from steady state.
+
+`w` in the .mod is the NOMINAL wage. `C` is nominal consumption expenditure and
+`Ctot` the real consumption quantity aggregate, so the consumption deflator is
+`P^C = C/Ctot` and, in log-deviations, `ŵ_real = ŵ - (Ĉ - Ĉtot)`.
+
+This exists because two figures used to label `ctx.w_irf` "Salario Real" while
+plotting the nominal wage. Under an oil shock the gap is small but has the wrong
+sign story: the CPI rises, so the real wage falls by LESS than the nominal one.
+"""
+function real_wage_irf(ctx)
+    gi = get(ctx, :get_irf, nothing)
+    gi === nothing && return copy(ctx.w_irf)
+    c    = get(ctx, :c_irf, gi("C"))
+    ctot = gi("Ctot")
+    (all(iszero, ctot) || length(ctot) != length(ctx.w_irf)) && return copy(ctx.w_irf)
+    return ctx.w_irf .- (c .- ctot)
+end
+
+"""
+    make_labor_sectoral_fig(ctx) -> Plots.Plot
+
+Two IPoM-style bar panels — sectoral employment `L_i` and the sectoral marginal
+cost of labour `PL_i` — each at impact and after four quarters.
+
+WHY `PL_i` AND NOT "THE SECTORAL WAGE". There is ONE labour market in this
+model, so the wage `w` is common to every sector: plotting a sectoral wage would
+plot the same number twelve times. What differs by sector is the marginal cost
+of labour to the firm,
+
+    PL_i = w + (FGI 2023 hiring-cost wedge in L_i / L_i(-1)),
+
+so `PL_i - w` IS the sectoral labour margin, and it is the object the FGI
+mechanism is about. The common wage is drawn as a dashed reference line on the
+right panel: the wedge is the distance from each bar to that line.
+
+Reading the two panels together is the point. With `cl` estimated near its bound
+(~50), sectoral employment barely moves while `PL_i` moves an order of magnitude
+more — adjustment happens in the shadow cost of labour, not in headcount. That
+is the model's answer to why Chilean sectoral employment is nearly unrelated to
+sectoral output in the data (`Data/diagnose_sectoral_employment.py`).
+"""
+function make_labor_sectoral_fig(ctx)
+    P    = Main.Plots
+    nsec = ctx.nsec
+    bar_names = SHOCK_BAR_NAMES
+    # Same sector axis as the decomposition_pi3_* figures this is read beside.
+    keep = [i for i in 1:nsec if !occursin("blica", bar_names[i])]
+    nk   = length(keep)
+    nm   = bar_names[keep]
+
+    h2 = min(4, ctx.nT)          # four quarters
+    gi = get(ctx, :get_irf, nothing)
+    pl_mat = gi === nothing ? zeros(nsec, ctx.nT) :
+             reduce(vcat, [permutedims(gi("PL_$(i)")) for i in 1:nsec])
+
+    panels = (
+        (vals1 = ctx.l_irf_mat[keep, 1],  vals2 = ctx.l_irf_mat[keep, h2],
+         title = "Empleo por sector",
+         ref   = ctx.n_irf_v[1],  ref_lbl = "Empleo agregado (impacto)"),
+        (vals1 = pl_mat[keep, 1],         vals2 = pl_mat[keep, h2],
+         title = "Costo marginal del trabajo por sector",
+         ref   = ctx.w_irf[1],    ref_lbl = "Salario común w (impacto)"),
+    )
+
+    p = P.plot(layout = (1, 2), size = (1900, 780),
+        plot_title = "$(ctx.title_long) — Mercado Laboral Sectorial",
+        plot_titlefontsize = 13, plot_titlefontcolor = IPOM_NAVY)
+
+    for (k, pn) in enumerate(panels)
+        allv = vcat(pn.vals1, pn.vals2, pn.ref, 0.0)
+        dmn, dmx = minimum(allv), maximum(allv)
+        sp  = max(dmx - dmn, 1e-6)
+        ylo, yhi = min(dmn, 0.0) - 0.10sp, max(dmx, 0.0) + 0.16sp
+
+        P.plot!(p, subplot = k, [NaN], [NaN], label = "",
+            xticks = (1:nk, nm), xrotation = 55,
+            title = "$(pn.title)\n(% desv. del EE)",
+            titlefontsize = 12, titlefontcolor = IPOM_NAVY, titlelocation = :left,
+            legend = :top, legend_columns = 3, legendfontsize = 9,
+            foreground_color_legend = nothing, background_color_legend = nothing,
+            grid = false, ylims = (ylo, yhi), xlims = (0.3, nk + 0.7),
+            bottom_margin = 22P.mm, left_margin = 10P.mm,
+            right_margin = 8P.mm, top_margin = 4P.mm)
+        P.hline!(p, subplot = k, [0.0], color = :black, lw = 0.8, label = "")
+
+        # Grouped bars: impact (navy) and four quarters (light blue).
+        for i in 1:nk
+            P.plot!(p, subplot = k, shock_bar_rect(i - 0.16, 0.0, pn.vals1[i], 0.30),
+                color = IPOM_NAVY, label = (i == 1 ? "Impacto" : ""),
+                alpha = 0.85, linecolor = :white, linewidth = 0.3)
+            P.plot!(p, subplot = k, shock_bar_rect(i + 0.16, 0.0, pn.vals2[i], 0.30),
+                color = IPOM_LIGHTBLUE, label = (i == 1 ? "4 trimestres" : ""),
+                alpha = 0.85, linecolor = :white, linewidth = 0.3)
+        end
+
+        # Aggregate reference. NOT a per-sector diamond: the aggregate is one
+        # number, not a sector-by-sector total, so a dashed line is the honest
+        # mark here (unlike the incidence charts, where the diamond IS the
+        # sector's own total).
+        P.hline!(p, subplot = k, [pn.ref], color = :black, lw = 1.4, ls = :dash,
+                 label = pn.ref_lbl)
+    end
+    return p
+end
+
+
+# =========================================================================== #
 #  MAIN FIGURE SET                                                             #
 # =========================================================================== #
 
@@ -645,7 +894,7 @@ function generate_shock_figures(ctx)
         (ctx.tb_irf,       "Balanza Comercial",      "pp del PIB",ctx.TB_ss/ctx.GDP_ss),
         (ctx.cg_irf,       "Consumo de Bienes",      "% desv.",   1.0),
         (ctx.r_irf,        "Tasa de Interés Nominal","pp anual",  4.0),
-        (ctx.w_irf,        "Salario Real",           "% desv.",   1.0),
+        (ctx.w_irf,        "Salario Nominal",        "% desv.",   1.0),
         (ctx.pi_goods_irf, "Inflación de Bienes",    "pp anual",  1.0),
         (ctx.pi_serv_irf,  "Inflación de Servicios", "pp anual",  1.0),
         (ctx.cs_irf,       "Consumo de Servicios",   "% desv.",   1.0),
@@ -746,17 +995,32 @@ function generate_shock_figures(ctx)
         shock_save_fig(p_aff, fn[:affected_inflation], ctx)
     end
 
-    # ---- Mercado laboral agregado (1×2) ---- #
-    p_lab = P.plot(layout=(1,2), size=(1000, 400),
+    # ---- Mercado laboral agregado (1×3) ---- #
+    # Panel 3 used to be labelled "Salario Real" while plotting the NOMINAL wage
+    # w. Both are now shown, with the real wage deflated by C/Ctot — see
+    # real_wage_irf().
+    w_real = real_wage_irf(ctx)
+    # 1500×400 with a 1×3 layout collided: the plot_title overlapped the middle
+    # subplot title and the y/x labels were clipped. Taller canvas + an explicit
+    # title band + real margins.
+    p_lab = P.plot(layout=(1,3), size=(1650, 500),
         plot_title="$(ctx.title_short) — Mercado Laboral Agregado",
-        titlefontsize=11, margin=5P.mm)
+        plot_titlefontsize=13, plot_titlevspan=0.10, titlefontsize=11,
+        left_margin=10P.mm, bottom_margin=12P.mm, top_margin=4P.mm,
+        right_margin=5P.mm)
     P.plot!(p_lab, periods, ctx.n_irf_v, subplot=1, label=base_lbl, color=base_col, lw=base_lw,
         xlabel="Trimestres", ylabel="% desv. del EE", title="Empleo Agregado")
     P.plot!(p_lab, periods, ctx.w_irf, subplot=2, label=base_lbl, color=base_col, lw=base_lw,
-        xlabel="Trimestres", ylabel="% desv. del EE", title="Salario Real")
-    P.hline!(p_lab, [0.0], subplot=1, color=:black, lw=0.6, ls=:dash, label="")
-    P.hline!(p_lab, [0.0], subplot=2, color=:black, lw=0.6, ls=:dash, label="")
+        xlabel="Trimestres", ylabel="% desv. del EE", title="Salario Nominal")
+    P.plot!(p_lab, periods, w_real, subplot=3, label=base_lbl, color=IPOM_LIGHTBLUE, lw=base_lw,
+        xlabel="Trimestres", ylabel="% desv. del EE", title="Salario Real (deflactado por IPC)")
+    for k in 1:3
+        P.hline!(p_lab, [0.0], subplot=k, color=:black, lw=0.6, ls=:dash, label="")
+    end
     shock_save_fig(p_lab, fn[:labor_agg], ctx)
+
+    # ---- Mercado laboral sectorial (barras estilo IPoM) ---- #
+    shock_save_fig(make_labor_sectoral_fig(ctx), fn[:labor_sec], ctx)
 
     # ---- Brecha del PIB ---- #
     p_gap = P.plot(size=(700, 400), title="$(ctx.title_short) — Brecha del PIB",

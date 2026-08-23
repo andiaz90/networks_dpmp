@@ -15,7 +15,12 @@ up the newest θ automatically):
   best_sol.txt         — current best θ, human-readable (name  value)
   min_loss.txt         — objective at the current best θ
   smm_progress_log.csv — objective trajectory, one row per 50 evaluations
-  smm_inference.csv    — standard errors (after a completed run)
+
+NO STANDARD ERRORS are produced (2026-08-21). The GMM sandwich machinery in
+smm_inference.jl is intact but deliberately NOT included or called: the moment
+Jacobian at θ̂ is rank-deficient (SEs came out 0, t-stats Inf) and S fell back
+on delta-method diagonal variances. See the note at the end of run_smm() in
+smm_estimation.jl for what has to be true before it is switched back on.
 """
 
 using CSV, DataFrames, Printf, Serialization, Dynare
@@ -29,7 +34,9 @@ include(joinpath(SCRIPT_DIR, "steady_ntwsoe.jl"))
 include(joinpath(SCRIPT_DIR, "utils.jl"))
 include(joinpath(SCRIPT_DIR, "smm_model_moments.jl"))
 include(joinpath(SCRIPT_DIR, "smm_estimation.jl"))
-include(joinpath(SCRIPT_DIR, "smm_inference.jl"))
+# smm_inference.jl deliberately NOT included — see the docstring above.
+# Leaving it out (rather than including it and not calling it) also means
+# `isdefined(:compute_smm_inference)` stays false everywhere.
 
 
 function _main()

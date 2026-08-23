@@ -1,6 +1,24 @@
 """
 smm_inference.jl
 ================
+
+>>> NOT WIRED IN. This file is not `include`d and `compute_smm_inference` is
+>>> not called anywhere (Agustín's decision, 2026-08-21: do not report SMM
+>>> standard errors for now). It is kept so the machinery is not lost.
+>>>
+>>> Why it was unhooked — both problems are real, not cosmetic:
+>>>   1. The moment Jacobian G at θ̂ is RANK-DEFICIENT. diag(V) came out ≈ 0
+>>>      and every t-statistic was Inf. See probe_free_dims.jl. Free parameters
+>>>      that do not move the moments cannot be given a standard error.
+>>>   2. Without Data/moment_cov.csv, S falls back on delta-method DIAGONAL
+>>>      variances. The 60 moments are built from the same ~60 quarters, so the
+>>>      off-diagonals are large and ignoring them is not conservative.
+>>>
+>>> Before switching this back on: (a) supply a moving-block-bootstrap
+>>> Data/moment_cov.csv, (b) resolve the rank deficiency, (c) restore the call
+>>> at the end of run_smm() in smm_estimation.jl and the include in
+>>> run_smm_estimation.jl.
+
 Asymptotic inference for the NK-IOSOE analytical-moment GMM estimator:
 standard errors (GMM sandwich) and the overidentifying-restrictions J-test.
 
