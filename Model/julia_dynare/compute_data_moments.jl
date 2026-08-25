@@ -52,7 +52,18 @@ function _main()   # wrapped in function so we can use `return` for early exit
 # =========================================================================== #
 #  FAST PATH: if CSV outputs already exist, load them and skip all xlsx work  #
 # =========================================================================== #
-if isfile(OUT_SECTORAL) && isfile(OUT_AGGREGATE)
+# FORCE_RECOMPUTE=1 skips the fast path (2026-08-24). Without it the only way to
+# recompute was to delete the CSVs — and deleting the WRONG one destroys moments
+# 61-63, which §2b then cannot carry forward. That trap fired on 2026-08-21 and
+# again today: an edit to §9c produced no effect at all because the fast path
+# silently loaded the previous run's file. Delete nothing; set the flag.
+# (plain local, NOT const — this whole file lives inside _main())
+FORCE_RECOMPUTE = get(ENV, "FORCE_RECOMPUTE", "0") != "0"
+if FORCE_RECOMPUTE
+    @printf "\n%s\n  FORCE_RECOMPUTE=1 — ignoring existing CSVs, recomputing from raw sources.\n%s\n\n" repeat("=",61) repeat("=",61)
+end
+
+if !FORCE_RECOMPUTE && isfile(OUT_SECTORAL) && isfile(OUT_AGGREGATE)
     sec = CSV.read(OUT_SECTORAL,  DataFrame)
     agg = CSV.read(OUT_AGGREGATE, DataFrame)
 
@@ -1259,6 +1270,10 @@ FACTOR_NFAC = parse(Int, get(ENV, "FACTOR_NFAC", "1"))
 std_Y_idio    = fill(NaN, NSEC)
 std_PH_idio   = fill(NaN, NSEC)
 corr_YPH_idio = fill(NaN, NSEC)
+# First-order autocorrelation of the IDIOSYNCRATIC output cycle (2026-08-24).
+# Feeds the sector-specific TFP persistence rho_{A,i}; see the note where it is
+# filled below.
+ac_Y_idio     = fill(NaN, NSEC)
 d_rbar_YY     = NaN   # moment 78: average pairwise cross-sectoral output correlation
 
 """
@@ -1291,6 +1306,35 @@ function project_out(x::AbstractVector{<:Real}, F::AbstractMatrix{<:Real})
     return x .- X * (X \ collect(float.(x)))
 end
 
+"""
+    rbar_pairwise(panel, keep) -> (rbar, npairs)
+
+Average pairwise correlation across the columns of a T x N panel, using only the
+rows flagged in `keep`. This is the cross-sectional comovement statistic of the
+production-network literature — FSW (2011 JPE) Table 7, Atalay (2017) eq. 18.
+
+Factored out of the inline loop that used to compute moment 78, because that loop
+called `complete_cor` directly and so was the ONLY sectoral moment in the file
+that did not drop the pandemic quarters (fixed 2026-08-24).
+"""
+function rbar_pairwise(panel::AbstractMatrix{<:Real}, keep::AbstractVector{Bool})
+    N = size(panel, 2)
+    acc = 0.0; np = 0
+    for i in 1:N, j in (i+1):N
+        c = complete_cor(panel[keep, i], panel[keep, j])
+        isnan(c) && continue
+        acc += c; np += 1
+    end
+    return (np > 0 ? acc / np : NaN), np
+end
+
+"Share of total panel variance carried by the first principal component."
+function pc1_share(panel::AbstractMatrix{<:Real})
+    size(panel, 1) < 5 && return NaN
+    _, vs = common_factors(panel, 1)
+    return vs[1]
+end
+
 if !isempty(Y_qrt) && size(Y_qrt, 1) >= 20 && size(P_sample, 1) >= 20
     nT_Y = size(Y_qrt, 1); nT_P = size(P_sample, 1)
     nT_c = min(nT_Y, nT_P)
@@ -1317,6 +1361,19 @@ if !isempty(Y_qrt) && size(Y_qrt, 1) >= 20 && size(P_sample, 1) >= 20
         p_pan = hcat([hp_cycle(log.(Pc[t1:t2, i]), LAMBDA) for i in 1:NSEC]...)
         @printf "  Balanced panel: %d quarters x %d sectors (x2 blocks).\n" (t2 - t1 + 1) NSEC
 
+        # `covid_keep(n)` dates its mask by counting BACKWARDS from SAMPLE_END,
+        # which is only correct for a series that ends AT SAMPLE_END. The
+        # balanced panel ends at t2, and t2 < nT_c whenever the last quarter is
+        # unbalanced for any sector. In that case every mask applied to y_pan or
+        # p_pan — mstd, mcor, and rbar — would drop the wrong quarters, silently.
+        # Build the panel's own mask by padding out to SAMPLE_END and clipping.
+        # (Guard added 2026-08-24; pre-existing exposure, not a new one.)
+        pan_tail_lag = nT_c - t2
+        pan_keep     = covid_keep(size(y_pan, 1) + pan_tail_lag)[1:size(y_pan, 1)]
+        if pan_tail_lag > 0
+            @printf "  NOTE: panel ends %d quarter(s) before SAMPLE_END; pandemic mask shifted accordingly.\n" pan_tail_lag
+        end
+
         F, vshare = common_factors(hcat(y_pan, p_pan), FACTOR_NFAC)
         pc_txt = join([@sprintf("%.0f%%", 100 * vshare[k]) for k in 1:FACTOR_NFAC], ", ")
         @printf "  Variance share of retained PCs: %s  (cumulative %.0f%%)\n" pc_txt (100 * sum(vshare[1:FACTOR_NFAC]))
@@ -1329,6 +1386,22 @@ if !isempty(Y_qrt) && size(Y_qrt, 1) >= 20 && size(P_sample, 1) >= 20
             std_Y_idio[i]    = mstd(ry)
             std_PH_idio[i]   = mstd(rp)
             corr_YPH_idio[i] = mcor(ry, rp)
+            # PERSISTENCE OF THE IDIOSYNCRATIC CYCLE (2026-08-24).
+            #
+            # This measures rho_{A,i}, the sector-specific persistence of the TFP
+            # shock, under exactly the same unit-loading assumption that
+            # compute_sectoral_shocks.jl already makes for the shock SIZES: with
+            # the common factor projected out and a unit shock-to-output loading,
+            # the idiosyncratic output cycle IS the shock, so its autocorrelation
+            # is the shock's. Sizes and persistence are then measured off the same
+            # object under the same assumption, which is the point.
+            #
+            # It is deliberately NOT the total-cycle autocorr_Y already in this
+            # file (moments 66-77). That one contains the common factor, whose
+            # persistence the model generates from its own aggregate and external
+            # shocks; feeding it back into rho_A would double-count exactly as
+            # using total volatility for the sigmas would.
+            ac_Y_idio[i]     = mac1(ry)
         end
 
         @printf "\n  %-4s %-18s %9s %9s %7s %10s %11s\n" "Sec" "Name" "std_Y" "std_Y_id" "share" "corr_YPH" "corr_id"
@@ -1356,14 +1429,56 @@ if !isempty(Y_qrt) && size(Y_qrt, 1) >= 20 && size(P_sample, 1) >= 20
         # Computed on the TOTAL cycles, not the idiosyncratic residuals: the model
         # counterpart is corr(Y_i,Y_j) with every shock on, and removing a common
         # factor would drive it mechanically toward zero on the data side only.
-        let np = 0, acc = 0.0
-            for i in 1:NSEC, j in (i+1):NSEC
-                c = complete_cor(y_pan[:, i], y_pan[:, j])
-                isnan(c) && continue
-                acc += c; np += 1
-            end
-            d_rbar_YY = np > 0 ? acc / np : NaN
-            @printf "\n  Average pairwise cross-sectoral output correlation: rbar = %.4f  (%d pairs)\n" d_rbar_YY np
+        #
+        # TWO CHANGES, 2026-08-24.
+        #
+        # (a) THE PANDEMIC MASK WAS MISSING. This loop called `complete_cor`
+        #     directly rather than `mcor`, so rbar was the one sectoral moment
+        #     still computed over 2020Q1-2021Q2. COVID is a textbook common
+        #     factor — it moves all twelve sectors at once — so leaving it in
+        #     inflates rbar, and the model was being asked to match a target
+        #     contaminated by exactly the comovement it is accused of
+        #     over-producing. Both versions are printed so the size of the
+        #     artefact is on the record; the TARGETED value now excludes COVID.
+        #
+        # (b) A TRANSFORMATION DIAGNOSTIC. The entire "excess comovement"
+        #     diagnosis rests on this one number, and it had never been checked
+        #     against an alternative filter. Foerster, Sarte & Watson (2011 JPE)
+        #     report that ~90% of US IP variation is common-factor driven, on
+        #     QUARTERLY GROWTH RATES of 117 sectors; here it is HP-filtered log
+        #     LEVELS of 12 broad sectors. If rbar and the PC1 share move a lot
+        #     between the two transformations, the gap to the model is partly a
+        #     measurement choice and not a structural failure. Growth rates are
+        #     DIAGNOSTIC ONLY — the model counterpart is HP-filtered, so the
+        #     targeted moment must stay HP-filtered.
+        let T = size(y_pan, 1)
+            keep_all = trues(T)
+            keep_cov = pan_keep          # panel-dated mask, see the NOTE above
+
+            rb_in,  np_in  = rbar_pairwise(y_pan, keep_all)
+            rb_out, np_out = rbar_pairwise(y_pan, keep_cov)
+
+            # Log growth rates. A (t-1, t) difference survives only if BOTH
+            # quarters do — otherwise 2019Q4 gets spliced onto 2021Q3 and
+            # counted as one quarter's growth, the same trap `mac1` avoids.
+            ly     = log.(Yc[t1:t2, :])
+            g_pan  = ly[2:end, :] .- ly[1:end-1, :]
+            keep_g = keep_cov[1:end-1] .& keep_cov[2:end]
+            rb_g, np_g = rbar_pairwise(g_pan, keep_g)
+
+            d_rbar_YY = rb_out          # <-- moment 78, pandemic excluded
+
+            @printf "\n  Average pairwise cross-sectoral output correlation (rbar)\n"
+            @printf "  %s\n" repeat("-", 68)
+            @printf "  %-34s %8s %8s %8s\n" "transformation" "rbar" "PC1" "pairs"
+            @printf "  %-34s %8.4f %8.2f %8d\n" "HP log levels, COVID IN"  rb_in  pc1_share(y_pan[keep_all, :]) np_in
+            @printf "  %-34s %8.4f %8.2f %8d  <- TARGETED\n" "HP log levels, COVID OUT" rb_out pc1_share(y_pan[keep_cov, :]) np_out
+            @printf "  %-34s %8.4f %8.2f %8d  (diagnostic)\n" "log growth rates, COVID OUT" rb_g pc1_share(g_pan[keep_g, :]) np_g
+            @printf "  %s\n" repeat("-", 68)
+            @printf "  COVID contribution to rbar: %+.4f\n" (rb_in - rb_out)
+            @printf "  FSW (2011 JPE) report ~0.90 PC1 share for US IP growth, 117 sectors.\n"
+            @printf "  A large level-vs-growth gap here means the model/data comparison is\n"
+            @printf "  partly a filter choice, not only a structural miss.\n"
         end
 
         nflip = count(i -> !isnan(corr_tot_pan[i]) && !isnan(corr_YPH_idio[i]) &&
@@ -1478,6 +1593,9 @@ df_sec = DataFrame(
     std_PH_idio   = std_PH_idio,
     corr_YPH_idio = corr_YPH_idio,
     autocorr_Y    = ac_y,     # persistence moments (66-77) — see section 5
+    # Sector-specific TFP persistence rho_{A,i}, measured on the idiosyncratic
+    # cycle. Read by compute_sectoral_shocks.jl; NOT itself a targeted moment.
+    autocorr_Y_idio = ac_Y_idio,
     std_Yg   = [i in GOODS    ? d_std_Yg  : NaN for i in 1:NSEC],
     std_PHg  = [i in GOODS    ? d_std_PHg : NaN for i in 1:NSEC],
     std_Lg   = [i in GOODS    ? d_std_Lg  : NaN for i in 1:NSEC],

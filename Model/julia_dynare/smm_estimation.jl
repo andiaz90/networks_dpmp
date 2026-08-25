@@ -404,6 +404,88 @@ function build_baseline(context::Dynare.Context,
         (isempty(p) || idx > length(p)) ? NaN : p[idx]
     end
     nsec = NSEC
+
+    # ---- SMM_KAPPA_SCALE: diagnostic scale on the sectoral Rotemberg costs ---
+    #
+    # WHY. std(PH_i) is 9.1% of the objective and corr(Y_i,PH_i) is 38.8% — 48%
+    # between them — and they may share one mechanism: the model's sectoral
+    # PRICES barely move, so the output-price correlation collapses toward zero.
+    # Model vs data std(PH_i) at the 2026-08-25 estimate: Agriculture 3.6x too
+    # smooth, Manufacturing 2.9x, Finance 2.4x, Transport 2.3x, Utilities 2.1x.
+    # The tell is MINING — the one sector with NO Phillips curve (law of one
+    # price, no kappa applied) — and it is the one sector that matches (0.132
+    # data vs 0.145 model).
+    #
+    # The kappa_i are CALIBRATED from price-change frequencies (8.0 Agriculture
+    # to 508.6 Public Admin), never estimated, so nothing has ever tested whether
+    # their LEVEL is right. This scale multiplies all twelve at once.
+    #
+    # DIAGNOSTIC ONLY, and read it sceptically: the errors go BOTH ways
+    # (Construction and Business Services are ~2x too VOLATILE), so a single
+    # global scale is a blunt instrument and may not help. The question it
+    # answers is narrow: do std(PH_i) and corr(Y_i,PH_i) improve TOGETHER when
+    # prices are made more flexible? If yes, they share a mechanism and a free
+    # scale is worth building. If only one moves, they do not, and this is dead.
+    #
+    # Applied HERE, before the pvec reads below, so the context parameters and
+    # baseline.modkappa (which feeds the steady state) can never disagree.
+    let ks = parse(Float64, get(ENV, "SMM_KAPPA_SCALE", "1.0"))
+        if ks != 1.0
+            ks > 0 || error("SMM_KAPPA_SCALE must be > 0, got $(ks)")
+            # THREADS=1 IS REQUIRED HERE, not merely preferred. set_param! writes
+            # into _SMM_PARAMS[tid], a PER-THREAD vector, and build_baseline runs
+            # on thread 1 only. Under multithreading the scale would apply to
+            # thread 1's copy and every other thread would silently solve at the
+            # ORIGINAL kappas — a partial, non-reproducible calibration that no
+            # output would reveal. (Separately, threading already causes ~36% of
+            # evaluations to return a stale decision rule, so --threads=1 is the
+            # standing recommendation anyway.)
+            Threads.nthreads() == 1 || error("""
+                SMM_KAPPA_SCALE=$(ks) requires --threads=1 (running with $(Threads.nthreads())).
+                set_param! writes to the per-thread _SMM_PARAMS vector and only
+                thread 1 runs build_baseline, so other threads would keep the
+                ORIGINAL kappas and the run would be silently inconsistent.
+                Re-run with: julia --threads=1 --project=. ...
+                """)
+            base = [pvec("kappa_$(i)") for i in 1:nsec]
+            for i in 1:nsec
+                isnan(base[i]) && continue
+                set_param!(context, "kappa_$(i)", ks * base[i])
+            end
+            # DO NOT invalidate and reload the cache here. `set_param!` writes
+            # into _SMM_PARAMS itself — see the note at smm_model_moments.jl:636
+            # ("context.work.params was unreliable on ARM Macs, so this file
+            # keeps its own vector"), and resolve_first_order! pushes _SMM_PARAMS
+            # into the context before any solver runs. `_load_smm_params!` refills
+            # _SMM_PARAMS *from context.work.params*, i.e. from the ORIGINAL
+            # params_jl.mod values, so calling it after set_param! silently
+            # DISCARDS the writes.
+            #
+            # That is exactly what happened on the first attempt: the 2026-08-25
+            # kappa sweep returned byte-identical moments at 0.1x and 4x because
+            # a reload added "for safety" wiped every set_param! a few lines
+            # earlier. The read-back below is what caught it; keep it.
+            # READ BACK, do not trust the write. Printing ks*base would only
+            # prove I can multiply; it says nothing about whether set_param!
+            # reached the array the solver reads. A byte-identical sweep is the
+            # classic symptom of a parameter that never arrived.
+            rb = [pvec("kappa_$(i)") for i in 1:nsec]
+            @printf "  [kappa scale] SMM_KAPPA_SCALE=%.3f applied to all %d sectoral Rotemberg costs\n" ks nsec
+            @printf "                kappa_1  %8.3f -> requested %8.3f, READ BACK %8.3f\n" base[1] ks*base[1] rb[1]
+            @printf "                kappa_12 %8.3f -> requested %8.3f, READ BACK %8.3f\n" base[nsec] ks*base[nsec] rb[nsec]
+            bad = count(i -> !isnan(rb[i]) && abs(rb[i] - ks*base[i]) > 1e-9*max(1.0, abs(ks*base[i])), 1:nsec)
+            if bad > 0
+                error("""
+                    SMM_KAPPA_SCALE did not take: $(bad) of $(nsec) kappa_i read back
+                    at their OLD values after set_param!. The scale would be silently
+                    ignored and the sweep would return identical moments at every
+                    grid point. Do not interpret such a sweep as "kappa does not
+                    matter" — it means the parameter never reached the solver.
+                    """)
+            end
+        end
+    end
+
     ss_vec = context.results.model_results[1].trends.endogenous_steady_state
     get_ss(nm) = let i = findfirst(==(nm), endo_names); i === nothing ? 1.0 : ss_vec[i]; end
     (
@@ -595,18 +677,75 @@ end
 #  10. OPTIMIZED MOMENT FUNCTION                                              #
 # =========================================================================== #
 
+"""
+Opt-in diagnostic sink (2026-08-24). When set to `Ref`-held `true`,
+`smm_model_moments` stashes the HP-filtered covariance matrix it already
+computed, together with the variable names it is indexed by, so a diagnostic
+script can look at objects the 84-moment vector does not expose — cross-sector
+correlation structure, principal components, loadings on aggregates.
+
+`nothing` (the default) means the branch is never taken, so the estimation pays
+literally nothing for this. NEVER leave it armed inside a CMA-ES loop: it copies
+a ~50x50 matrix per evaluation and would be retained across millions of calls.
+"""
+const MOMENT_DIAG_SINK = Ref{Any}(nothing)
+
+"""
+The twelve MEASURED sectoral TFP persistences rho_hat_{A,i}, read from
+`rho_A_init` in the sectoral shock calibration CSV at setup (2026-08-24).
+
+The model's `rho_tfp1_i` are then set to `clamp(lambda_rho * rho_hat_i, 0, 0.98)`
+with `lambda_rho = θ[6]`, exactly mirroring how `lambda_A` scales the twelve
+measured shock SIZES: the cross-sectional PATTERN is measured from the data and
+pinned, one free scalar absorbs the level. No new free parameters.
+
+`nothing` means the CSV predates this change; the objective then falls back to a
+single common persistence, `θ[6]` reverts to its old meaning, and setup prints a
+loud warning. That fallback exists so an old calibration file still runs — it is
+NOT the intended configuration, because a common rho cannot fit sectoral
+autocorrelations that run from 0.11 to 0.89 in the data.
+"""
+const RHO_A_MEASURED = Ref{Union{Nothing,Vector{Float64}}}(nothing)
+
 function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_names)
     nsec = baseline.nsec; NAN58 = fill(NaN, N_MOMENTS)   # name kept; length = N_MOMENTS (60)
     # Option-A layout (36 params):
     #   θ[1:4]  = ilabcosts, epsY, epsM, log(kappaV)
     #   θ[5]    = rho_om (common persistence for all 12 sectoral demand shocks)
-    #   θ[6]    = rho_A
+    #   θ[6]    = lambda_rho, scale on the 12 MEASURED sectoral persistences
+    #             (was the single common rho_A until 2026-08-24)
     #   θ[7:18] = isigma_tfp_1:12
     #   θ[19:30]= sigma_om_1:12
     #   θ[31:35]= rho_pvstar, sigma_pvstar, rho_zeta, sigma_zeta, etastar
     #   θ[36]   = kappaw (Rotemberg wage stickiness; 0 = flexible)
     ilabcosts=θ[1]; epsY=θ[2]; epsM=θ[3]; kappaV=exp(θ[4])
-    rho_om=θ[5]; rho_A=θ[6]
+    # θ[6]: lambda_rho, the SCALE on the measured sectoral persistences when
+    # RHO_A_MEASURED is populated; the single common rho_A only in the legacy
+    # fallback. See RHO_A_MEASURED above.
+    rho_om=θ[5]; lambda_rho=θ[6]
+    _rhoA   = RHO_A_MEASURED[]
+    # POWER transform, NOT multiplicative (fixed 2026-08-24 after the first
+    # sector-specific run scored 8.18 against the common-rho 6.74).
+    #
+    # rho_i = rho_hat_i ^ (1 / lambda_rho)
+    #
+    # The first design was clamp(lambda_rho * rho_hat_i, 0, 0.98). Multiplying a
+    # parameter bounded on [0,1) and then clamping COLLAPSES the top of the
+    # distribution: at the estimate lambda_rho went to its bound of 2.0 and SEVEN
+    # of twelve sectors clamped to 0.98, flattening exactly the cross-sectional
+    # dispersion the change exists to introduce. That run tested a mangled
+    # specification, not this hypothesis.
+    #
+    # The power map fixes it: it is monotone, it PRESERVES THE ORDERING of the
+    # measured persistences, it maps (0,1) into (0,1) so no clamping ever binds,
+    # and lambda_rho = 1 is the identity, so the measured values are nested. Above
+    # 1 it pushes every sector toward unity while keeping them ordered and
+    # distinct; below 1, toward zero.
+    rho_A_i = _rhoA === nothing ? nothing :
+              [clamp(r <= 0 ? 0.0 : r^(1 / lambda_rho), 0.0, 0.98) for r in _rhoA]
+    # Scalar used for the legacy path, the (unused) global rho_tfp1, and the
+    # validity screen below. With measured values this is their mean.
+    rho_A = _rhoA === nothing ? lambda_rho : mean(rho_A_i)
     isigma_tfp  = @view θ[7:18]
     sigma_om_vec= @view θ[19:30]
     rho_pvstar=θ[31]; sigma_pvstar=θ[32]; rho_zeta=θ[33]; sigma_zeta=θ[34]
@@ -662,7 +801,12 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
     for i in 1:nsec
         set_param!(context,"isigma_tfp_$(i)",isigma_tfp[i])
         set_param!(context,"sigma_om_$(i)",sigma_om_vec[i])   # now EXISTS in the model (fixes C2)
-        set_param!(context,"rho_tfp1_$(i)",rho_A)             # model uses sector-specific rho_tfp1_i
+        # SECTOR-SPECIFIC TFP PERSISTENCE (2026-08-24). The .mod always had
+        # rho_tfp1_i per sector; this line used to overwrite all twelve with one
+        # common value, which is what made the autocorr(Y_i) block (19% of the
+        # objective) unfittable — the model was 4x too persistent for Agriculture
+        # and 3x too transitory for Finance at the same time.
+        set_param!(context,"rho_tfp1_$(i)", rho_A_i === nothing ? rho_A : rho_A_i[i])
         # θ[1] DRIVES THE LABOUR ADJUSTMENT COST (2026-08-19).
         #
         # It used to set only `ilabcosts`, which is a DEAD parameter: in
@@ -760,6 +904,11 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
     # Local index lookup for needed_names
     ei_sub = Dict(nm=>i for (i,nm) in enumerate(needed_names))
     ys     = context.results.model_results[1].trends.endogenous_steady_state
+
+    # Diagnostic sink — see MOMENT_DIAG_SINK above. Disarmed by default.
+    if MOMENT_DIAG_SINK[] !== nothing
+        MOMENT_DIAG_SINK[] = (Gamma = copy(Γ_v), names = copy(needed_names))
+    end
 
     @inline pstd(vn) = let k=get(ei_sub,vn,0)
         k==0 ? 0.0 : sqrt(max(Γ_v[k,k],0.0)) / max(abs(ys[needed_idx[k]]),1e-12)
@@ -1011,6 +1160,32 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         _sc = CSV.read(_scf, DataFrame)
         θ0[7:18]  = Float64.(_sc.isigma_tfp_init)   # measured (may exceed old bounds — pinned, not searched)
         θ0[19:30] = Float64.(_sc.sigma_om_init)
+        # Measured sectoral TFP persistences (2026-08-24). Stored OUTSIDE θ, like
+        # the shock sizes' cross-sectional pattern, and scaled by θ[6].
+        if !SECTORAL_RHO
+            RHO_A_MEASURED[] = nothing
+            @printf "  sectoral TFP persistence: COMMON rho_A = theta[6] (baseline; SMM_SECTORAL_RHO=1 to use the measured vector — tested and rejected, see utils.jl)\n"
+        elseif hasproperty(_sc, :rho_A_init) && !all(isnan, Float64.(_sc.rho_A_init))
+            _r = Float64.(_sc.rho_A_init)
+            any(isnan, _r) && error("""
+                rho_A_init in $(basename(_scf)) contains NaN for some sectors.
+                A partly-measured persistence vector would silently mix measured
+                and default values. Re-run compute_sectoral_shocks.jl.
+                """)
+            RHO_A_MEASURED[] = _r
+            @printf "  sectoral TFP persistence: MEASURED, %.3f-%.3f (mean %.3f), scaled by lambda_rho = theta[6]\n" minimum(_r) maximum(_r) mean(_r)
+        else
+            RHO_A_MEASURED[] = nothing
+            @printf "\n  %s\n" repeat("!", 70)
+            @printf "  WARNING: no rho_A_init column in %s.\n" basename(_scf)
+            @printf "  Falling back to a SINGLE COMMON TFP persistence, and theta[6] reverts\n"
+            @printf "  to meaning rho_A rather than a scale — but its bounds are now [%.2f, %.2f],\n" LB[6] UB[6]
+            @printf "  which are SCALE bounds, so the fallback is not a supported configuration.\n"
+            @printf "  Fix, in order:\n"
+            @printf "    FORCE_RECOMPUTE=1 julia --project=. compute_data_moments.jl\n"
+            @printf "    julia --project=. compute_sectoral_shocks.jl\n"
+            @printf "  %s\n\n" repeat("!", 70)
+        end
     end
     _ecf = joinpath(DATA_DIR, "external_shock_calibration.csv")
     if isfile(_ecf)
@@ -1064,11 +1239,68 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     # FREE transmission params — interior seeds (never at a bound):
     θ0[1]  = 1.0        # ilabcosts
     θ0[5]  = 0.5        # rho_om
-    θ0[6]  = 0.5        # rho_A
+    # θ[6] = lambda_rho, the scale on the measured sectoral persistences.
+    # Seed at 1.0 — the measured values reproduced exactly, which is the nesting
+    # point and the natural null. (Was 0.5, when θ[6] was rho_A itself.)
+    θ0[6]  = SECTORAL_RHO ? 1.0 : 0.5
     θ0[33] = 0.7        # rho_zeta (free again — see the FREE_THETA note in utils.jl)
     θ0[34] = 0.030      # sigma_zeta (interior under the raised UB of 0.15)
     # θ0[35] (etastar) and θ0[4] (kappaV) pinned above
     θ0[36] = 100.0      # kappaw
+
+    # ---- WARM START (added 2026-08-24) ------------------------------------- #
+    #
+    # THE BUG THIS FIXES. save_checkpoint's docstring calls smm_checkpoint.csv
+    # "the warm-start source" and utils.jl line 457 says it is deliberately left
+    # untagged so it can stay that source — but NOTHING EVER READ IT outside
+    # report-only mode. Every run, including every point of the epsY and epsM
+    # sweeps, cold-started from the hardcoded seeds directly above. Prior work
+    # was written to disk and thrown away.
+    #
+    # That is not cosmetic. CMA-ES on this objective lands in different basins
+    # from the same seed, so a cold restart can return a WORSE point than one
+    # already on disk — which is exactly what happened on 2026-08-24: a fresh
+    # run finished at 8.7043 while the stored theta-hat scored 8.5484 on the
+    # same data. It also means the sweep profiles are noisier than they look:
+    # each grid point was an independent cold start, so part of the curvature
+    # is basin luck rather than the parameter being profiled.
+    #
+    # ONLY the FREE dimensions are taken from the file. Pinned entries must keep
+    # the values SMM_PIN was just snapshotted with, or a stale checkpoint would
+    # silently reintroduce old pins (the ordering trap documented above).
+    #
+    #   SMM_WARM_START=0            cold start (the old behaviour)
+    #   SMM_WARM_START=1            read estimation_results/smm_checkpoint.csv
+    #   SMM_WARM_START=<path>       read that file instead
+    let ws = get(ENV, "SMM_WARM_START", "0")
+        if ws != "0"
+            path = ws == "1" ? joinpath(ESTIMATION_DIR, "smm_checkpoint.csv") :
+                   (isabspath(ws) ? ws : joinpath(ESTIMATION_DIR, ws))
+            if !isfile(path)
+                @printf "  [warm start] %s not found — cold-starting from the seeds.\n" path
+            else
+                try
+                    _w = CSV.read(path, DataFrame)
+                    _d = Dict(String(r.param) => Float64(r.value) for r in eachrow(_w)
+                              if !ismissing(r.value) && isfinite(Float64(r.value)))
+                    taken = String[]
+                    for k in FREE_THETA
+                        nm = CSV_PARAM_NAMES[k]
+                        if haskey(_d, nm)
+                            θ0[k] = clamp(_d[nm], LB[k], UB[k])
+                            push!(taken, nm)
+                        end
+                    end
+                    @printf "  [warm start] %d of %d free params seeded from %s\n" length(taken) length(FREE_THETA) basename(path)
+                    @printf "               %s\n" join(taken, ", ")
+                    @printf "               (pinned entries NOT taken from the file — SMM_PIN already snapshotted.)\n"
+                catch e
+                    @printf "  [warm start] could not read %s (%s) — cold-starting.\n" basename(path) sprint(showerror, e)
+                end
+            end
+        end
+    end
+
     θ0 = clamp.(θ0, LB, UB)              # pinned dims clamped so scaled space stays [0,1]; objective overrides exactly
     @printf "  θ-reduction: %d transmission params estimated, %d pinned (etastar calibrated to 1).\n" length(FREE_THETA) (N_THETA - length(FREE_THETA))
     @printf "  shock-mix scales free: lambda_A, lambda_om (1.0 = measured sizes; the pinned-mix model is nested at 1,1).\n"
@@ -1171,6 +1403,28 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
             Δ  = abs(dot(ψt, W*ψt) - obj_test)
             @printf "  [sensitivity] θ[%d] %-18s : |Δobj| = %.3e%s\n" p PARAM_LABELS[p] Δ (Δ < 1e-10 ? "   <<<< FLAT" : "")
             Δ < 1e-10 && push!(bad, PARAM_LABELS[p])
+        end
+        # A flat direction is normally a hard error — it means CMA-ES would
+        # "converge" instantly having estimated nothing. But there is a second
+        # cause that is NOT a modelling problem: resolve_first_order! silently
+        # falling back to the stale decision rule, which makes every parameter
+        # look flat at that theta. Look for "[WARN] ... STALE decision rule"
+        # just above; if it is there, the model is fragile at this point in the
+        # parameter space, not the parameter dead.
+        #
+        # In a SWEEP that distinction matters operationally: one fragile grid
+        # point should not abort the remaining points. SMM_STRICT_SENS=0
+        # downgrades this to a warning so the sweep records the failure and
+        # moves on. Keep it STRICT for a single production run.
+        _strict_sens = get(ENV, "SMM_STRICT_SENS", "1") != "0"
+        if !isempty(bad) && !_strict_sens
+            @printf "\n  %s\n" repeat("!", 70)
+            @printf "  FLAT DIRECTIONS: %s\n" join(bad, ", ")
+            @printf "  SMM_STRICT_SENS=0, so continuing anyway. If a STALE-decision-rule\n"
+            @printf "  warning appears above, this is solver fragility at this theta, not a\n"
+            @printf "  dead parameter — the estimate from this run is NOT trustworthy.\n"
+            @printf "  %s\n\n" repeat("!", 70)
+            empty!(bad)
         end
         isempty(bad) || error("""
 
@@ -1275,9 +1529,46 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
 
     _tid_cma() = min(Threads.threadid(), length(contexts_th))
 
+    # ---- STAGNATION STOP (2026-08-24) ------------------------------------- #
+    # ftol and xtol above are deliberately near-disabled, because premature
+    # convergence used to be the main failure mode. The cost is the opposite
+    # failure: once CMA-ES reaches a flat basin it keeps drawing candidates for
+    # thousands of evaluations that change nothing. Observed in the epsM sweep —
+    # the objective was frozen at 9.4462 from evaluation 1800 to 3000 and still
+    # running, and the epsY sweep's runtimes ranged 356s to 2616s for the same
+    # work, entirely because some points happened to trip xtol and others did not.
+    #
+    # A spread-based criterion (ftol/xtol) asks "are the candidates close
+    # together?". What actually matters is "has the BEST value improved
+    # lately?". Track that directly: stop when the best objective has not
+    # improved by more than SMM_STAG_TOL (relative) over the last
+    # SMM_STAG_EVALS evaluations. Throwing SMMTimeout reuses the existing
+    # graceful-unwind path, so best_θ is saved exactly as on a wall-clock stop.
+    stag_evals = parse(Int,     get(ENV, "SMM_STAG_EVALS", "600"))
+    stag_tol   = parse(Float64, get(ENV, "SMM_STAG_TOL",   "1e-6"))
+    stag_ref   = Ref(Inf)      # best objective at the last improvement
+    stag_at    = Ref(0)        # eval count at the last improvement
+    stagnated  = Ref(false)
+
     obj_fn = θ_sc -> begin
         # Graceful wall-clock stop — throw so CMA-ES unwinds; caller saves best θ.
         (max_seconds < Inf && (time() - t_start[]) > max_seconds) && throw(SMMTimeout())
+
+        # Graceful stagnation stop, same unwind path.
+        if stag_evals > 0
+            b = best_obj[]
+            if isfinite(b) && (stag_ref[] - b) > stag_tol * max(abs(stag_ref[]), 1.0)
+                stag_ref[] = b; stag_at[] = eval_count[]
+            elseif eval_count[] - stag_at[] > stag_evals && stag_at[] > 0
+                if !stagnated[]
+                    stagnated[] = true
+                    @printf "\n  STAGNATION STOP: no improvement > %.0e in %d evaluations (best %.6f).\n" stag_tol stag_evals b
+                    @printf "  SMM_STAG_EVALS=0 disables; raise SMM_STAG_EVALS for a longer patience.\n\n"
+                    flush(stdout)
+                end
+                throw(SMMTimeout())
+            end
+        end
 
         tid   = _tid_cma()
         θ = copy(SMM_PIN[])           # 36-vec: 29 pinned entries; 7 free set below
@@ -1402,7 +1693,8 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
             multi_threading = n_threads_active > 1)
     catch err
         if _is_timeout(err)
-            @printf "\n  Wall-clock self-limit reached — stopping CMA-ES; best θ retained.\n"
+            @printf "\n  %s — stopping CMA-ES; best θ retained.\n" (
+                stagnated[] ? "Stagnation stop" : "Wall-clock self-limit reached")
         else
             @printf "\n  [warn] CMA-ES ended early: %s\n  Proceeding with best θ found so far.\n" sprint(showerror, err)
         end
@@ -1462,15 +1754,15 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     df_res = DataFrame(param=vcat(PARAM_LABELS,fill("",N_MOMENTS-N_THETA)),
                         theta=vcat(θ_hat,fill(NaN,N_MOMENTS-N_THETA)),
                         moment=MOMENT_NAMES, data=data_moments, model=m_hat, diff=ψ_hat)
-    atomic_write_csv(joinpath(ESTIMATION_DIR,"smm_results.csv"), df_res)
+    atomic_write_csv(joinpath(ESTIMATION_DIR, tagged("smm_results.csv")), df_res)
 
     df_est = DataFrame(
         param=CSV_PARAM_NAMES,
         value=θ_hat, obj_hat=vcat([obj_hat],fill(NaN,N_THETA-1)))
-    atomic_write_csv(joinpath(ESTIMATION_DIR,"smm_estimates.csv"), df_est)
+    atomic_write_csv(joinpath(ESTIMATION_DIR, tagged("smm_estimates.csv")), df_est)
     save_checkpoint(θ_hat, obj_hat)   # checkpoint CSV + best_sol.txt + min_loss.txt
 
-    @printf "  Results: %s\n  Estimates: %s\n\n" joinpath(ESTIMATION_DIR,"smm_results.csv") joinpath(ESTIMATION_DIR,"smm_estimates.csv")
+    @printf "  Results: %s\n  Estimates: %s\n\n" joinpath(ESTIMATION_DIR, tagged("smm_results.csv")) joinpath(ESTIMATION_DIR, tagged("smm_estimates.csv"))
 
     # INFERENCE IS DELIBERATELY NOT RUN (2026-08-21, Agustín's decision).
     #

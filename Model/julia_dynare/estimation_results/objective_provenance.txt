@@ -1,18 +1,18 @@
 # Fingerprint of every file that defines the SMM objective.
 # A stored obj_hat is comparable to a fresh evaluation ONLY if
 # this block still matches. See utils.jl OBJECTIVE PROVENANCE.
-# written 2026-08-22 12:47:01
+# written 2026-08-25 14:46:58
 NK_SOE_lev_gap2.mod:41961:1787321705
-utils.jl:51311:1787415742
-smm_estimation.jl:78352:1787415774
-smm_model_moments.jl:51098:1787342629
+utils.jl:61252:1787673571
+smm_estimation.jl:96493:1787682496
+smm_model_moments.jl:52564:1787501996
 steady_ntwsoe_system.jl:6933:1787241331
 steady_ntwsoe.jl:8773:1787260084
-sectoral_moments.csv:3149:1787416262
-aggregate_moments.csv:850:1787416264
+sectoral_moments.csv:3382:1787604884
+aggregate_moments.csv:851:1787673152
 sector_calibration.csv:1991:1787259546
 IO_2021_chile_domestic.csv:1557:1787259546
 IO_2021_chile.csv:537:1732801531
 fpa_vector_few_industries_chile.csv:120:1784823463
-sectoral_shock_calibration.csv:3104:1787416658
+sectoral_shock_calibration.csv:3346:1787604888
 external_shock_calibration.csv:106:1784756541

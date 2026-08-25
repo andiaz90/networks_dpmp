@@ -87,6 +87,48 @@ sec_names = hasproperty(sec, :name) ? String.(sec.name) :
              "Trade/Hotels","Transport/Comm","Finance","Real Estate",
              "Business Serv.","Personal Serv.","Public Admin."][1:n]
 
+# --- Sector-specific TFP persistence (2026-08-24) -------------------------- #
+#
+# WHY. A single common rho_A cannot fit the data. At the 2026-08-24 estimate the
+# model was FOUR TIMES too persistent for Agriculture (data 0.107, model 0.492)
+# and THREE TIMES too transitory for Finance (data 0.894, model 0.339) — at the
+# same time, from the same parameter. The autocorr(Y_i) block was 19% of the
+# objective and structurally unimprovable, and rho_A's own sensitivity had
+# collapsed to 0.006: the estimator had stopped trying, correctly.
+#
+# HOW. The same strategy already used for the shock SIZES: measure outside the
+# model, pin, and leave ONE free scale to absorb the level. rho_A_init is the
+# first-order autocorrelation of the IDIOSYNCRATIC output cycle (common factor
+# projected out), which under the unit shock-to-output loading assumed
+# throughout this file IS the shock's persistence. No new free parameters.
+#
+# The clamp keeps every value inside the estimator's [0, 0.99) support: a
+# measured autocorrelation can come back negative on 38 quarters, and a negative
+# rho means a zig-zag IRF, not "low persistence" — the same reasoning that put a
+# non-negativity floor on the estimated AR(1) coefficients on 2026-07-22.
+rho_A_init = fill(NaN, n)
+if hasproperty(sec, :autocorr_Y_idio) && !all(isnan, Float64.(sec.autocorr_Y_idio))
+    raw = Float64.(sec.autocorr_Y_idio)
+    for i in 1:n
+        rho_A_init[i] = isnan(raw[i]) ? NaN : clamp(raw[i], 0.0, 0.98)
+    end
+    @printf "\n--- Sector-specific TFP persistence (idiosyncratic cycle) ---\n"
+    for i in 1:n
+        @printf "  %-2d %-18s rho_A = %.4f%s\n" i sec_names[i] rho_A_init[i] (
+            (!isnan(raw[i]) && raw[i] < 0) ? "   [raw $(round(raw[i],digits=3)) < 0 — clamped]" : "")
+    end
+    let ok = filter(!isnan, rho_A_init)
+        isempty(ok) || @printf "  range %.3f - %.3f, mean %.3f  (common rho_A was 0.983)\n" minimum(ok) maximum(ok) mean(ok)
+    end
+else
+    @printf "\n  %s\n" repeat("!", 70)
+    @printf "  WARNING: sectoral_moments.csv has no usable autocorr_Y_idio column.\n"
+    @printf "  rho_A_init left NaN; the estimator falls back to the COMMON rho_A and\n"
+    @printf "  the twelve sectoral persistence moments stay unfittable.\n"
+    @printf "  Fix: FORCE_RECOMPUTE=1 julia --project=. compute_data_moments.jl\n"
+    @printf "  %s\n\n" repeat("!", 70)
+end
+
 frac_supply = fill(NaN, n); frac_demand = fill(NaN, n)
 sig_supply  = fill(NaN, n); sig_demand  = fill(NaN, n)
 
@@ -116,6 +158,9 @@ out = DataFrame(
     # 0.836, so the unit-loading assumption is not far off in aggregate.
     isigma_tfp_init = sig_supply,
     sigma_om_init   = sig_demand,
+    # Sector-specific TFP persistence, measured not estimated (2026-08-24).
+    # Read by smm_estimation.jl, which applies the free scale lambda_rho.
+    rho_A_init      = rho_A_init,
     # Provenance so a downstream reader can tell a Stage-1 file from a Stage-2 one.
     stage           = fill("1-analytic", n),
     moment_source   = fill(src, n),

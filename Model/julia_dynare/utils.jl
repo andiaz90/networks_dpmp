@@ -452,6 +452,12 @@ const _SMM_SHARED_DEFS_LOADED = true
 # main_SOE_gap.jl picks up the newest θ automatically.
 const ESTIMATION_DIR = joinpath(@__DIR__, "estimation_results")
 
+# SMM_TAG suffixes the result files, so a parameter sweep does not overwrite
+# itself: SMM_TAG=epsY0.90 writes smm_estimates_epsY0.90.csv etc. The checkpoint
+# is deliberately NOT tagged — it stays the single warm-start source.
+const SMM_TAG = let t = get(ENV, "SMM_TAG", ""); isempty(t) ? "" : "_" * t end
+tagged(fname::AbstractString) = let (b, e) = splitext(fname); b * SMM_TAG * e end
+
 # ---- θ layout (36 parameters) --------------------------------------------- #
 #   θ[1] ilabcosts  θ[2] epsY  θ[3] epsM  θ[4] log(kappaV)  θ[5] rho_om
 #   θ[6] rho_A      θ[7:18] isigma_tfp_1:12   θ[19:30] sigma_om_1:12
@@ -472,12 +478,48 @@ const ESTIMATION_DIR = joinpath(@__DIR__, "estimation_results")
 # supply/demand MIX — while leaving the measured CROSS-SECTIONAL pattern intact,
 # which is what the rank-correlation moments discipline. Identification:
 # std(Y_i) pins the level, corr(Y_i,PH_i) pins the mix.
+"""
+Sector-specific TFP persistence: OPT-IN, default OFF (2026-08-24).
+
+`SMM_SECTORAL_RHO=1` pins the twelve measured rho_hat_{A,i} and makes θ[6] the
+exponent scale lambda_rho. Default OFF restores the single common rho_A.
+
+Defined HERE, above PARAM_LABELS and LB/UB, because all three switch on it.
+
+TESTED AND REJECTED, kept as a robustness exercise. Measured persistences
+(idiosyncratic cycle) run 0.10-0.89, mean 0.51, against a freely-estimated common
+rho_A of 0.983 — so the data's sectoral autocorrelations really are dispersed.
+But the fit gets WORSE, in two independent parameterizations:
+
+  common rho_A                    obj 6.738   ACsec 1.273   rbar 0.413
+  sector-specific, multiplicative obj 8.176   ACsec 1.629   rbar 0.592
+  sector-specific, power          obj 7.096   ACsec 1.452   rbar 0.474
+
+In BOTH, lambda_rho ran hard to its upper bound (2.0, then 6.0), compressing the
+cross-sectional SD from 0.258 to 0.086 and pushing every sector back toward the
+common value. The power map cannot clamp and preserves ordering, so the second
+run had every chance to keep the heterogeneity and declined.
+
+Most likely reason: rho_hat is measured on an HP-filtered residual with the
+persistent common factor projected out, and both operations strip persistence, so
+0.51 understates the shock's. The rival explanation — that the dispersion in the
+data's autocorr(Y_i) comes from network position, capital and price stickiness
+rather than from shock persistence — cannot be separated with this measurement.
+"""
+const SECTORAL_RHO = get(ENV, "SMM_SECTORAL_RHO", "0") != "0"
+
 const PARAM_LABELS = vcat(
     # θ[1] drives cl_i, the sectoral labour adjustment cost = FGI (2023 JME)
     # hiring cost c (their estimate 19.1, s.e. 12.6). The CSV key stays
     # "ilabcosts" for back-compatibility with existing checkpoints; the display
     # label says what it actually is. See the note in smm_estimation.jl.
-    ["cl (FGI hiring c)", "epsY", "epsM", "log(kappaV)", "rho_om", "rho_A"],
+    # θ[6] became a SCALE on the twelve MEASURED sectoral persistences on
+    # 2026-08-24 (it was the single common rho_A). Same back-compatibility trick
+    # as θ[1]: the CSV key stays "rho_A" so existing checkpoints still load, the
+    # display label says what it now means. lambda_rho = 1 reproduces the
+    # measured values exactly. See RHO_A_MEASURED in smm_estimation.jl.
+    ["cl (FGI hiring c)", "epsY", "epsM", "log(kappaV)", "rho_om",
+     SECTORAL_RHO ? "lambda_rho (persist. scale)" : "rho_A"],
     ["isigma_tfp_$(i)" for i in 1:12],
     ["sigma_om_$(i)" for i in 1:12],
     ["rho_pvstar", "sigma_pvstar", "rho_zeta", "sigma_zeta"],
@@ -505,13 +547,16 @@ const CSV_PARAM_NAMES = vcat(
 # (Atalay eps_m~0.10, strong complementarity): FIXED, not estimated. Low elasticities
 # keep sector-specific shocks from washing out through the network (Atalay 83%->21%).
 # Tight band (not a point) avoids the span=0 division in the CMA-ES [0,1] rescaling.
-const LB = [1e-3; 0.50; 0.19; log(1e3);   0.00;  0.10;
+# SECTORAL_RHO is defined ABOVE PARAM_LABELS — it gates the label, LB and UB of
+# theta[6], and PARAM_LABELS is built first.
+
+const LB = [1e-3; 0.50; 0.02; log(1e3);   0.00;  (SECTORAL_RHO ? 0.25 : 0.10);
             fill(1e-4, 12);
             fill(1e-5, 12);
             0.50;  0.005; 0.50; 0.0;  0.10;   # rho_zeta LB 0.00->0.50: demand shock is persistent (beta-prior convention; data autocorr(Q)=0.72)
             0.0;      # kappaw ≥ 0 (0 = flexible wages)
             0.10; 0.10]   # lambda_A, lambda_om: shock scales, 1.0 = measured values
-const UB = [50.0; 1.50; 0.21; log(1e8);   0.99;  0.99;
+const UB = [50.0; 1.50; 0.60; log(1e8);   0.99;  (SECTORAL_RHO ? 6.00 : 0.99);
             fill(0.10, 12);
             fill(0.20, 12);
             # sigma_zeta UB raised 0.05 -> 0.15 (2026-08-21). theta-hat sat
@@ -585,6 +630,20 @@ const UB = [50.0; 1.50; 0.21; log(1e8);   0.99;  0.99;
 # Fix the objective first, then decide whether a parameter is identified. If
 # rho_zeta is still flat after a run with (a) and (b) repaired, pin it then —
 # and pin it on evidence.
+# epsM (3) BAND WIDENED 2026-08-22, 0.19-0.21 -> 0.02-0.60. Still PINNED, but
+# theta0 is clamped to [LB,UB], so a sweep at SMM_EPSM=0.05 would silently have
+# been clamped back to 0.19. Widen so the grid is reachable.
+#
+# WHY epsM IS NOW THE PARAMETER OF INTEREST. The variance decomposition of
+# 2026-08-22 showed the excess cross-sectoral comovement (rbar 0.417 model vs
+# 0.221 data) is generated by NETWORK PROPAGATION of the twelve independent
+# sectoral TFP shocks — on their own they give rbar = 0.585, higher than the
+# all-shocks total. epsY could never fix that because epsY is the elasticity in
+# the M-vs-V-vs-L nest, i.e. substitution among a sector's own input TYPES.
+# Substitution ACROSS the twelve supplying sectors inside the materials bundle
+# is governed by epsM. At 0.20 a buyer cannot substitute away from a supplier
+# whose price rises, so every shock passes through to every buyer.
+#
 # epsY (2) FREED 2026-08-21, band widened 0.78-0.82 -> 0.50-1.50.
 #
 # The rbar moment added in the same pass says the network propagates about twice
@@ -599,7 +658,23 @@ const UB = [50.0; 1.50; 0.21; log(1e8);   0.99;  0.99;
 # recompute_ss_cached!. Expect the run to slow down materially.
 #
 # epsM (3) stays PINNED at 0.20. One experiment, one hypothesis.
-const FREE_THETA = [1, 2, 5, 6, 33, 34, 36, 37, 38]
+# SMM_FREE_EPSY=0 pins epsY at SMM_EPSY instead of estimating it. That is the
+# fast path AND the better one: see the note below.
+#
+# PROFILING BEATS ESTIMATING HERE. epsY shifts the STEADY STATE, so estimating
+# it inside CMA-ES forces a nonlinear SS re-solve on essentially every
+# evaluation — the single-slot SS cache never hits, because candidates differ in
+# epsY by tiny continuous amounts. Pin epsY instead and sweep it on a grid: the
+# SS is then solved ONCE per grid point, the cache hits 100%, and each run costs
+# exactly what the pre-epsY runs cost.
+#
+# It also produces a better object. A grid gives the objective PROFILE in epsY,
+# which shows whether epsY is identified at all and is a figure worth putting in
+# the paper — rather than a point estimate from a search that spent most of its
+# budget re-solving steady states.
+const FREE_THETA = get(ENV, "SMM_FREE_EPSY", "1") != "0" ?
+    [1, 2, 5, 6, 33, 34, 36, 37, 38] :
+    [1,    5, 6, 33, 34, 36, 37, 38]
 
 # Which of the SMM_PIN-overridden scalars are actually free. The objective reads
 # epsY/epsM out of SMM_PIN, NOT out of theta — so without these flags, adding an
@@ -689,6 +764,18 @@ const SECTOR_VA_SHARE = let s = [3.92, 15.78, 9.54, 2.79, 6.45, 12.66,
                                  8.31,  3.91, 8.55, 9.75, 13.27, 5.08]
     s ./ sum(s)
 end
+
+"""
+Sectors whose national-accounts output is NOT a market outcome, and whose
+volatility and price-quantity correlation are therefore accounting conventions:
+
+  9  Real Estate          — dominated by imputed rent on owner-occupied housing
+  12 Public Administration — output measured by inputs (compensation of employees)
+
+See the NON-MARKET SECTORS block at the end of `build_weighting_matrix` for what
+this does and why. Referenced by the paper's data section.
+"""
+const NONMARKET_SECTORS = [9, 12]
 
 function build_weighting_matrix(dm::Vector{<:Real})
     w = ones(N_MOMENTS)
@@ -872,6 +959,56 @@ function build_weighting_matrix(dm::Vector{<:Real})
         d = abs(dm[k]); w[k] = d > 1e-3 ? 1.0/d^2 : 1.0
     end
     w[83] = 3.0; w[84] = 3.0
+
+    # ---- NON-MARKET SECTORS (2026-08-24) ----------------------------------- #
+    #
+    # Real Estate (9) and Public Administration (12) are not market outcomes in
+    # the national accounts, so their output, deflator, and the correlation
+    # between them are accounting conventions rather than economic behaviour:
+    #
+    #   * Real Estate output is dominated by IMPUTED RENT on owner-occupied
+    #     housing. It is constructed from the housing stock and a rental
+    #     imputation, not from transactions, so it barely moves at business-cycle
+    #     frequency and it has no market price to correlate with quantity.
+    #   * Public Administration output is measured by INPUTS (compensation of
+    #     employees), the standard convention for non-market government services.
+    #     Its "price" is a deflator built from wages, so corr(Y,PH) is a
+    #     restatement of the wage-employment split, not a supply/demand mix.
+    #
+    # The data say exactly this. These two are the LEAST volatile sectors in the
+    # panel by a wide margin — std(Y) = 0.0081 and 0.0082 against 0.017-0.054 for
+    # the other ten. That is a measurement artefact of smoothing-by-construction.
+    #
+    # It was not harmless. At the warm-start optimum of 2026-08-24, corr(Y_9,PH_9)
+    # ALONE was 16.7% of the objective (data -0.400, model +0.289 — the model
+    # cannot even get the sign, and should not be asked to), and the block
+    # corr(Y_i,PH_i) was 51% of the total. The estimator was spending half its
+    # effort on twelve moments of which the single largest is an imputation.
+    #
+    # This is why the literature works with market output: Foerster, Sarte &
+    # Watson (2011 JPE) use industrial production and Atalay (2017) manufacturing.
+    #
+    # Weight 0.0 = computed and PRINTED as an untargeted diagnostic, never scored
+    # — the same treatment already given to the twelve std(L_i) at 25-36. Set
+    # SMM_W_NONMARKET to a fraction (e.g. 0.25) to downweight instead of drop.
+    #
+    # NOT changed here, and worth deciding separately: rbar (78) is still the
+    # average over all 66 sector pairs, including the 21 pairs involving 9 or 12.
+    # Consistency argues for recomputing it over the ten market sectors, but that
+    # changes the DATA target too, so it needs a compute_data_moments.jl re-run.
+    #
+    # JUDGEMENT CALL LEFT OPEN: Personal Services (11) is the second-largest
+    # contributor (10.5%) and in the Chilean CCNN it bundles education and health,
+    # much of which is public and also input-measured. It is a MIXED sector, so it
+    # is left targeted here. If it is added later, say so in the paper.
+    let wnm = parse(Float64, get(ENV, "SMM_W_NONMARKET", "0.0"))
+        for s in NONMARKET_SECTORS
+            w[s]      *= wnm      # std(Y_i)
+            w[12 + s] *= wnm      # std(PH_i)
+            w[46 + s] *= wnm      # corr(Y_i,PH_i)
+        end
+    end
+
     return Diagonal(w) |> Matrix
 end
 

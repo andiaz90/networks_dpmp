@@ -203,6 +203,14 @@ end
 # decomposition re-evaluation and on repeated candidates. Measured cost is nil:
 # the Klein cache hit rate was already 0-2% during estimation.
 const _KLEIN_STRUCT_IDX = collect(1:38)
+
+# Steady-state solve tolerance. Was hardcoded 1e-12 in three places, which is
+# far tighter than anything downstream needs: the SS is the point a FIRST-ORDER
+# approximation is taken around, and the moments are accurate to O(1e-6) at
+# best. 1e-10 is still two orders tighter than the model's own accuracy and
+# cuts trust-region iterations materially — which matters now that freeing epsY
+# makes this run on nearly every evaluation. SMM_SS_FTOL overrides.
+const _SS_FTOL = parse(Float64, get(ENV, "SMM_SS_FTOL", "1e-10"))
 const _KLEIN_THRESH     = 1e-5   # re-solve if any structural param moves > this
 
 const _KLEIN_CACHE_T    = [Ref{Matrix{Float64}}(zeros(0,0)) for _ in 1:_N_THREADS]
@@ -922,6 +930,22 @@ function recompute_ss!(context, epsY, epsM, baseline, endo_names; etastar=nothin
     get_ss(nm) = let idx = findfirst(==(nm), endo_names)
                      idx === nothing ? 1.0 : ss_vec[idx] end
 
+    # USE-BEFORE-DEFINITION BUG, fixed 2026-08-21.
+    #
+    # _sub was assigned ~40 lines below, in the write-back block, but it is
+    # captured by the f_outer! closure just below and therefore read the moment
+    # nlsolve first calls it. Julia raises UndefVarError, the try/catch wrapping
+    # this function turns that into `return false`, and the caller emits NaN
+    # moments. Result: recompute_ss! failed 100% of the time, silently.
+    #
+    # It went unnoticed because this function only runs when epsY, epsM or
+    # etastar MOVE, and all three have been pinned since the theta-reduction —
+    # so the whole path was dead code. Freeing epsY on 2026-08-21 executed it for
+    # the first time and every single evaluation failed (110/110, ~30 ms each,
+    # far too fast for a real nonlinear solve — that timing was the tell).
+    _sub = hasproperty(baseline, :subsMC_val) && baseline.subsMC_val > 0 ?
+           baseline.subsMC_val : 1.0
+
     f_outer! = (F, x) -> F .= steady_ntwsoe(x, baseline.PVstar_ss,
                                       (baseline.epsilon_val-1)/(baseline.epsilon_val*_sub),
                                       baseline.modvarrho, baseline.sigmaH_val,
@@ -941,7 +965,7 @@ function recompute_ss!(context, epsY, epsM, baseline, endo_names; etastar=nothin
     # solved Gi_ss in params_jl.mod so the warm start stays warm.
     _g0 = sum(baseline.modGi) > 0 ? sum(baseline.modGi) : 0.20
     x0 = [[get_ss("PH_$(i)") for i in 1:nsec]; get_ss("w"); get_ss("Q"); get_ss("C"); _g0]
-    res = nlsolve(f_outer!, x0; ftol=1e-12, method=:trust_region, show_trace=false)
+    res = nlsolve(f_outer!, x0; ftol=_SS_FTOL, method=:trust_region, show_trace=false)
     if !converged(res)
         # Multi-start: the trust-region solver is sensitive to the warm guess
         # when epsY/epsM/etastar move far from the cached point. Retry from a
@@ -950,7 +974,7 @@ function recompute_ss!(context, epsY, epsM, baseline, endo_names; etastar=nothin
         rng = Random.MersenneTwister(hash((epsY, epsM, eta_for_ss)) % UInt32)
         for k in 1:6
             x0p = max.(x0 .* (1 .+ 0.10 * k .* (rand(rng, length(x0)) .- 0.5)), 1e-8)
-            res = nlsolve(f_outer!, x0p; ftol=1e-12, method=:trust_region, show_trace=false)
+            res = nlsolve(f_outer!, x0p; ftol=_SS_FTOL, method=:trust_region, show_trace=false)
             converged(res) && break
         end
         converged(res) || return false
@@ -962,7 +986,7 @@ function recompute_ss!(context, epsY, epsM, baseline, endo_names; etastar=nothin
     PL_ss = fill(w_ss, nsec); PV_ss = Q_ss * baseline.PVstar_ss
     # LPR markup subsidy: MC/PH = (eps-1)/(eps*subsMC). subsMC = 1 is the
     # no-subsidy case, so a params file predating the subsidy still works.
-    _sub = hasproperty(baseline, :subsMC_val) && baseline.subsMC_val > 0 ? baseline.subsMC_val : 1.0
+    # _sub is defined above, before the f_outer! closure that captures it.
     MCi_ss = (baseline.epsilon_val-1)/(baseline.epsilon_val*_sub) .* pH_ss
     PMi_ss = (baseline.modbeta * (pH_ss .^ (1 .- modepsM))) .^ (1 ./ (1 .- modepsM))
     P_ss = (baseline.modvarrho .^ baseline.sigmaH_val .* pH_ss .^ (1-baseline.sigmaH_val)
@@ -990,7 +1014,7 @@ function recompute_ss!(context, epsY, epsM, baseline, endo_names; etastar=nothin
                                          baseline.nuK_val, baseline.modKbar),
         vcat(max.(MCi_ss./PMi_ss,1e-20), max.(MCi_ss./PL_ss,1e-20),
              max.(MCi_ss./PV_ss,1e-20), fill(0.2,nsec));
-        ftol=1e-10, method=:trust_region, show_trace=false)
+        ftol=_SS_FTOL, method=:trust_region, show_trace=false)
     (!converged(inner) || !all(isfinite, inner.zero)) && return false
 
     Yi_ss = inner.zero[3*nsec+1:4*nsec]; M_ss = inner.zero[1:nsec]
