@@ -1,10 +1,10 @@
-# NK-IOSOE SMM best solution  |  obj = 5.78664664  |  2026-08-25 14:46:58
-ilabcosts         6.248406668
+# NK-IOSOE SMM best solution  |  obj = 5.80588178  |  2026-08-25 16:25:48
+ilabcosts         7.41963778
 epsY              0.8
 epsM              0.2
 log_kappaV        13.81551056
-rho_om            0.7650108921
-rho_A             0.9893996783
+rho_om            0.989574078
+rho_A             0.9880897125
 isigma_tfp_1      0.0224434892
 isigma_tfp_2      0.03048188713
 isigma_tfp_3      0.01428076708
@@ -31,9 +31,9 @@ sigma_om_11       0.01277461121
 sigma_om_12       0.006017608204
 rho_pvstar        0.695000262
 sigma_pvstar      0.05440363818
-rho_zeta          0.8941520057
-sigma_zeta        0.01808463606
+rho_zeta          0.5004895071
+sigma_zeta        0.0005345078046
 etastar           1
-kappaw            1280.293089
-lambda_A          0.6277944156
-lambda_om         2.015260985
+kappaw            1499.999906
+lambda_A          0.6466603302
+lambda_om         1.757788766

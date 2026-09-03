@@ -1,0 +1,6 @@
+# Scratch estimation output (SMM_ESTIMATION_DIR). Exploratory runs write here so
+# they cannot overwrite estimation_results/, which holds the theta the paper's
+# figures are built from. The trailing underscore is what protects the canonical
+# folder: `estimation_results` itself never matches this pattern.
+# Nothing in here is a reportable estimate.
+estimation_results_*/

@@ -731,6 +731,49 @@ if !isempty(_theta_file)
     # before they existed reproduces the measured shock sizes exactly.
     lambda_A_val  = get(est, "lambda_A",  1.0)
     lambda_om_val = get(est, "lambda_om", 1.0)
+    # ---- ESTIMATED SECTORAL PRICE RIGIDITY θ[39:51] (2026-09-02) ---------- #
+    #
+    # WITHOUT THIS BLOCK the estimation and the figures would silently disagree:
+    # smm_estimation.jl would report a kappa-hat while main_SOE_gap.jl kept
+    # rebuilding kappa from the frequency vector at line ~453, so every IRF,
+    # decomposition and counterfactual in the paper would be at the CALIBRATED
+    # rigidities and no output would say so. That is the same class of bug as
+    # `ilabcosts` being written while `cl_i` was what the model read.
+    #
+    # The map is the one in utils.jl (kappa_from_theta), reproduced here on the
+    # named CSV columns so that main_SOE_gap.jl stays runnable without the
+    # estimation modules loaded. Silent no-op when the columns are absent (any
+    # pre-2026-09-02 checkpoint), so old runs reproduce exactly.
+    if haskey(est, "log_kappa_bar") && haskey(est, "lambda_kappa")
+        _nkpc  = [i for i in 1:nsec if i != 2]        # mining has no Phillips curve
+        _lkcal = [log(modkappa[i]) for i in _nkpc]
+        _mucal = sum(_lkcal) / length(_lkcal)
+        _kap_new = copy(modkappa)
+        for (k, i) in enumerate(_nkpc)
+            _d = get(est, "dlog_kappa_$(i)", 0.0)
+            _kap_new[i] = exp(est["log_kappa_bar"] + est["lambda_kappa"]*(_lkcal[k] - _mucal) + _d)
+        end
+        @printf "\n  kappa_i: ESTIMATED (θ[39:51] from %s)\n" basename(_theta_file)
+        @printf "    log kappa_bar = %.4f (calibrated mean %.4f)   lambda_kappa = %.4f\n" (
+            est["log_kappa_bar"]) _mucal est["lambda_kappa"]
+        @printf "    %-20s %10s %10s %9s %9s\n" "sector (dur = q)" "kappa cal" "kappa est" "dur cal" "dur est"
+        for i in _nkpc
+            # Invert the Calvo->Rotemberg map to report an implied duration:
+            #   kappa = s(eps-1)/[(1-s)(1-s*beta)]  with s = 1 - theta_q,
+            # solved numerically for s, duration = 1/theta_q quarters.
+            _dur(k) = let lo = 1e-6, hi = 1 - 1e-9
+                for _ in 1:200
+                    mid = 0.5*(lo+hi)
+                    km  = mid*(epsilon-1)/((1-mid)*(1-mid*beta_val))
+                    km < k ? (lo = mid) : (hi = mid)
+                end
+                1.0 / max(1 - 0.5*(lo+hi), 1e-9)
+            end
+            @printf "    %-20s %10.2f %10.2f %9.2f %9.2f\n" (
+                "sector $(i)") modkappa[i] _kap_new[i] _dur(modkappa[i]) _dur(_kap_new[i])
+        end
+        modkappa = _kap_new
+    end
     shock_eps_om_vec = Float64.(sigma_om_vec .> 0)   # recompute flags from loaded values
     smm_param_source = basename(_theta_file)
 end

@@ -202,7 +202,14 @@ end
 # re-solve when the identical theta is evaluated twice, which happens on the
 # decomposition re-evaluation and on repeated candidates. Measured cost is nil:
 # the Klein cache hit rate was already 0-2% during estimation.
-const _KLEIN_STRUCT_IDX = collect(1:38)
+# 2026-09-02: extended 1:38 -> 1:51 for the sectoral price rigidity block.
+# theta[39:51] set kappa_i, which enters the sectoral Phillips-curve Jacobian
+# directly (NK_SOE_lev_gap2.mod, the pricing condition). Leaving them out of the
+# cache key reproduces the stale-decision-rule bug exactly: the objective would
+# be silently FLAT in kappa, CMA-ES would "converge" without ever having moved
+# it, and every Jacobian column for the block would be zero. That is not a
+# hypothetical — it is what the excluded shock sizes did before 2026-08.
+const _KLEIN_STRUCT_IDX = collect(1:51)
 
 # Steady-state solve tolerance. Was hardcoded 1e-12 in three places, which is
 # far tighter than anything downstream needs: the SS is the point a FIRST-ORDER

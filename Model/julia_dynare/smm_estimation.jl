@@ -151,6 +151,23 @@ if isfile(sec_mom_file) && isfile(agg_mom_file)
         """)
     d_std_pigap     = agg_dict["std_pigap"]
     d_corr_pigap_om = agg_dict["corr_pigap_om"]
+    # Moments 85-109 (2026-09-02): the price-rigidity block that makes kappa_i
+    # estimable. NO fallback — running SMM_KAPPA_MODE against a moment CSV that
+    # predates these blocks would estimate a persistence parameter with no
+    # persistence moment to discipline it, which is the exact failure mode that
+    # sent rho_A to its bound.
+    (hasproperty(sec, :autocorr_PH) && hasproperty(sec, :ratio_dPH_dY) &&
+     haskey(agg_dict, "rbar_dPH")) || error("""
+        Moment CSVs are STALE: autocorr_PH / ratio_dPH_dY / rbar_dPH not found.
+        The price-rigidity block (moments 85-109) was added 2026-09-02.
+        Regenerate:
+          rm Data/sectoral_moments.csv Data/aggregate_moments.csv
+          julia --project=. compute_data_moments.jl
+          python3 Data/build_reallocation_calibration.py
+        """)
+    ac_p_d      = Float64.(sec.autocorr_PH)
+    ratio_dP_dY = Float64.(sec.ratio_dPH_dY)
+    d_rbar_dPH  = agg_dict["rbar_dPH"]
     @printf "  Loaded sectoral_moments.csv + aggregate_moments.csv\n\n"
 elseif get(ENV, "SMM_SMOKE", "0") == "1"
     # SMOKE-TEST MODE ONLY (set by smoke_test.jl): allow include-time syntax/
@@ -166,6 +183,7 @@ elseif get(ENV, "SMM_SMOKE", "0") == "1"
     d_corr_GDPQ=-0.15; d_TBGDP=-0.02; d_std_TBGDP=0.025
     d_corr_NGDP=0.698; d_corr_NAPL=0.065; d_std_omG=0.0172
     d_std_pigap=0.0154; d_corr_pigap_om=0.376
+    ac_p_d = fill(0.6, NSEC); ratio_dP_dY = fill(0.5, NSEC); d_rbar_dPH = 0.2
 else
     # NO placeholder fallback (removed 2026-07-08): estimating against
     # invented moments silently produces meaningless results.
@@ -192,7 +210,9 @@ data_moments = [y_d; p_d; l_d; d_std_GDP; d_std_pi; d_corr_GDPpi;
                 d_ac_GDP; d_ac_pi; ac_y_d;
                 # 78-84: literature-standard block
                 d_rbar_YY; d_std_Lg; d_std_Ls;
-                d_ratio_stdC; d_ratio_stdI; d_corr_CGDP; d_corr_IGDP]
+                d_ratio_stdC; d_ratio_stdI; d_corr_CGDP; d_corr_IGDP;
+                # 85-109: price-rigidity block (2026-09-02)
+                ac_p_d; ratio_dP_dY; d_rbar_dPH]
 @assert length(data_moments) == length(MOMENT_NAMES) "data_moments ($(length(data_moments))) ≠ MOMENT_NAMES ($(length(MOMENT_NAMES)))"
 
 # GUARD: NaN anywhere in data_moments poisons the objective for ALL evaluations
@@ -430,6 +450,22 @@ function build_baseline(context::Dynare.Context,
     # Applied HERE, before the pvec reads below, so the context parameters and
     # baseline.modkappa (which feeds the steady state) can never disagree.
     let ks = parse(Float64, get(ENV, "SMM_KAPPA_SCALE", "1.0"))
+        # 2026-09-02: SMM_KAPPA_SCALE and SMM_KAPPA_MODE both rescale the same
+        # twelve parameters, one at build time and one per evaluation. Together
+        # they would COMPOUND — theta[39] would be estimating a level relative to
+        # an already-shifted baseline, and the reported kappa-hat would be wrong
+        # by the factor ks with nothing in the output to reveal it.
+        (ks != 1.0 && KAPPA_MODE != "off") && error("""
+            SMM_KAPPA_SCALE=$(ks) and SMM_KAPPA_MODE=$(KAPPA_MODE) are mutually
+            exclusive: both rescale kappa_i, and their effects would compound
+            silently.
+
+            SMM_KAPPA_SCALE is the OLD build-time sweep. Its theta-native
+            replacement is SMM_KAPPA_MODE=scale, which estimates the same level
+            shift as theta[39] and reports a standard error for it.
+
+            Use one or the other, not both.
+            """)
         if ks != 1.0
             ks > 0 || error("SMM_KAPPA_SCALE must be > 0, got $(ks)")
             # THREADS=1 IS REQUIRED HERE, not merely preferred. set_param! writes
@@ -557,7 +593,17 @@ function default_theta0(context::Dynare.Context)
          pv("rho_pvstar"); pv("sigma_pvstar"); pv("rho_zeta"); pv("sigma_zeta");
          pv("etastar");
          let k = pv("kappaw"); k > 0 ? k : 115.0 end;
-         1.0; 1.0]
+         1.0; 1.0;
+         # θ[39:51] — sectoral price rigidity (2026-09-02).
+         # THE SEED IS THE NESTING POINT, and it has to be, or "SMM_KAPPA_MODE
+         # off vs scale at the seed" would not give the same model. With
+         # θ[39] = mu_cal, θ[40] = 1 and δ = 0 the map
+         #     log kappa_i = θ[39] + θ[40](log kappa_i^cal - mu_cal) + δ_i
+         # returns kappa^cal EXACTLY, sector by sector. Verification test 1
+         # (see PLAN_estimate_sectoral_kappa) checks this to machine precision.
+         let lk = [log(max(pv("kappa_$(i)"), 1e-12)) for i in KAPPA_NKPC_SECTORS]
+             vcat(sum(lk)/length(lk), 1.0, zeros(N_KAPPA))
+         end]
     # Guard: this constructor and the θ layout in utils.jl must stay in sync.
     # They are edited in different files, so a mismatch shows up as a
     # BoundsError several hundred lines away from the cause.
@@ -790,6 +836,53 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
      any(<(0),sigma_om_vec)||rho_A<0||rho_A>=1||any(<(0),isigma_tfp)||rho_pvstar<0||rho_pvstar>=1||
      sigma_pvstar<0||rho_zeta<0||rho_zeta>=1||sigma_zeta<0||
      !(0.1<etastar<8.0)||kappaw<0||kappaw>1e4) && return NAN58, false
+
+    # SECTORAL PRICE RIGIDITY (theta[39:51], 2026-09-02). Under SMM_KAPPA_MODE
+    # = "off" this returns an empty vector and nothing is written, so the "off"
+    # path touches no parameter and reproduces every earlier run exactly.
+    #
+    # kappa_i does NOT enter the steady state: pi_ss = 1 (mod/dynare_ss.csv), so
+    # the Rotemberg adjustment term (kappa/2)(Pi_H-1)^2*Y and its derivative both
+    # vanish there, and steady_ntwsoe.jl never references kappa. It is therefore
+    # deliberately absent from the `need_ss` test below — freeing kappa costs no
+    # steady-state re-solves, unlike epsY.
+    #
+    # It DOES enter the pricing-equation Jacobian, so theta[39:51] must be in
+    # _KLEIN_STRUCT_IDX or the decision-rule cache returns a stale, kappa-frozen
+    # solution and the objective is silently flat. See the note there.
+    if KAPPA_MODE != "off"
+        kappa_new = kappa_from_theta(θ, baseline.modkappa)
+        # Guard the solver, not just the bounds: a kappa outside this range is
+        # either numerically flat (Calvo duration beyond anything the quarterly
+        # data can resolve) or so flexible that the pricing equation is
+        # near-degenerate. Penalise rather than let Klein fail opaquely.
+        #
+        # SMM_KAPPA_MIN (2026-09-02) — THE FLOOR IS A BINDING CONSTRAINT, so it
+        # has to be a knob rather than a magic number. The first affine run with
+        # Finance untargeted returned lambda_kappa = 1.713, which puts
+        # Agriculture at kappa = 0.499 — exactly this floor — with 8% of
+        # evaluations rejected. Raising lambda_kappa further pushes kappa_1 under
+        # the floor and is refused, so the floor CAPS the dispersion from above
+        # and 1.713 has to be read as a LOWER BOUND, not an estimate.
+        #
+        # The default 0.5 is not arbitrary: inverting the Calvo->Rotemberg map at
+        # eps = 10 gives a price duration of 1.05 quarters, i.e. full flexibility
+        # at the finest frequency a quarterly model can resolve. Going below it
+        # buys no economics, only numerical room.
+        #
+        # Set SMM_KAPPA_MIN=0.05 to find out whether the data want MORE dispersion
+        # than the floor allows. If lambda_kappa then runs well past 1.713, the
+        # corner is confirmed and the one-dial affine map is the binding
+        # restriction — go to SMM_KAPPA_MODE=free. If it stays near 1.713, the
+        # floor was a coincidence and 1.713 is a genuine interior optimum.
+        # Watch Blanchard-Kahn and the failure count when relaxing it.
+        _kmin = parse(Float64, get(ENV, "SMM_KAPPA_MIN", "0.5"))
+        (any(!isfinite, kappa_new) || any(k -> k < _kmin || k > 5.0e4, kappa_new)) &&
+            return NAN58, false
+        @inbounds for i in KAPPA_NKPC_SECTORS
+            set_param!(context, "kappa_$(i)", kappa_new[i])
+        end
+    end
 
     set_param!(context,"kappaw",kappaw)
     set_param!(context,"ilabcosts",ilabcosts); set_param!(context,"kappaV",kappaV)
@@ -1051,6 +1144,56 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
             end
         end
 
+    # ---- 85-109: the price-rigidity block (2026-09-02) --------------------- #
+    #
+    # All three blocks come out of Γ_v and Γ1_v, which are already formed above.
+    # No new state-space machinery, no extra frequency loop, no .mod change.
+    #
+    # THE IDENTITY THAT MAKES THIS FREE. For any covariance-stationary x, y:
+    #     cov(Δx_t, Δy_t) = 2·γ_xy(0) − γ_xy(1) − γ_yx(1) = 2(Γ0_xy − Γ1_xy)
+    # where Γ1 is the SYMMETRISED lag-1 autocovariance — which is exactly what
+    # hp_filtered_cov_fast returns (it symmetrises before returning, and w_lag1
+    # weights the cospectrum by cos ω). So the differenced-series covariance is
+    # 2(Γ_v − Γ1_v), elementwise, with no approximation. Both blocks below use
+    # it, and the diagonal case var(Δx) = 2(Γ0 − Γ1) is the special case.
+    #
+    # Everything is converted to LOG deviations first — Γ_v holds LEVEL
+    # deviations — because 97-108 is a ratio ACROSS two variables with different
+    # steady states, where the normalisation does not cancel. `pstd` does the
+    # same division; this is the same convention, applied to the differences.
+    _ssb(k) = max(abs(ys[needed_idx[k]]), 1e-12)
+    @inline dvar(k) = let g = max(Γ_v[k,k], 0.0), h = Γ1_v[k,k]
+        2.0 * max(g - h, 0.0) / _ssb(k)^2
+    end
+    @inline dcov(k, l) = 2.0 * (Γ_v[k,l] - Γ1_v[k,l]) / (_ssb(k) * _ssb(l))
+
+    # 85-96: autocorrelation of the sectoral relative-price cycle. Same
+    # estimator as autocorr(Y_i) at 66-77 (`pac`), applied to PH_i — which is
+    # the point: the model must reproduce BOTH, and it is the gap between them
+    # that separates kappa_i from rho_{A,i}.
+    ac_PH_m = [pac("PH_$(i)") for i in 1:nsec]
+
+    # 97-108: std(ΔPH_i)/std(ΔY_i), the reduced form of the NKPC slope eps/kappa_i.
+    ratio_dPH_dY_m = map(1:nsec) do i
+        kp = get(ei_sub, "PH_$(i)", 0); ky = get(ei_sub, "Y_$(i)", 0)
+        (kp == 0 || ky == 0) && return NaN
+        vy = dvar(ky)
+        vy < 1e-24 ? NaN : sqrt(dvar(kp) / vy)
+    end
+
+    # 109: average pairwise correlation of sectoral price CHANGES, over the same
+    # 66 pairs as rbar_YY (78) so the two are directly comparable.
+    rbar_dPH = let acc = 0.0, np = 0
+        for i in 1:nsec, j in (i+1):nsec
+            ki = get(ei_sub, "PH_$(i)", 0); kj = get(ei_sub, "PH_$(j)", 0)
+            (ki == 0 || kj == 0) && continue
+            vi = dvar(ki); vj = dvar(kj)
+            (vi < 1e-24 || vj < 1e-24) && continue
+            acc += clamp(dcov(ki, kj) / sqrt(vi * vj), -1.0, 1.0); np += 1
+        end
+        np > 0 ? acc / np : NaN
+    end
+
     # Return 77 moments: 12×std_Y + 12×std_PH + 12×std_L + 10×aggregate +
     # 12×corr(Y_i,PH_i) + corr(N,GDP) + corr(N,GDP/N) + std(omG)
     # + std(pi_g-pi_s) + corr(pi_g-pi_s, om_g)
@@ -1060,7 +1203,9 @@ function smm_model_moments(θ::AbstractVector{<:Real}, context, baseline, endo_n
             corr_NGDP_m;corr_NAPL_m;std_omG;std_pigap;corr_pigap_om;
             pac("GDP_vol");pac("pi");[pac("Y_$(i)") for i in 1:nsec];
             rbar_YY; std_Lg_m; std_Ls_m;
-            ratio_stdC_m; ratio_stdI_m; corr_CGDP_m; corr_IGDP_m], true
+            ratio_stdC_m; ratio_stdI_m; corr_CGDP_m; corr_IGDP_m;
+            # 85-109: price-rigidity block (2026-09-02)
+            ac_PH_m; ratio_dPH_dY_m; rbar_dPH], true
 end
 
 
@@ -1235,6 +1380,23 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     #      to a normal markup (~10) and kappaV then becomes a real parameter.
     θ0[4]  = log(parse(Float64, get(ENV, "SMM_KAPPAV", "1e6")))  # log(kappaV) — PINNED
 
+    # KAPPA BLOCK PINS (2026-09-02). Like θ0[4] and θ0[35] these MUST be set
+    # BEFORE the SMM_PIN snapshot: for any index not in FREE_THETA the objective
+    # reads the value out of SMM_PIN and never sees a later assignment. That
+    # ordering trap has bitten twice in this file already.
+    #
+    # default_theta0 has already seeded θ[39:51] at the NESTING POINT
+    # (θ[39] = mean log kappa^cal, θ[40] = 1, δ = 0), which is what makes
+    # SMM_KAPPA_MODE=off and a seed-point run of any other mode the same model.
+    # These two overrides are for PROFILING: pin the dispersion at a grid value
+    # and let the level be estimated, which is rung 4 of run_kappa_ladder.sh.
+    let lk = get(ENV, "SMM_LAMBDA_KAPPA", "")
+        isempty(lk) || (θ0[40] = clamp(parse(Float64, lk), LB[40], UB[40]))
+    end
+    let kb = get(ENV, "SMM_LOG_KAPPA_BAR", "")
+        isempty(kb) || (θ0[39] = clamp(parse(Float64, kb), LB[39], UB[39]))
+    end
+
     SMM_PIN[] = copy(θ0)                  # objective reads the pinned entries from here
     # FREE transmission params — interior seeds (never at a bound):
     θ0[1]  = 1.0        # ilabcosts
@@ -1274,8 +1436,22 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     #   SMM_WARM_START=<path>       read that file instead
     let ws = get(ENV, "SMM_WARM_START", "0")
         if ws != "0"
+            # Resolve against the REDIRECTED folder first, then fall back to the
+            # canonical one (2026-09-02). Without the fallback, an exploratory
+            # run under SMM_ESTIMATION_DIR=scratch would find no checkpoint and
+            # cold-start — losing the warm start, which is the whole reason a
+            # scratch run is worth doing. See ESTIMATION_DIR in utils.jl.
             path = ws == "1" ? joinpath(ESTIMATION_DIR, "smm_checkpoint.csv") :
                    (isabspath(ws) ? ws : joinpath(ESTIMATION_DIR, ws))
+            if !isfile(path) && ESTIMATION_DIR != ESTIMATION_DIR_CANON
+                alt = ws == "1" ? joinpath(ESTIMATION_DIR_CANON, "smm_checkpoint.csv") :
+                      joinpath(ESTIMATION_DIR_CANON, ws)
+                if isfile(alt)
+                    @printf "  [warm start] %s is empty — falling back to %s\n" (
+                        basename(ESTIMATION_DIR)) alt
+                    path = alt
+                end
+            end
             if !isfile(path)
                 @printf "  [warm start] %s not found — cold-starting from the seeds.\n" path
             else
@@ -1361,6 +1537,154 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     obj_test    = dot(data_moments .- m_test, W * (data_moments .- m_test))
     m_test_copy = copy(m_test)   # used as fallback for best_moments below
     @printf "  obj(θ₀) = %.6f\n" obj_test
+
+    # ---- KAPPA BLOCK VERIFICATION (2026-09-02) ----------------------------- #
+    #
+    # Four checks, run before a single CMA-ES evaluation. Each one corresponds
+    # to a failure this codebase has ALREADY had, in another parameter:
+    #
+    #   1 NESTING       the map returns kappa^cal at the seed, to machine
+    #                   precision. If it does not, every "estimate" is measured
+    #                   from the wrong origin and the nested tests are void.
+    #   2 READ-BACK     kappa as the SOLVER sees it equals kappa(theta). This is
+    #                   the 2026-08-25 bug: a "safety" reload wiped every
+    #                   set_param! and the kappa sweep returned byte-identical
+    #                   moments at 0.1x and 4x.
+    #   3 NON-DEGENERACY  the moments actually MOVE when kappa moves. A
+    #                   byte-identical sweep means the parameter never arrived —
+    #                   it does NOT mean kappa does not matter.
+    #   4 SS INVARIANCE   pi_ss = 1, so the Rotemberg term vanishes in steady
+    #                   state and kappa must not shift it. If it does, kappa has
+    #                   leaked into the SS block and the "no re-solve" claim (and
+    #                   the run's cost) is wrong.
+    if KAPPA_MODE != "off"
+        @printf "\n  ── KAPPA BLOCK (SMM_KAPPA_MODE=%s) ──\n" KAPPA_MODE
+        _kcal = copy(baseline.modkappa)
+        _lk   = [log(_kcal[i]) for i in KAPPA_NKPC_SECTORS]
+        @printf "  kappa^cal over the %d NKPC sectors: %.1f – %.1f, mean log = %.3f\n" (
+            N_KAPPA) minimum(_kcal[KAPPA_NKPC_SECTORS]) maximum(_kcal[KAPPA_NKPC_SECTORS]) (sum(_lk)/N_KAPPA)
+        @printf "  free: %s\n" join(PARAM_LABELS[_FREE_KAPPA], ", ")
+        KAPPA_SHRINK > 0 && @printf "  ridge on the per-sector deviations: %.4g (objective is PENALISED)\n" KAPPA_SHRINK
+
+        # 1. NESTING — tests the MAP, at an explicitly constructed nesting point.
+        #
+        # NOT at θ₀. θ₀ is only the nesting point on a COLD start; a warm start
+        # seeds θ[39:40] from the checkpoint, and after the first estimation
+        # those are exactly the values that moved. Checking θ₀ therefore fired
+        # on a correct map the moment a warm start had a kappa estimate in it
+        # (2026-09-02: max rel dev 0.724, which is precisely
+        # 1 - exp(3.820 + 0.560*2.010)/508.6 for Public Admin — the map working).
+        #
+        # The invariant that actually matters is a property of kappa_from_theta,
+        # independent of where the search starts, so build the point and test it.
+        _θnest = copy(θ0)
+        _θnest[39] = sum(_lk) / N_KAPPA
+        _θnest[40] = 1.0
+        _θnest[41:(40 + N_KAPPA)] .= 0.0
+        _knest = kappa_from_theta(_θnest, _kcal)
+        _dnest = maximum(abs.(_knest[KAPPA_NKPC_SECTORS] .- _kcal[KAPPA_NKPC_SECTORS]) ./
+                         _kcal[KAPPA_NKPC_SECTORS])
+        if _dnest > 1e-10
+            error("""
+                KAPPA NESTING CHECK FAILED: max relative deviation $(_dnest).
+                kappa_from_theta must return the CALIBRATED vector exactly when
+                θ[39] = mean(log kappa^cal), θ[40] = 1 and δ = 0 — that is the
+                point every nested test is measured from. The map in utils.jl and
+                default_theta0's seeding of θ[39:51] disagree.
+                """)
+        end
+        @printf "  [1] nesting        : kappa(nesting point) == kappa^cal, max rel. dev %.2e  OK\n" _dnest
+
+        # Where the SEED sits relative to the calibration. On a cold start this
+        # is 0; on a warm start it reports how far the stored estimate has
+        # already moved, which is information, not an error.
+        let k0 = kappa_from_theta(θ0, _kcal)[KAPPA_NKPC_SECTORS],
+            kc = _kcal[KAPPA_NKPC_SECTORS]
+            d0 = maximum(abs.(k0 .- kc) ./ kc)
+            if d0 <= 1e-10
+                @printf "      seed θ₀ is AT the nesting point (cold start).\n"
+            else
+                @printf "      seed θ₀ is OFF the nesting point (warm start): log κ̄ = %.4f vs μ_cal %.4f, λ_κ = %.4f;\n" (
+                    θ0[39]) (sum(_lk)/N_KAPPA) θ0[40]
+                @printf "      implied κ spans %.1f–%.1f against the calibrated %.1f–%.1f (max rel. dev %.3f).\n" (
+                    minimum(k0)) maximum(k0) minimum(kc) maximum(kc) d0
+            end
+        end
+
+        # 2 + 3. READ-BACK and NON-DEGENERACY, at a perturbed θ. Half of the way
+        # to a 2x level shift is large enough to move any moment that kappa can
+        # move, and small enough to stay well inside the Blanchard-Kahn region.
+        _θk = copy(θ0); _θk[39] += log(2.0)
+        _mk, _okk = _safe_moments(_θk)
+        _krb = [get_param_val(context, "kappa_$(i)") for i in KAPPA_NKPC_SECTORS]
+        _kwant = kappa_from_theta(_θk, _kcal)[KAPPA_NKPC_SECTORS]
+        _bad = count(k -> !isfinite(_krb[k]) ||
+                     abs(_krb[k] - _kwant[k]) > 1e-8*max(1.0, abs(_kwant[k])), 1:N_KAPPA)
+        _bad == 0 || error("""
+            KAPPA READ-BACK FAILED: $(_bad) of $(N_KAPPA) kappa_i still held their
+            OLD values after set_param! at a perturbed θ.
+
+            This is the 2026-08-25 failure mode. The parameter never reaches the
+            solver, every evaluation returns the same moments, and the run looks
+            like a clean convergence with kappa "not identified". Check that
+            nothing calls _load_smm_params! after the set_param! block in
+            smm_model_moments — that reload refills _SMM_PARAMS from
+            context.work.params and DISCARDS the writes.
+            """)
+        @printf "  [2] read-back      : all %d kappa_i reached the solver          OK\n" N_KAPPA
+
+        if !_okk || any(isnan, _mk)
+            @printf "  [3] non-degeneracy : model FAILED to solve at 2x kappa — check BK.\n"
+        else
+            _dm_move = maximum(abs.(_mk .- m_test))
+            _dobj    = abs(dot(data_moments .- _mk, W*(data_moments .- _mk)) - obj_test)
+            _dm_move < 1e-12 && error("""
+                KAPPA NON-DEGENERACY FAILED: doubling every kappa_i moved no moment
+                by more than $(_dm_move). The parameter is not reaching the
+                decision rule. The usual cause is the Klein cache key: theta[39:51]
+                must be inside _KLEIN_STRUCT_IDX (smm_model_moments.jl), or
+                _resolve_cached! returns the previous, kappa-frozen solution.
+                Do NOT read this as "kappa does not matter".
+                """)
+            @printf "  [3] non-degeneracy : 2x kappa moves moments by %.2e, obj by %.3e  OK\n" _dm_move _dobj
+            # Which blocks respond — a one-line identification diagnostic. If the
+            # price-rigidity block (85-109) is not among the largest movers, the
+            # new moments are not doing the job they were added for.
+            for (rng, nm) in MOMENT_BLOCKS
+                _b = maximum(abs.(_mk[rng] .- m_test[rng]))
+                _b > 1e-8 && @printf "        %-52s Δ = %.3e\n" nm _b
+            end
+        end
+
+        # 4. SS INVARIANCE
+        let _ss = context.results.model_results[1].trends.endogenous_steady_state
+            _ss_now = copy(_ss)
+            # A factor of 4 down, not 10: with lambda_kappa = 1 the dispersion
+            # is still applied, so the least sticky sector falls to
+            # exp(mu_cal - log(4) - (mu_cal - log kappa_1^cal)) ≈ 2.0, safely
+            # above the kappa >= 0.5 guard in the objective. At a factor of 10
+            # it lands at 0.8 and a slightly different calibration would trip
+            # the guard, making this test pass VACUOUSLY (an early return never
+            # touches the steady state).
+            _θk2 = copy(θ0); _θk2[39] -= log(4.0)
+            _safe_moments(_θk2)
+            _dss = maximum(abs.(_ss .- _ss_now) ./ max.(abs.(_ss_now), 1e-8))
+            _dss > 1e-10 && error("""
+                KAPPA STEADY-STATE INVARIANCE FAILED: max relative SS change
+                $(_dss) when kappa was cut by a factor of 10.
+
+                With pi_ss = 1 the Rotemberg cost (kappa/2)(Pi_H-1)^2*Y and its
+                derivative both vanish in steady state, and steady_ntwsoe.jl does
+                not reference kappa. A non-zero change means kappa has leaked
+                into the SS block — which also means freeing it now costs a
+                nonlinear SS re-solve per evaluation, and the run will be far
+                slower than budgeted.
+                """)
+            @printf "  [4] SS invariance  : 0.25x kappa leaves the steady state fixed  OK\n\n"
+        end
+        # Leave the context at theta0's kappa, not the probe's.
+        _safe_moments(θ0)
+    end
 
     ψ0 = data_moments .- m_test
     # Driven by MOMENT_BLOCKS (2026-08-19) rather than hardcoded 1:12 … 59:60.
@@ -1491,7 +1815,11 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
     end
 
     # CMA-ES
-    max_evals = 300_000
+    # SMM_MAX_EVALS added 2026-09-02 so the pre-flight sensitivity scan can be
+    # run on its own (SMM_MAX_EVALS=1) without a 300k-evaluation search behind
+    # it. The scan is the cheap way to be told a parameter is not identified,
+    # and it was previously only reachable by starting a full run.
+    max_evals = parse(Int, get(ENV, "SMM_MAX_EVALS", "300000"))
     _FREE = FREE_THETA   # single source of truth in utils.jl — shared with smm_inference.jl
     @printf "--- CMA-ES ---\n"
     @printf "  %d FREE params (of %d; %d pinned) | %d moments | max %d evals | %d threads\n" length(_FREE) N_THETA (N_THETA-length(_FREE)) N_MOMENTS max_evals n_threads_active
@@ -1580,7 +1908,13 @@ function smm_run(context::Dynare.Context; endo_names_override=nothing)
         obj = try
             mm, ok = smm_model_moments(θ, contexts_th[tid], baselines_th[tid], endo_names)
             m = mm
-            (!ok || any(isnan, mm)) ? 1e8 : dot(data_moments.-mm, W*(data_moments.-mm))
+            # kappa_penalty is 0 unless SMM_KAPPA_MODE=free AND
+            # SMM_KAPPA_SHRINK>0, so the criterion is unchanged in every other
+            # configuration. It is added INSIDE the try so a shrinkage run and a
+            # plain run cannot be compared by accident: the reported objective
+            # is the penalised one, and the log line below says so.
+            (!ok || any(isnan, mm)) ? 1e8 :
+                dot(data_moments.-mm, W*(data_moments.-mm)) + kappa_penalty(θ)
         catch err
             err isa SMMTimeout && rethrow(err)
             1e8

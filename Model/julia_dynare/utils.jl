@@ -450,7 +450,29 @@ const _SMM_SHARED_DEFS_LOADED = true
 # inputs only. @__DIR__ = julia_dynare/, so the path is identical locally and
 # inside the cluster bundle; copy this folder back from the cluster and
 # main_SOE_gap.jl picks up the newest θ automatically.
-const ESTIMATION_DIR = joinpath(@__DIR__, "estimation_results")
+#
+# SMM_ESTIMATION_DIR (2026-09-02) redirects every write to a scratch folder.
+# WHY IT EXISTS. An exploratory laptop run overwrites smm_checkpoint.csv,
+# best_sol.txt and min_loss.txt IN PLACE, and writes smm_estimates.csv at the
+# end — which main_SOE_gap.jl then picks up as "the newest theta". A short,
+# under-converged run on a laptop must not be able to silently become the
+# project's headline estimate. Point it at a scratch dir instead:
+#
+#   SMM_ESTIMATION_DIR=estimation_results_local  julia ... run_smm_estimation.jl
+#
+# Relative paths resolve against julia_dynare/. Warm start still finds the REAL
+# checkpoint: _WARM_START_DIR below falls back to the canonical folder when the
+# redirected one has no checkpoint yet, so a scratch run starts from the stored
+# theta and writes nowhere near it.
+const ESTIMATION_DIR = let d = get(ENV, "SMM_ESTIMATION_DIR", "")
+    p = isempty(d) ? joinpath(@__DIR__, "estimation_results") :
+        (isabspath(d) ? d : joinpath(@__DIR__, d))
+    mkpath(p)
+    p
+end
+
+"Canonical estimation folder — the warm-start source, never redirected."
+const ESTIMATION_DIR_CANON = joinpath(@__DIR__, "estimation_results")
 
 # SMM_TAG suffixes the result files, so a parameter sweep does not overwrite
 # itself: SMM_TAG=epsY0.90 writes smm_estimates_epsY0.90.csv etc. The checkpoint
@@ -508,6 +530,120 @@ rather than from shock persistence — cannot be separated with this measurement
 """
 const SECTORAL_RHO = get(ENV, "SMM_SECTORAL_RHO", "0") != "0"
 
+# --------------------------------------------------------------------------- #
+#  SECTORAL PRICE RIGIDITY kappa_i AS AN ESTIMATED OBJECT (2026-09-02)         #
+# --------------------------------------------------------------------------- #
+"""
+Model sectors that HAVE a New Keynesian Phillips curve, and therefore a
+Rotemberg cost kappa_i worth estimating.
+
+Mining (sector 2) is excluded: `NK_SOE_lev_gap2.mod` gates it out with
+`@#if i == 2` and sets PH_2 = Q*Pcstar, the law of one price for copper. It has
+no pricing friction at any kappa, so a free kappa_2 would be a flat direction by
+construction.
+"""
+const KAPPA_NKPC_SECTORS = [1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+const N_KAPPA = length(KAPPA_NKPC_SECTORS)   # 11
+
+"""
+`SMM_KAPPA_MODE` — how the sectoral Rotemberg costs are formed from theta.
+
+The map, in every mode, is
+
+    log kappa_i(theta) = theta[39] + theta[40]*(log kappa_i^cal - mu_cal) + delta_i
+
+with mu_cal = mean over the NKPC sectors of log kappa_i^cal and
+delta = theta[41:51] (one per NKPC sector, model order KAPPA_NKPC_SECTORS).
+kappa^cal is the CALIBRATED vector currently in params_jl.mod, built by
+main_SOE_gap.jl from the frequency-of-price-adjustment vector
+(Data/fpa_vector_few_industries_chile.csv: Pasten-Schoenle-Weber US PPI
+frequencies rescaled to the one observed Chilean anchor, Albagli et al. 2026
+manufacturing 0.252/month).
+
+  "off"    (default)  kappa untouched. theta[39:51] are inert and pinned.
+                      Reproduces every pre-2026-09-02 run bit for bit.
+  "scale"  free {39}  pure LEVEL shift; theta[40]=1, delta=0. The theta-native
+                      version of the SMM_KAPPA_SCALE sweep.
+  "affine" free {39,40}  LEVEL + DISPERSION. theta[40]=0 is homogeneous
+                      stickiness; theta[39]=mu_cal with theta[40]=1 is the
+                      calibration. Both are NESTED TESTS, which is the point.
+  "free"   free {41:51}  eleven per-sector deviations from the calibrated
+                      vector, with theta[39]=mu_cal and theta[40]=1 PINNED so
+                      that the level is not collinear with the mean deviation.
+                      For the sector-by-sector comparison against micro
+                      frequency data. Use SMM_KAPPA_SHRINK > 0.
+
+Every mode nests the current calibration at its own zero point, so a null
+result is reportable rather than a failed run.
+"""
+const KAPPA_MODE = let m = lowercase(strip(get(ENV, "SMM_KAPPA_MODE", "off")))
+    m in ("off", "scale", "affine", "free") || error("""
+        SMM_KAPPA_MODE="$(m)" is not recognised. Use one of:
+          off     kappa fixed at the calibrated vector (default)
+          scale   free level              (theta[39])
+          affine  free level + dispersion (theta[39:40])
+          free    eleven free log kappa_i (theta[41:51])
+        """)
+    m
+end
+
+"""
+Ridge penalty on the per-sector deviations, added to the SMM criterion in
+"free" mode only: obj + SMM_KAPPA_SHRINK * sum(delta_i^2).
+
+Eleven kappa against 72 quarters of GDP deflators will overfit (the calibrated
+quarterly price durations run 1.57-8.41 quarters, so several sectors reset more
+than once per quarter and the data cannot resolve them). The penalty shrinks
+toward the micro-calibrated vector and makes the amount of shrinkage an
+explicit, reportable choice instead of an accident of the bounds. Report the
+estimate at several values.
+"""
+const KAPPA_SHRINK = parse(Float64, get(ENV, "SMM_KAPPA_SHRINK", "0.0"))
+
+"""
+    kappa_from_theta(θ, kappa_cal) -> Vector{Float64}
+
+Sectoral Rotemberg costs implied by θ, length `length(kappa_cal)` (all sectors,
+including mining, whose entry is returned UNCHANGED — it has no Phillips curve).
+
+Returns an empty vector when KAPPA_MODE == "off": callers must then skip the
+`set_param!` entirely rather than write the calibrated values back, so that the
+"off" path touches nothing.
+"""
+function kappa_from_theta(θ::AbstractVector{<:Real}, kappa_cal::AbstractVector{<:Real})
+    KAPPA_MODE == "off" && return Float64[]
+    length(θ) >= 51 || error("kappa_from_theta: θ has length $(length(θ)), need ≥ 51 " *
+                             "(θ[39]=log_kappa_bar, θ[40]=lambda_kappa, θ[41:51]=dlog_kappa). " *
+                             "A legacy checkpoint cannot be used with SMM_KAPPA_MODE=$(KAPPA_MODE).")
+    lk_cal = [log(kappa_cal[i]) for i in KAPPA_NKPC_SECTORS]
+    mu_cal = sum(lk_cal) / length(lk_cal)
+    out    = collect(Float64, kappa_cal)
+    @inbounds for (k, i) in enumerate(KAPPA_NKPC_SECTORS)
+        out[i] = exp(θ[39] + θ[40] * (lk_cal[k] - mu_cal) + θ[40+k])
+    end
+    return out
+end
+
+"""
+    kappa_penalty(θ) -> Float64
+
+Ridge term added to the SMM criterion, `KAPPA_SHRINK * sum(δ_i^2)` over the
+per-sector deviations θ[41:51]. Zero in every mode but "free" (where δ is
+pinned at 0 anyway) and zero when SMM_KAPPA_SHRINK is 0.
+
+Report the estimate at several values of SMM_KAPPA_SHRINK: the shrinkage is a
+choice about how much the eleven sectors are allowed to depart from the micro
+calibration, and it belongs in the paper as a choice, not buried in a bound.
+"""
+function kappa_penalty(θ::AbstractVector{<:Real})
+    (KAPPA_SHRINK <= 0 || KAPPA_MODE != "free" || length(θ) < 51) && return 0.0
+    s = 0.0
+    @inbounds for k in 41:(40 + N_KAPPA)
+        s += θ[k]^2
+    end
+    return KAPPA_SHRINK * s
+end
+
 const PARAM_LABELS = vcat(
     # θ[1] drives cl_i, the sectoral labour adjustment cost = FGI (2023 JME)
     # hiring cost c (their estimate 19.1, s.e. 12.6). The CSV key stays
@@ -526,8 +662,13 @@ const PARAM_LABELS = vcat(
     ["etastar"],
     ["kappaw"],
     ["lambda_A (TFP scale)", "lambda_om (demand scale)"],
+    # θ[39:51] — sectoral price rigidity (2026-09-02). See KAPPA_MODE above.
+    # Present in EVERY layout so that checkpoints are portable across modes;
+    # inert unless SMM_KAPPA_MODE selects them into FREE_THETA.
+    ["log kappa_bar (stick. level)", "lambda_kappa (stick. disp.)"],
+    ["dlog kappa_$(i)" for i in KAPPA_NKPC_SECTORS],
 )
-const N_THETA = length(PARAM_LABELS)   # 36
+const N_THETA = length(PARAM_LABELS)   # 51
 
 # CSV names (underscore style) — smm_checkpoint.csv / smm_estimates.csv are
 # read BY NAME in main_SOE_gap.jl (est["log_kappaV"], est["kappaw"], ...).
@@ -536,7 +677,9 @@ const CSV_PARAM_NAMES = vcat(
     ["isigma_tfp_$(i)" for i in 1:12],
     ["sigma_om_$(i)" for i in 1:12],
     ["rho_pvstar","sigma_pvstar","rho_zeta","sigma_zeta","etastar","kappaw"],
-    ["lambda_A","lambda_om"])
+    ["lambda_A","lambda_om"],
+    ["log_kappa_bar","lambda_kappa"],
+    ["dlog_kappa_$(i)" for i in KAPPA_NKPC_SECTORS])
 
 # Shock AR(1) persistences are bounded to [0, 1): non-negative (rules out
 # oscillatory structural shocks) and < 1 for stationarity — the support of the
@@ -555,7 +698,21 @@ const LB = [1e-3; 0.50; 0.02; log(1e3);   0.00;  (SECTORAL_RHO ? 0.25 : 0.10);
             fill(1e-5, 12);
             0.50;  0.005; 0.50; 0.0;  0.10;   # rho_zeta LB 0.00->0.50: demand shock is persistent (beta-prior convention; data autocorr(Q)=0.72)
             0.0;      # kappaw ≥ 0 (0 = flexible wages)
-            0.10; 0.10]   # lambda_A, lambda_om: shock scales, 1.0 = measured values
+            0.10; 0.10;   # lambda_A, lambda_om: shock scales, 1.0 = measured values
+            # theta[39] log kappa_bar. kappa = 2 is a quarterly Calvo duration of
+            # about 1.1q (essentially flexible); kappa = 800 is ~10q. The
+            # calibrated vector spans 8.0 (Agriculture) to 508.6 (Public Admin),
+            # mean log kappa = 4.22 over the eleven NKPC sectors, so both bounds
+            # sit outside the calibration with room to spare.
+            log(2.0);
+            # theta[40] lambda_kappa. 0 = HOMOGENEOUS stickiness (the restriction
+            # the paper's contribution is a rejection of); 1 = the calibrated
+            # cross-section; > 1 = more dispersed than Pasten et al.
+            0.0;
+            # theta[41:51] per-sector log deviations. +-2.5 is a factor of ~12
+            # either way on kappa_i, wide enough that a bound-hitting estimate is
+            # informative rather than an artefact of a tight box.
+            fill(-2.5, N_KAPPA)]
 const UB = [50.0; 1.50; 0.60; log(1e8);   0.99;  (SECTORAL_RHO ? 6.00 : 0.99);
             fill(0.10, 12);
             fill(0.20, 12);
@@ -580,7 +737,8 @@ const UB = [50.0; 1.50; 0.60; log(1e8);   0.99;  (SECTORAL_RHO ? 6.00 : 0.99);
             # once cl has done what it can. If kappaw settles near 1500 too, the
             # binding problem is the labour block, not the bound.
             1500.0;
-            5.00; 5.00]   # lambda_A, lambda_om ≤ 5× the measured shock sizes
+            5.00; 5.00;   # lambda_A, lambda_om ≤ 5× the measured shock sizes
+            log(800.0); 2.50; fill(2.5, N_KAPPA)]   # kappa block — see LB
 
 # ---- Moment layout (60 moments) ------------------------------------------- #
 # 61 as of 2026-08-19: std(omG), the goods expenditure share, appended LAST.
@@ -672,9 +830,25 @@ const UB = [50.0; 1.50; 0.60; log(1e8);   0.99;  (SECTORAL_RHO ? 6.00 : 0.99);
 # which shows whether epsY is identified at all and is a figure worth putting in
 # the paper — rather than a point estimate from a search that spent most of its
 # budget re-solving steady states.
-const FREE_THETA = get(ENV, "SMM_FREE_EPSY", "1") != "0" ?
+#
+# KAPPA BLOCK (2026-09-02). SMM_KAPPA_MODE appends the sectoral price-rigidity
+# indices; "off" appends nothing, so the default free set is unchanged and the
+# pre-2026-09-02 runs reproduce exactly. See KAPPA_MODE above for the map.
+#   scale  -> {39}       level only        (theta[40] pinned at 1, delta = 0)
+#   affine -> {39,40}    level + dispersion (delta = 0)
+#   free   -> {41:51}    eleven per-sector deviations; theta[39] is PINNED at
+#                        mu_cal and theta[40] at 1, otherwise the level and the
+#                        mean deviation are exactly collinear and CMA-ES would
+#                        wander along that ridge for free.
+const _FREE_KAPPA =
+    KAPPA_MODE == "scale"  ? [39] :
+    KAPPA_MODE == "affine" ? [39, 40] :
+    KAPPA_MODE == "free"   ? collect(41:(40 + N_KAPPA)) :
+                             Int[]
+
+const FREE_THETA = vcat(get(ENV, "SMM_FREE_EPSY", "1") != "0" ?
     [1, 2, 5, 6, 33, 34, 36, 37, 38] :
-    [1,    5, 6, 33, 34, 36, 37, 38]
+    [1,    5, 6, 33, 34, 36, 37, 38], _FREE_KAPPA)
 
 # Which of the SMM_PIN-overridden scalars are actually free. The objective reads
 # epsY/epsM out of SMM_PIN, NOT out of theta — so without these flags, adding an
@@ -684,7 +858,7 @@ const FREE_THETA = get(ENV, "SMM_FREE_EPSY", "1") != "0" ?
 const _FREE_EPSY = 2 in FREE_THETA
 const _FREE_EPSM = 3 in FREE_THETA
 
-const N_MOMENTS = 84
+const N_MOMENTS = 109
 const MOMENT_NAMES = vcat(
     ["std(Y_$(i))"  for i in 1:12], ["std(PH_$(i))" for i in 1:12],
     ["std(L_$(i))"  for i in 1:12],
@@ -718,7 +892,36 @@ const MOMENT_NAMES = vcat(
     # ones, not an addition on top.
     ["rbar: avg pairwise corr(Y_i,Y_j)"],
     ["std(L) goods (wtd avg)", "std(L) services (wtd avg)"],
-    ["std(C)/std(GDP)", "std(I)/std(GDP)", "corr(C,GDP)", "corr(I,GDP)"])
+    ["std(C)/std(GDP)", "std(I)/std(GDP)", "corr(C,GDP)", "corr(I,GDP)"],
+    # 85-109 (2026-09-02): THE PRICE-RIGIDITY BLOCK. Appended at the end, as
+    # every previous addition has been, so no existing index or block slice
+    # moves. Three blocks, all computed from Gamma_v and Gamma1_v, which the
+    # objective already forms — no new state-space machinery, no .mod change.
+    #
+    # 85-96  autocorr(PH_i). Until today the vector held twelve autocorr(Y_i)
+    #        and NOT ONE sectoral price autocorrelation, while kappa_i is
+    #        fundamentally a persistence parameter. A stickier price converges
+    #        more slowly to its flexible-price target, so its cycle is more
+    #        persistent. Paired with autocorr(Y_i) (66-77) this is what
+    #        SEPARATES kappa_i from the shock persistence rho_{A,i}: shock
+    #        persistence raises BOTH, stickiness raises the price one RELATIVE
+    #        to the quantity one.
+    ["autocorr(PH_$(i))" for i in 1:12],
+    # 97-108 std(dPH_i)/std(dY_i), the volatility of the CHANGE in the price
+    #        cycle over that of the output cycle — a sectoral inflation/output-
+    #        growth volatility ratio, i.e. the reduced form of the NKPC slope
+    #        eps/kappa_i. Deliberately a RATIO: the twenty-four sectoral shock
+    #        sizes are pinned at raw, unrefined measured values, so any level
+    #        moment lets sigma_i measurement error pass straight into kappa-hat.
+    #        A within-sector ratio is invariant to the scale of sigma_i.
+    #        For stationary x, var(dx) = 2(Gamma0 - Gamma1), so both are already
+    #        on hand.
+    ["std(dPH_$(i))/std(dY_$(i))" for i in 1:12],
+    # 109    average pairwise corr(dPH_i, dPH_j): the price analogue of rbar
+    #        (78). Heterogeneous stickiness and the input-output network jointly
+    #        set how much sectoral inflation comoves (Rubbo 2023), so this
+    #        speaks to the aggregate Phillips curve the paper is about.
+    ["rbar: avg pairwise corr(dPH_i,dPH_j)"])
 
 const MOMENT_BLOCKS = [
     (1:12,  "std(Y_i) sectoral output vol"),
@@ -735,6 +938,9 @@ const MOMENT_BLOCKS = [
     (78:78, "cross-sectoral comovement (rbar)"),
     (79:80, "sectoral labour dispersion G/S"),
     (81:84, "SOE great ratios (C, I)"),
+    (85:96,   "sectoral price persistence autocorr(PH_i)"),
+    (97:108,  "sectoral price/quantity vol ratio std(dPH_i)/std(dY_i)"),
+    (109:109, "cross-sectoral price comovement (rbar_dPH)"),
 ]
 
 # ---- Weighting matrix ------------------------------------------------------ #
@@ -960,6 +1166,130 @@ function build_weighting_matrix(dm::Vector{<:Real})
     end
     w[83] = 3.0; w[84] = 3.0
 
+    # ---- 85-109: THE PRICE-RIGIDITY BLOCK (2026-09-02) --------------------- #
+    #
+    # 85-96 autocorr(PH_i) — UNTARGETED BY DEFAULT (weight 0), computed and
+    #   printed as a diagnostic. The same treatment as the twelve std(L_i).
+    #
+    #   THIS BLOCK WAS BUILT TO BE TARGETED AND THE DATA SAID NO. It was added
+    #   because kappa is a persistence parameter and the moment vector had no
+    #   sectoral price persistence at all. But before targeting it, the sign was
+    #   checked against the calibrated cross-section, on the 2013Q1-2023Q4
+    #   common window with the pandemic excluded:
+    #
+    #     rank corr( log kappa_i^cal , autocorr(PH_i) )
+    #        all 11 NKPC sectors                  -0.118
+    #        9 market sectors                     -0.183
+    #        leave-one-out, market sectors  -0.48 .. -0.02   (never positive)
+    #
+    #   Theory says POSITIVE: a stickier price converges more slowly to its
+    #   flexible-price target, so its cycle is more persistent. The data give
+    #   the wrong sign, systematically, and no single sector is driving it.
+    #
+    #   The likely reason is measurement, not economics. A quarterly sectoral
+    #   GDP deflator is a VALUE-ADDED deflator computed as a residual (nominal
+    #   VA over real VA), not a transaction price, and the residual is noisiest
+    #   exactly where output is most imputed — the service sectors, which are
+    #   also the sectors the calibration makes stickiest. Classical measurement
+    #   error pushes an autocorrelation DOWN, so the noise is correlated with
+    #   kappa^cal in precisely the wrong direction. Targeting this block would
+    #   drive kappa-hat toward MORE FLEXIBLE services, backwards, and the
+    #   estimator would have no way to tell us that is what it was doing.
+    #
+    #   The volatility RATIO at 97-108 does not have this problem (it has the
+    #   right sign, -0.53 on market sectors and -0.86 dropping Financial), which
+    #   is why the identification is placed there instead.
+    #
+    #   SMM_W_AC_PH=1.0 turns it on for the robustness column. If it is ever
+    #   turned on, say in the paper that it disagrees with the micro
+    #   calibration's ordering, and why.
+    let wacp = parse(Float64, get(ENV, "SMM_W_AC_PH", "0.0"))
+        for k in 85:96
+            w[k] = wacp
+        end
+    end
+    # 97-108 std(dPH_i)/std(dY_i). A ratio of order 1, so inverse-squared-data,
+    #   as for the great ratios at 81-82. Guard at 1e-3: a near-zero data ratio
+    #   would otherwise hand one sector a weight of 1e6 and turn the objective
+    #   into that sector's price volatility, which is the 1/d^2 pathology the
+    #   sectoral blocks were rewritten to avoid in the first place. Capped at
+    #   1e4 for the same reason.
+    for k in 97:108
+        d = abs(dm[k]); w[k] = d > 1e-3 ? min(1.0/d^2, 1.0e4) : 1.0
+    end
+    # 109 rbar_dPH — a correlation, fixed weight, same 3.0 as rbar (78).
+    w[109] = parse(Float64, get(ENV, "SMM_W_RBAR_PH", "3.0"))
+    #
+    # SMM_W_RATIO_DROP — untarget named sectors in the ratio block (2026-09-02).
+    # Comma-separated model sector numbers, e.g. SMM_W_RATIO_DROP=8. Default: none.
+    #
+    # THE CASE FOR DROPPING 8 (FINANCIAL SERVICES), from the first affine run:
+    #   * data ratio 5.68, against 0.25-2.88 for every other sector. It is not a
+    #     tail of the distribution, it is a different object.
+    #   * it alone is 9.4% of the TOTAL objective, and the residual barely moves
+    #     when kappa does (5.30 -> 5.10 across the whole estimation).
+    #   * no kappa can reach it: matching it needs std(dPH_8) about ten times the
+    #     model's, which is a level the pricing block cannot produce at any
+    #     rigidity.
+    #   * financial-services value added is FISIM — an imputed interest-margin
+    #     construct — so its deflator is a residual of a residual. It was also
+    #     the outlier in the pre-implementation sign check: dropping it moved
+    #     rank corr(log kappa^cal, ratio) from -0.53 to -0.86.
+    # An unreachable moment with a large weighted residual does not identify the
+    # parameter; it just biases the LEVEL, because the only way to reduce it at
+    # all is to make every price more flexible.
+    #
+    # Left OPT-IN rather than defaulted, because it is a judgement about data
+    # quality and it belongs to the author, not to a default. Report both.
+    let dr = strip(get(ENV, "SMM_W_RATIO_DROP", ""))
+        if !isempty(dr)
+            for tok in split(dr, ',')
+                s = tryparse(Int, strip(tok))
+                (s === nothing || !(1 <= s <= 12)) &&
+                    error("SMM_W_RATIO_DROP: '$(tok)' is not a sector number in 1..12")
+                w[96 + s] = 0.0
+            end
+        end
+    end
+    #
+    # THE REPLACEMENT. Project convention since 2026-08-21: a new block is a
+    # REPLACEMENT of weaker moments by stronger ones, not an addition on top,
+    # or the objective slowly becomes a sum of everything anyone ever thought of.
+    #
+    # What comes down is 13-24, the twelve std(PH_i). They are the LEVEL price
+    # volatilities, and they carry the same information as the new ratio block
+    # in a form that is CONFOUNDED with the sectoral shock sizes: the pinned
+    # sigma_i vector is compute_sectoral_shocks.jl's raw first pass (PC1 removal
+    # and model-inversion rescaling never applied), so std(PH_i) in levels lets
+    # that measurement error pass one-for-one into kappa-hat. The ratio at
+    # 97-108 is the same economics, scale-free.
+    #
+    # Halved rather than zeroed: unlike std(L_i), std(PH_i) is still the only
+    # thing anchoring the price LEVEL volatilities, and the rank moment at 45
+    # reads their ordering. SMM_W_STDPH=1.0 restores the old weight for the
+    # robustness column; 0.0 drops them entirely.
+    #
+    # Note this leaves the price-rigidity identification resting on 97-108 and
+    # 109, since 85-96 is untargeted by default (see above). That is thinner
+    # than intended when the block was designed. The two things that would
+    # thicken it are (i) sectoral pass-through moments from a local projection
+    # on the exchange rate or oil — conditional on an exogenous common cost
+    # shock, so robust to the deflator noise that killed 85-96 — and (ii) micro
+    # frequencies from the Chilean IPP, which would make kappa calibrated rather
+    # than estimated. Both are in PLAN_estimate_sectoral_kappa_2026-09-02.md.
+    let wp = parse(Float64, get(ENV, "SMM_W_STDPH", KAPPA_MODE == "off" ? "1.0" : "0.5"))
+        for k in 13:24
+            w[k] *= wp
+        end
+    end
+    #
+    # MINING (sector 2) is untargeted in ALL THREE new blocks. It has no
+    # Phillips curve (PH_2 = Q*Pcstar, law of one price), so no kappa can move
+    # its price dynamics, and scoring it would charge the estimator for a miss
+    # it has no instrument to fix. Computed and printed as a diagnostic.
+    w[84 + 2] = 0.0    # autocorr(PH_2)          (block 85:96 -> 84+i)
+    w[96 + 2] = 0.0    # std(dPH_2)/std(dY_2)    (block 97:108 -> 96+i)
+
     # ---- NON-MARKET SECTORS (2026-08-24) ----------------------------------- #
     #
     # Real Estate (9) and Public Administration (12) are not market outcomes in
@@ -1006,6 +1336,14 @@ function build_weighting_matrix(dm::Vector{<:Real})
             w[s]      *= wnm      # std(Y_i)
             w[12 + s] *= wnm      # std(PH_i)
             w[46 + s] *= wnm      # corr(Y_i,PH_i)
+            # 2026-09-02: the same argument applies with MORE force to the new
+            # price blocks. Real Estate's deflator is an imputed-rent index and
+            # Public Admin's is built from wages, so neither has a market price
+            # whose persistence or volatility could identify a pricing friction.
+            # Leaving them targeted would let two accounting conventions set
+            # kappa for two of the eleven sectors.
+            w[84 + s] *= wnm      # autocorr(PH_i)
+            w[96 + s] *= wnm      # std(dPH_i)/std(dY_i)
         end
     end
 

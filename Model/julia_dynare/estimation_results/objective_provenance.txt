@@ -1,7 +1,7 @@
 # Fingerprint of every file that defines the SMM objective.
 # A stored obj_hat is comparable to a fresh evaluation ONLY if
 # this block still matches. See utils.jl OBJECTIVE PROVENANCE.
-# written 2026-08-25 14:46:58
+# written 2026-08-25 16:25:48
 NK_SOE_lev_gap2.mod:41961:1787321705
 utils.jl:61252:1787673571
 smm_estimation.jl:96493:1787682496

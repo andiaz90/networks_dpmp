@@ -326,6 +326,43 @@ function mcor(a::AbstractVector{<:Real}, b::AbstractVector{<:Real})
 end
 
 """
+    _dmask(x...) -> BitVector
+
+Validity mask for FIRST DIFFERENCES of one or more calendar-aligned cyclical
+series: Δx_t is kept only if quarters t and t−1 BOTH survive the pandemic mask
+and are finite in every series passed.
+
+Same reasoning as `mac1`: dropping the excluded quarters and then differencing
+would splice 2019Q4 onto 2021Q3 and call the jump a one-quarter change, which
+is precisely the movement the exclusion exists to remove. Returns a mask of
+length n−1, indexing the differences.
+"""
+function _dmask(xs::AbstractVector{<:Real}...)
+    n = length(first(xs))
+    all(length(x) == n for x in xs) ||
+        error("_dmask: series lengths differ — align the tails before calling.")
+    k = covid_keep(n)
+    for x in xs
+        k = k .& isfinite.(x)
+    end
+    return k[1:end-1] .& k[2:end]
+end
+
+"Std of the first difference of a cyclical series, pandemic-spanning pairs dropped."
+function mdstd(x::AbstractVector{<:Real})
+    p = _dmask(x)
+    sum(p) < 5 && return NaN
+    return std((x[2:end] .- x[1:end-1])[p])
+end
+
+"Correlation of the first differences of two aligned cyclical series."
+function mdcor(a::AbstractVector{<:Real}, b::AbstractVector{<:Real})
+    p = _dmask(a, b)
+    sum(p) < 5 && return NaN
+    return complete_cor((a[2:end] .- a[1:end-1])[p], (b[2:end] .- b[1:end-1])[p])
+end
+
+"""
     align_sample(values, yrs, qts, y0, q0, y1, q1)
 
 Return the subset of `values` (rows) whose (year, quarter) lies in [y0Q q0, y1Q q1].
@@ -1228,6 +1265,125 @@ end
 
 
 # =========================================================================== #
+#  9d. PRICE-RIGIDITY MOMENTS  (moments 85-109, added 2026-09-02)             #
+# =========================================================================== #
+#
+# WHY THESE EXIST. Until today the moment vector contained twelve autocorr(Y_i)
+# and NOT ONE sectoral price autocorrelation, while the sectoral Rotemberg costs
+# kappa_i were never estimated at all — they are calibrated from Pasten,
+# Schoenle & Weber (2020) US PPI frequencies rescaled to a single Chilean
+# manufacturing anchor (Albagli et al. 2026). Estimating kappa_i against the
+# existing 84 moments would have identified a persistence parameter from
+# unconditional variances alone, which is the mistake diagnosed for rho_A on
+# 2026-08-21 ("nothing in the objective pushed back against maximum
+# persistence"). Three blocks:
+#
+#   85-96   autocorr(PH_i)              price-cycle persistence
+#   97-108  std(dPH_i)/std(dY_i)        price/quantity volatility ratio
+#   109     avg pairwise corr(dPH_i,dPH_j)   cross-sectoral price comovement
+#
+# THE IDENTIFICATION ARGUMENT, for the paper. A stickier price converges more
+# slowly to its flexible-price target, so BOTH its cycle is more persistent and
+# it moves less per unit of quantity movement. Shock persistence rho_{A,i} also
+# raises price persistence — but it raises autocorr(Y_i) by the same token.
+# It is the PAIR {autocorr(Y_i) (66-77), autocorr(PH_i) (85-96)} that separates
+# stickiness from shock persistence, and the ratio block that pins the slope
+# free of the sectoral shock SIZES, which are pinned at raw measured values.
+#
+# CONVENTIONS. Identical to 9b throughout: same tail-aligned common window, same
+# trimming to the jointly valid segment, same HP(1600) filter, same pandemic
+# exclusion — with the difference that first differences drop any PAIR that
+# straddles an excluded quarter (see `_dmask`). Getting this wrong is how the
+# 44q-vs-72q sample mismatch produced a spurious -0.231 rank correlation.
+#
+# MINING (2) is computed and reported but is UNTARGETED in the objective (weight
+# 0 in build_weighting_matrix): PH_2 = Q*Pcstar in the model, the law of one
+# price for copper, so no kappa can move it.
+
+@printf "\n--- 9d. Price-rigidity moments: autocorr(PH_i), std(dPH_i)/std(dY_i) ---\n"
+
+ac_p_d       = fill(NaN, NSEC)   # 85-96
+ratio_dP_dY  = fill(NaN, NSEC)   # 97-108
+d_rbar_dPH   = NaN               # 109
+
+if !isempty(Y_qrt) && size(Y_qrt, 1) >= 20 && size(P_sample, 1) >= 20
+    nT_c = min(size(Y_qrt, 1), size(P_sample, 1))
+    # Keep each sector's price cycle so the cross-sectional block below can
+    # reuse it. Sectors whose window is too short stay `nothing`.
+    p_hp_all = Vector{Union{Nothing,Vector{Float64}}}(nothing, NSEC)
+
+    for i in 1:NSEC
+        xY = Y_qrt[end-nT_c+1:end, i]
+        xP = P_sample[end-nT_c+1:end, i]
+        bad = (xY .<= 0) .| isnan.(xY) .| (xP .<= 0) .| isnan.(xP)
+        sum(.!bad) < 20 && continue
+        i1 = findfirst(!, bad); i2 = findlast(!, bad)
+        y_hp = hp_cycle(fillmissing_linear(log.(xY[i1:i2])), LAMBDA)
+        p_hp = hp_cycle(fillmissing_linear(log.(xP[i1:i2])), LAMBDA)
+        p_hp_all[i] = p_hp
+
+        ac_p_d[i] = mac1(p_hp)
+
+        sdY = mdstd(y_hp)
+        sdP = mdstd(p_hp)
+        # Guard the denominator: a sector whose output cycle barely moves would
+        # otherwise return an enormous ratio that the inverse-squared-data
+        # weighting then turns into the entire objective.
+        ratio_dP_dY[i] = (isfinite(sdY) && sdY > 1e-6 && isfinite(sdP)) ? sdP / sdY : NaN
+    end
+
+    # 109: average pairwise correlation of sectoral price CHANGES. Computed over
+    # the same pairs as rbar_YY (all sectors) so the two are directly
+    # comparable; the note at rbar in build_weighting_matrix about restricting to
+    # market sectors applies equally here and is left open in the same way.
+    let acc = 0.0, np = 0
+        for i in 1:NSEC, j in (i+1):NSEC
+            (p_hp_all[i] === nothing || p_hp_all[j] === nothing) && continue
+            a, b = p_hp_all[i], p_hp_all[j]
+            n = min(length(a), length(b))
+            c = mdcor(a[end-n+1:end], b[end-n+1:end])
+            isnan(c) && continue
+            acc += c; np += 1
+        end
+        np > 0 && (d_rbar_dPH = acc / np)
+    end
+
+    @printf "  %-4s  %-20s %10s %12s\n" "Sec" "Name" "ac(PH)" "sd(dPH)/sd(dY)"
+    @printf "  %s\n" repeat("-", 52)
+    for i in 1:NSEC
+        tag = i in GOODS ? "[G]" : "[S]"
+        note = i == 2 ? "  (untargeted: no NKPC)" : ""
+        @printf "  %-2d %-17s%s %10.4f %12.4f%s\n" i SECTOR_NAMES[i] tag ac_p_d[i] ratio_dP_dY[i] note
+    end
+    @printf "  rbar_dPH (avg pairwise corr of sectoral price changes) = %.4f\n" d_rbar_dPH
+    #
+    # SIGN CHECK AGAINST THE CALIBRATION (2026-09-02). Run before targeting any
+    # of this, and it changed the design. On the 2013Q1-2023Q4 common window,
+    # pandemic excluded, against the calibrated kappa^cal:
+    #
+    #   rank corr(log kappa^cal, autocorr(PH_i))    -0.118 (all 11) / -0.183 (9 market)
+    #   rank corr(log kappa^cal, sd(dPH)/sd(dY))    -0.182 (all 11) / -0.533 (9 market)
+    #
+    # Theory: the first should be POSITIVE (stickier => more persistent) and the
+    # second NEGATIVE (stickier => flatter). The RATIO delivers, robustly
+    # (-0.86 dropping Financial, whose value-added deflator is a residual and
+    # whose ratio of 5.68 is a clear outlier). The AUTOCORRELATION does not, at
+    # any leave-one-out subset — most likely because a value-added deflator is
+    # noisiest where output is most imputed, i.e. in the sectors the calibration
+    # makes stickiest, and measurement error biases an autocorrelation DOWN.
+    #
+    # So 85-96 ships UNTARGETED (weight 0 in build_weighting_matrix) and 97-108
+    # carries the identification. Both are printed here either way; the numbers
+    # above are worth a paragraph in the data appendix.
+    @printf "  NOTE: autocorr(PH_i) is UNTARGETED by default — its cross-section has the\n"
+    @printf "  WRONG SIGN against kappa^cal (see the note in build_weighting_matrix).\n"
+    @printf "  The identification runs through std(dPH_i)/std(dY_i) at 97-108 instead.\n"
+else
+    @printf "  WARNING: Y_qrt / P_sample unavailable — price-rigidity moments set to NaN.\n"
+end
+
+
+# =========================================================================== #
 #  9c. IDIOSYNCRATIC SECTORAL MOMENTS — COMMON-FACTOR REMOVAL                 #
 #      (2026-08-21; refinement 1 of compute_sectoral_shocks.jl's footer)      #
 # =========================================================================== #
@@ -1596,6 +1752,9 @@ df_sec = DataFrame(
     # Sector-specific TFP persistence rho_{A,i}, measured on the idiosyncratic
     # cycle. Read by compute_sectoral_shocks.jl; NOT itself a targeted moment.
     autocorr_Y_idio = ac_Y_idio,
+    # --- Price-rigidity moments 85-108 — section 9d (2026-09-02) -----------
+    autocorr_PH  = ac_p_d,
+    ratio_dPH_dY = ratio_dP_dY,
     std_Yg   = [i in GOODS    ? d_std_Yg  : NaN for i in 1:NSEC],
     std_PHg  = [i in GOODS    ? d_std_PHg : NaN for i in 1:NSEC],
     std_Lg   = [i in GOODS    ? d_std_Lg  : NaN for i in 1:NSEC],
@@ -1613,6 +1772,7 @@ df_agg = DataFrame(
               "corr_NGDP", "corr_NAPL",
               "autocorr_GDP", "autocorr_pi",
               "rbar_YY", "ratio_stdC", "ratio_stdI", "corr_CGDP", "corr_IGDP",
+              "rbar_dPH",
               "sample_start_year", "sample_start_q",
               "sample_end_year",   "sample_end_q",
               # Sample provenance (2026-08-21). Written so the estimation log,
@@ -1627,6 +1787,7 @@ df_agg = DataFrame(
               d_corr_NGDP, d_corr_NAPL,
               d_ac_GDP,    d_ac_pi,
               d_rbar_YY, d_ratio_stdC, d_ratio_stdI, d_corr_CGDP, d_corr_IGDP,
+              d_rbar_dPH,
               Float64(SAMPLE_START.year), Float64(SAMPLE_START.q),
               Float64(SAMPLE_END.year),   Float64(SAMPLE_END.q),
               COVID_EXCLUDE ? 1.0 : 0.0,
